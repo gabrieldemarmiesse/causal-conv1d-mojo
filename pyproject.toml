@@ -1,0 +1,10 @@
+[project]
+name = "causal-conv1d-mojo"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "torch==2.9.0",
+    "causal-conv1d==1.6.1",
+]
