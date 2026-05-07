@@ -77,13 +77,22 @@ def main() -> None:
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=False,
         ) as prof:
-            with record_function("mojo"):
-                for _ in range(ITERS):
+            for _ in range(ITERS):
+                with record_function("mojo"):
                     causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation=activation)
-            with record_function("upstream"):
-                for _ in range(ITERS):
+                with record_function("upstream"):
                     upstream_fn(x, weight, bias=bias, activation=activation)
             torch.cuda.synchronize()
+
+        if (batch, dim, seqlen, width) == SHAPES[0]:
+            counts: dict[str, int] = defaultdict(int)
+            for evt in prof.events():
+                if evt.device_type == torch.autograd.DeviceType.CUDA:
+                    counts[evt.name] += 1
+            print("DEBUG kernels on first shape (counts over both impls x ITERS):")
+            for n, c in sorted(counts.items()):
+                print(f"  {c:5d}  {n}")
+            print()
 
         # key_averages is per-op rolled up; use events for per-kernel attribution.
         totals: dict[str, int] = defaultdict(int)
