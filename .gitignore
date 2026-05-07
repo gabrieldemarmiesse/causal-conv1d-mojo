@@ -18,3 +18,6 @@ wheels/
 
 # pytest
 .pytest_cache/
+
+# mojo extension build artifact
+*.so
