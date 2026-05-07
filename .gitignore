@@ -4,7 +4,7 @@ __pycache__/
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 
 # Virtual environments
 .venv
@@ -15,3 +15,6 @@ wheels/
 # vendored upstream sources for reference (not built)
 /modular/
 /causal-conv1d/
+
+# pytest
+.pytest_cache/
