@@ -47,3 +47,4 @@ causal-conv1d-mojo = { path = ".", editable = true }
 test = "pytest"
 bench = "python benchmarks/bench_causal_conv1d.py"
 bench-gpu = "python benchmarks/bench_gpu_kernel_time.py"
+bench-python = "python benchmarks/bench_python_overhead.py"
