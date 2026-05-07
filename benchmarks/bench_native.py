@@ -49,6 +49,7 @@ def call_native(x, weight, bias, out) -> None:
         weight.stride(0),
         out.stride(0),
         out.stride(1),
+        torch.cuda.current_stream().cuda_stream,
     )
 
 

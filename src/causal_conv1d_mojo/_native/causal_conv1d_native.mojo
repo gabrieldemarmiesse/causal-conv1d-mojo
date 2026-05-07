@@ -15,6 +15,7 @@ delta vs the MAX path, not to ship a general op.)
 
 from std.os import abort
 from std.math import ceildiv, exp
+from std.memory import OpaquePointer
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 from std.gpu.host import DeviceContext
@@ -106,19 +107,20 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
 ) raises -> PythonObject:
     """Specialized launch: fp16 / width=4 / has_bias=True / silu.
 
-    Python tuple positional args (12, in order):
-        0 x_data_ptr  (int)
-        1 weight_data_ptr  (int)
-        2 bias_data_ptr  (int)
-        3 output_data_ptr  (int)
-        4 batch  (int)
-        5 dim    (int)
-        6 seqlen (int)
-        7 x_batch_stride  (int)
-        8 x_c_stride      (int)
-        9 weight_c_stride (int)
+    Python tuple positional args (13, in order):
+        0  x_data_ptr  (int)
+        1  weight_data_ptr  (int)
+        2  bias_data_ptr  (int)
+        3  output_data_ptr  (int)
+        4  batch  (int)
+        5  dim    (int)
+        6  seqlen (int)
+        7  x_batch_stride  (int)
+        8  x_c_stride      (int)
+        9  weight_c_stride (int)
         10 out_batch_stride  (int)
         11 out_c_stride      (int)
+        12 cuda_stream_handle (int)  -- torch.cuda.current_stream().cuda_stream
     """
 
     var x_addr: Int = Int(py=args[0])
@@ -143,21 +145,36 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
     var dim_int: Int = Int(py=args[5])
     var seqlen_int: Int = Int(py=args[6])
 
+    var x_b_stride: Int = Int(py=args[7])
+    var x_c_stride: Int = Int(py=args[8])
+    var w_c_stride: Int = Int(py=args[9])
+    var o_b_stride: Int = Int(py=args[10])
+    var o_c_stride: Int = Int(py=args[11])
+    var stream_handle_addr: Int = Int(py=args[12])
+
     var ctx = DeviceContext()
-    ctx.enqueue_function[
+    var stream_opaque = OpaquePointer[MutAnyOrigin](
+        unsafe_from_address=stream_handle_addr
+    )
+    var stream = ctx.create_external_stream(stream_opaque)
+
+    var compiled_func = ctx.compile_function[
         fwd_kernel[DType.float16, 4, True, "silu"],
         fwd_kernel[DType.float16, 4, True, "silu"],
-    ](
+    ]()
+
+    stream.enqueue_function(
+        compiled_func,
         seqlen_int,
         x_ptr,
         w_ptr,
         b_ptr,
         o_ptr,
-        Int(py=args[7]),
-        Int(py=args[8]),
-        Int(py=args[9]),
-        Int(py=args[10]),
-        Int(py=args[11]),
+        x_b_stride,
+        x_c_stride,
+        w_c_stride,
+        o_b_stride,
+        o_c_stride,
         grid_dim=(
             ceildiv(seqlen_int, kNThreads * kNElts),
             dim_int,
