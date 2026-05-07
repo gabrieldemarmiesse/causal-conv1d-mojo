@@ -45,3 +45,4 @@ causal-conv1d-mojo = { path = ".", editable = true }
 
 [tool.pixi.tasks]
 test = "pytest"
+bench = "python benchmarks/bench_causal_conv1d.py"
