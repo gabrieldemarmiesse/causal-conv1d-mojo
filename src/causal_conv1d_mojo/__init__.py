@@ -1,52 +1,27 @@
-from functools import lru_cache
-from pathlib import Path
+"""causal_conv1d, fused into a single Mojo GPU kernel and called via a
+direct Python <-> Mojo CPython extension (no MAX framework).
+
+The extension is built from `_native/causal_conv1d_native.mojo`. Run
+`pixi run build-native` once after edits.
+
+Current specialization grid (single combo):
+    dtype = fp16
+    width = 4
+    has_bias = True
+    activation = "silu"
+    initial_states = None
+    return_final_states = False
+
+Anything outside that raises NotImplementedError.
+"""
+from __future__ import annotations
 
 import torch
-from max.experimental.torch import CustomOpLibrary
+
+from causal_conv1d_mojo._native import causal_conv1d_native as _native_mod
 
 
 __version__ = "1.6.1"
-
-
-_KERNEL_DIR = Path(__file__).parent / "kernels"
-_op_library = CustomOpLibrary(_KERNEL_DIR)
-
-
-@lru_cache(maxsize=None)
-def _get_op(
-    width: int,
-    has_bias: bool,
-    has_initial_states: bool,
-    compute_final_states: bool,
-    activation: str,
-):
-    return _op_library.causal_conv1d_fn[
-        {
-            "width": width,
-            "has_bias": has_bias,
-            "has_initial_states": has_initial_states,
-            "compute_final_states": compute_final_states,
-            "activation": activation,
-        }
-    ]
-
-
-_placeholder_cache: dict[tuple, torch.Tensor] = {}
-
-
-def _placeholder(shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-    """Return a cached zero tensor used as a kernel-arg placeholder.
-
-    The Mojo kernel takes optional inputs/outputs as real tensors but
-    `comptime if` branches them out when their feature flag is False.
-    Caching avoids a per-call allocation + zero-init kernel launch.
-    """
-    key = (shape, dtype, device.type, device.index)
-    t = _placeholder_cache.get(key)
-    if t is None:
-        t = torch.zeros(shape, dtype=dtype, device=device)
-        _placeholder_cache[key] = t
-    return t
 
 
 def causal_conv1d_fn(
@@ -70,40 +45,42 @@ def causal_conv1d_fn(
 
     out: (batch, dim, seqlen)
     """
-    if activation not in (None, "silu", "swish"):
-        raise NotImplementedError("activation must be None, silu, or swish")
     if seq_idx is not None:
         raise NotImplementedError("seq_idx is not supported")
-
-    batch, dim, _ = x.shape
-    _, width = weight.shape
-
-    has_bias = bias is not None
-    has_initial_states = initial_states is not None
-    activation_kind = "silu" if activation in ("silu", "swish") else "none"
-
-    bias_arg = bias if has_bias else _placeholder((1,), x.dtype, x.device)
-    initial_states_arg = (
-        initial_states
-        if has_initial_states
-        else _placeholder((1, 1, 1), x.dtype, x.device)
-    )
+    if initial_states is not None:
+        raise NotImplementedError("initial_states is not supported")
+    if return_final_states or final_states_out is not None:
+        raise NotImplementedError("return_final_states is not supported")
+    if activation not in ("silu", "swish"):
+        raise NotImplementedError(
+            "only activation in {'silu', 'swish'} is supported"
+        )
+    if bias is None:
+        raise NotImplementedError("bias is required")
+    if x.dtype != torch.float16 or weight.dtype != torch.float16 or bias.dtype != torch.float16:
+        raise NotImplementedError("only fp16 is supported")
+    if not x.is_cuda:
+        raise NotImplementedError("only CUDA tensors are supported")
+    if weight.shape[1] != 4:
+        raise NotImplementedError(f"only width=4 is supported (got {weight.shape[1]})")
 
     out = torch.empty_like(x)
-    if return_final_states:
-        final = (
-            final_states_out
-            if final_states_out is not None
-            else torch.empty(batch, dim, width - 1, dtype=x.dtype, device=x.device)
-        )
-    else:
-        final = _placeholder((1, 1, 1), x.dtype, x.device)
-
-    op = _get_op(
-        width, has_bias, has_initial_states, return_final_states, activation_kind
+    _native_mod.causal_conv1d_fwd_fp16_w4_silu_bias(
+        x.data_ptr(),
+        weight.data_ptr(),
+        bias.data_ptr(),
+        out.data_ptr(),
+        x.shape[0],
+        x.shape[1],
+        x.shape[2],
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        torch.cuda.current_stream().cuda_stream,
     )
-    op(out, final, x, weight, bias_arg, initial_states_arg)
-
-    if return_final_states:
-        return out, final
     return out

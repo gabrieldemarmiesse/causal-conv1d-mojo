@@ -7,6 +7,9 @@ requires-python = ">=3.14"
 dependencies = [
     "torch==2.9.0",
     "causal-conv1d==1.6.1",
+    # 'max' here only ships the Mojo compiler + runtime libs that our
+    # native .so links against (libKGENCompilerRTShared, libAsyncRTMojoBindings,
+    # etc.). We do not use the MAX framework / CustomOpLibrary at runtime.
     "max",
     # build-time deps for causal-conv1d (we disable build isolation so it
     # compiles against our pinned torch 2.9.0 instead of pulling latest)
@@ -44,9 +47,8 @@ no-build-isolation = ["causal-conv1d"]
 causal-conv1d-mojo = { path = ".", editable = true }
 
 [tool.pixi.tasks]
-test = "pytest"
-bench = "python benchmarks/bench_causal_conv1d.py"
-bench-gpu = "python benchmarks/bench_gpu_kernel_time.py"
-bench-python = "python benchmarks/bench_python_overhead.py"
 build-native = "mojo build src/causal_conv1d_mojo/_native/causal_conv1d_native.mojo --emit shared-lib -o src/causal_conv1d_mojo/_native/causal_conv1d_native.so"
-bench-native = { cmd = "python benchmarks/bench_native.py", depends-on = ["build-native"] }
+test = { cmd = "pytest", depends-on = ["build-native"] }
+bench = { cmd = "python benchmarks/bench_causal_conv1d.py", depends-on = ["build-native"] }
+bench-gpu = { cmd = "python benchmarks/bench_gpu_kernel_time.py", depends-on = ["build-native"] }
+bench-python = { cmd = "python benchmarks/bench_python_overhead.py", depends-on = ["build-native"] }

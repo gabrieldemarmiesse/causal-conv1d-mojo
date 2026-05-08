@@ -178,7 +178,7 @@ packages:
 - pypi: ./
   name: causal-conv1d-mojo
   version: 0.1.0
-  sha256: 4f0d44829f482bb5326eeb63feb6a664eb34d86909b0de70cbf3e18c9c78a0d9
+  sha256: 6af6da4b91685073a58e7123e6b9e4623f2a118e7c5ff8c0cea899131f2ba201
   requires_dist:
   - torch==2.9.0
   - causal-conv1d==1.6.1

@@ -46,9 +46,12 @@ fn fwd_kernel[
     output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     x_batch_stride: Int,
     x_c_stride: Int,
+    x_l_stride: Int,
     weight_c_stride: Int,
+    weight_w_stride: Int,
     out_batch_stride: Int,
     out_c_stride: Int,
+    out_l_stride: Int,
 ):
     alias accum_t = DType.float32
 
@@ -62,7 +65,7 @@ fn fwd_kernel[
 
     @parameter
     for k in range(width):
-        weights[k] = weight_ptr[weight_base + k].cast[accum_t]()
+        weights[k] = weight_ptr[weight_base + k * weight_w_stride].cast[accum_t]()
 
     var cur_bias: Scalar[accum_t] = 0
 
@@ -91,14 +94,14 @@ fn fwd_kernel[
             if src_t < 0:
                 val = 0
             else:
-                val = x_ptr[x_base + src_t].cast[accum_t]()
+                val = x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
             acc += val * weights[k]
 
         @parameter
         if activation == "silu":
             acc = _silu_f32(Float32(acc))
 
-        output_ptr[out_base + t] = acc.cast[dtype]()
+        output_ptr[out_base + t * out_l_stride] = acc.cast[dtype]()
 
 
 def causal_conv1d_fwd_fp16_w4_silu_bias(
@@ -107,7 +110,7 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
 ) raises -> PythonObject:
     """Specialized launch: fp16 / width=4 / has_bias=True / silu.
 
-    Python tuple positional args (13, in order):
+    Python tuple positional args (16, in order):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int)
@@ -117,10 +120,13 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
         6  seqlen (int)
         7  x_batch_stride  (int)
         8  x_c_stride      (int)
-        9  weight_c_stride (int)
-        10 out_batch_stride  (int)
-        11 out_c_stride      (int)
-        12 cuda_stream_handle (int)  -- torch.cuda.current_stream().cuda_stream
+        9  x_l_stride      (int)
+        10 weight_c_stride (int)
+        11 weight_w_stride (int)
+        12 out_batch_stride  (int)
+        13 out_c_stride      (int)
+        14 out_l_stride      (int)
+        15 cuda_stream_handle (int)  -- torch.cuda.current_stream().cuda_stream
     """
 
     var x_addr: Int = Int(py=args[0])
@@ -147,10 +153,13 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
 
     var x_b_stride: Int = Int(py=args[7])
     var x_c_stride: Int = Int(py=args[8])
-    var w_c_stride: Int = Int(py=args[9])
-    var o_b_stride: Int = Int(py=args[10])
-    var o_c_stride: Int = Int(py=args[11])
-    var stream_handle_addr: Int = Int(py=args[12])
+    var x_l_stride: Int = Int(py=args[9])
+    var w_c_stride: Int = Int(py=args[10])
+    var w_w_stride: Int = Int(py=args[11])
+    var o_b_stride: Int = Int(py=args[12])
+    var o_c_stride: Int = Int(py=args[13])
+    var o_l_stride: Int = Int(py=args[14])
+    var stream_handle_addr: Int = Int(py=args[15])
 
     var ctx = DeviceContext()
     var stream_opaque = OpaquePointer[MutAnyOrigin](
@@ -172,9 +181,12 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
         o_ptr,
         x_b_stride,
         x_c_stride,
+        x_l_stride,
         w_c_stride,
+        w_w_stride,
         o_b_stride,
         o_c_stride,
+        o_l_stride,
         grid_dim=(
             ceildiv(seqlen_int, kNThreads * kNElts),
             dim_int,
