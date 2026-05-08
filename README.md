@@ -38,22 +38,26 @@ generate; closing that gap is one of the open todos.
 ![backward](docs/bench_backward.png)
 
 Same workload but `out.backward(dout)` is included in each timed iteration.
-The mojo backward delegates to PyTorch autograd (re-runs `F.conv1d + F.silu`
-inside the backward and lets autograd differentiate it), which is correct
-and reasonably fast but pays for the recomputed forward.
+The mojo backward is a single fused kernel — grid `(dim, batch)`, block walks
+all chunks of the seqlen, accumulates per-thread `dweight[k]` and `dbias` in
+fp32 across chunks, then one `block.sum` + atomic_add per `(channel, k)` at
+the end (mirroring upstream's `causal_conv1d_bwd_kernel` launch shape).
 
 | shape (B, D, L, W) | mojo | upstream | pure PyTorch |
 | --- | ---: | ---: | ---: |
-| (1, 1024, 512, 4) | 492 μs | 435 μs | 441 μs |
-| (1, 1024, 2048, 4) | 560 μs | 459 μs | 426 μs |
-| (1, 1024, 8192, 4) | 2542 μs | 620 μs | 2086 μs |
-| (1, 4096, 2048, 4) | 2276 μs | 651 μs | 1918 μs |
-| (4, 4096, 2048, 4) | 11232 μs | 2234 μs | 9158 μs |
-| (8, 2048, 4096, 4) | 26280 μs | 3659 μs | 21009 μs |
+| (1, 1024, 512, 4) | 1196 μs | 563 μs | 597 μs |
+| (1, 1024, 2048, 4) | 1254 μs | 508 μs | 511 μs |
+| (1, 1024, 8192, 4) | **1286 μs** | 602 μs | 1852 μs |
+| (1, 4096, 2048, 4) | 3857 μs | 599 μs | 2076 μs |
+| (4, 4096, 2048, 4) | 16462 μs | 2725 μs | 10746 μs |
+| (8, 2048, 4096, 4) | **15893 μs** | 3926 μs | **24384 μs** |
 
-Upstream's hand-tuned `causal_conv1d_bwd_kernel` is currently a clear
-win for backward; ours sits between pure PyTorch and upstream. A custom
-Mojo backward kernel is the obvious next step if backward latency matters.
+Mixed picture: we beat pure PyTorch on the heaviest shape and on long-seqlen
+single-batch (`1×1024×8192`), but lose on small/medium shapes where cuDNN's
+backward is more aggressively tuned than what we get out of `block.sum +
+atomic_add`. Upstream is still the clear winner end-to-end thanks to a
+warp-level smem-exchange dout halo (instead of our extra recompute pass)
+plus vectorized `cub::BlockLoad`-style reads.
 
 ## Layout
 

@@ -299,29 +299,28 @@ fn bwd_full_kernel[
     dx_c_stride: Int,
     dx_l_stride: Int,
 ):
-    """Fused backward pass: dpre + dx + (dweight, dbias) accumulation.
+    """Fused backward: dx + (dweight, dbias) accumulation, single block
+    per (batch, channel).
 
-    For each (batch, channel) and chunk of seqlen:
-      1. Recompute pre = conv1d(x, w) + b at each output position.
-      2. dpre = dout * silu'(pre); store in shared memory.
-      3. Threads 0..(W-2) compute dpre for the W-1 lookahead positions
-         (next chunk's first W-1 outputs) so we have the halo for dx.
-      4. While computing dpre, accumulate per-thread:
-         - local_dweight[k] += dpre * x[t + k - (W-1)]
-         - local_dbias    += dpre
-      5. After barrier, each thread reads dpre + halo from smem and
-         emits its dx outputs (anti-causal conv with reversed weights).
-      6. Block-reduce local_dweight and local_dbias, then thread 0
-         atomic-adds to fp32 global accumulators (caller casts to fp16).
+    Grid: (dim, batch). Each block walks the entire seqlen via an inner
+    chunk loop, accumulating per-thread dweight/dbias across chunks in
+    fp32 registers. Only ONE block per channel-batch pair contributes
+    atomics, so the global atomic_add contention is `B` per channel,
+    not `B * num_chunks_l` (which is what the old chunk-grid layout
+    cost). This mirrors upstream's causal_conv1d_bwd_kernel grid.
+
+    Per-chunk: recompute pre, fold silu' into dpre, store to smem; the
+    first (W-1) threads also compute dpre for the next chunk's first
+    (W-1) positions for the dx halo. Then dx is the anti-causal conv on
+    smem with reversed weights.
     """
     alias accum_t = DType.float32
     alias kBufSize: Int = kNThreads * kNElts + (width - 1)
     alias smem_layout = Layout.row_major(kBufSize)
 
     var tidx: Int = thread_idx.x
-    var batch_id: Int = block_idx.z
-    var channel_id: Int = block_idx.y
-    var chunk_id: Int = block_idx.x
+    var channel_id: Int = block_idx.x
+    var batch_id: Int = block_idx.y
 
     # Load weights, bias into per-block fp32 registers.
     var weights = InlineArray[Scalar[accum_t], width](uninitialized=True)
@@ -346,122 +345,130 @@ fn bwd_full_kernel[
         address_space=AddressSpace.SHARED,
     ].stack_allocation()
 
-    var chunk_start: Int = chunk_id * kNThreads * kNElts
-    var seq_start: Int = chunk_start + tidx * kNElts
-
     var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
     var dout_base = batch_id * dout_batch_stride + channel_id * dout_c_stride
     var dx_base = batch_id * dx_batch_stride + channel_id * dx_c_stride
 
     # Per-thread accumulators for dweight (fp32, length W) and dbias.
+    # Persist ACROSS the chunk loop -- this is what makes one atomic_add
+    # per channel-batch enough.
     var local_dweight = SIMD[accum_t, width](0)
     var local_dbias: Scalar[accum_t] = 0
 
-    # === Phase 1: compute dpre for own chunk + accumulate dweight, dbias ===
-    @parameter
-    for i in range(kNElts):
-        var t = seq_start + i
-        var dpre_val: Scalar[accum_t] = 0
-        if t < seqlen:
-            # Recompute pre.
-            var pre: Scalar[accum_t] = cur_bias
-            var x_window = SIMD[accum_t, width](0)
+    var n_chunks: Int = ceildiv(seqlen, kNThreads * kNElts)
 
-            @parameter
-            for k in range(width):
-                var src_t = t + k - (width - 1)
-                if src_t >= 0:
+    for chunk in range(n_chunks):
+        var chunk_start: Int = chunk * kNThreads * kNElts
+        var seq_start: Int = chunk_start + tidx * kNElts
 
-                    @parameter
-                    if contig_inner:
-                        x_window[k] = x_ptr[x_base + src_t].cast[accum_t]()
-                    else:
-                        x_window[k] = x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
-                pre += x_window[k] * weights[k]
-
-            # silu'(pre)
-            var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
-            var silu_grad: Scalar[accum_t] = sig * (1.0 + pre * (1.0 - sig))
-
-            var dout_val: Scalar[accum_t]
-
-            @parameter
-            if contig_inner:
-                dout_val = dout_ptr[dout_base + t].cast[accum_t]()
-            else:
-                dout_val = dout_ptr[dout_base + t * dout_l_stride].cast[accum_t]()
-
-            dpre_val = dout_val * silu_grad
-            local_dbias += dpre_val
-
-            # dweight[d, k] += dpre * x[t + k - (W-1)]; reuse x_window.
-            @parameter
-            for k in range(width):
-                local_dweight[k] += dpre_val * x_window[k]
-
-        dpre_smem[tidx * kNElts + i] = dpre_val
-
-    # === Phase 2: halo dpre values for next chunk's first W-1 positions ===
-    if tidx < (width - 1):
-        var t_halo = chunk_start + kNThreads * kNElts + tidx
-        var dpre_halo: Scalar[accum_t] = 0
-        if t_halo < seqlen:
-            var pre: Scalar[accum_t] = cur_bias
-
-            @parameter
-            for k in range(width):
-                var src_t = t_halo + k - (width - 1)
-                var val: Scalar[accum_t] = 0
-                if src_t >= 0:
-
-                    @parameter
-                    if contig_inner:
-                        val = x_ptr[x_base + src_t].cast[accum_t]()
-                    else:
-                        val = x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
-                pre += val * weights[k]
-
-            var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
-            var silu_grad: Scalar[accum_t] = sig * (1.0 + pre * (1.0 - sig))
-            var dout_val: Scalar[accum_t]
-
-            @parameter
-            if contig_inner:
-                dout_val = dout_ptr[dout_base + t_halo].cast[accum_t]()
-            else:
-                dout_val = dout_ptr[dout_base + t_halo * dout_l_stride].cast[accum_t]()
-
-            dpre_halo = dout_val * silu_grad
-
-        dpre_smem[kNThreads * kNElts + tidx] = dpre_halo
-
-    barrier()
-
-    # === Phase 3: dx (anti-causal conv from smem) ===
-    @parameter
-    for i in range(kNElts):
-        var t = seq_start + i
-        if t >= seqlen:
-            break
-        var dx_val: Scalar[accum_t] = 0
-
+        # === Phase 1: dpre + accumulate dweight, dbias for this chunk ===
         @parameter
-        for k in range(width):
-            var smem_idx = tidx * kNElts + i + k
-            var dpre_smem_val = dpre_smem[smem_idx][0]
-            dx_val += dpre_smem_val * weights[width - 1 - k]
+        for i in range(kNElts):
+            var t = seq_start + i
+            var dpre_val: Scalar[accum_t] = 0
+            if t < seqlen:
+                var pre: Scalar[accum_t] = cur_bias
+                var x_window = SIMD[accum_t, width](0)
 
+                @parameter
+                for k in range(width):
+                    var src_t = t + k - (width - 1)
+                    if src_t >= 0:
+
+                        @parameter
+                        if contig_inner:
+                            x_window[k] = x_ptr[x_base + src_t].cast[accum_t]()
+                        else:
+                            x_window[k] = x_ptr[
+                                x_base + src_t * x_l_stride
+                            ].cast[accum_t]()
+                    pre += x_window[k] * weights[k]
+
+                var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+                var silu_grad: Scalar[accum_t] = sig * (1.0 + pre * (1.0 - sig))
+                var dout_val: Scalar[accum_t]
+
+                @parameter
+                if contig_inner:
+                    dout_val = dout_ptr[dout_base + t].cast[accum_t]()
+                else:
+                    dout_val = dout_ptr[
+                        dout_base + t * dout_l_stride
+                    ].cast[accum_t]()
+
+                dpre_val = dout_val * silu_grad
+                local_dbias += dpre_val
+
+                @parameter
+                for k in range(width):
+                    local_dweight[k] += dpre_val * x_window[k]
+
+            dpre_smem[tidx * kNElts + i] = dpre_val
+
+        # === Phase 2: halo dpre for next chunk's first (W-1) positions ===
+        if tidx < (width - 1):
+            var t_halo = chunk_start + kNThreads * kNElts + tidx
+            var dpre_halo: Scalar[accum_t] = 0
+            if t_halo < seqlen:
+                var pre: Scalar[accum_t] = cur_bias
+
+                @parameter
+                for k in range(width):
+                    var src_t = t_halo + k - (width - 1)
+                    var val: Scalar[accum_t] = 0
+                    if src_t >= 0:
+
+                        @parameter
+                        if contig_inner:
+                            val = x_ptr[x_base + src_t].cast[accum_t]()
+                        else:
+                            val = x_ptr[
+                                x_base + src_t * x_l_stride
+                            ].cast[accum_t]()
+                    pre += val * weights[k]
+
+                var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+                var silu_grad: Scalar[accum_t] = sig * (1.0 + pre * (1.0 - sig))
+                var dout_val: Scalar[accum_t]
+
+                @parameter
+                if contig_inner:
+                    dout_val = dout_ptr[dout_base + t_halo].cast[accum_t]()
+                else:
+                    dout_val = dout_ptr[
+                        dout_base + t_halo * dout_l_stride
+                    ].cast[accum_t]()
+
+                dpre_halo = dout_val * silu_grad
+
+            dpre_smem[kNThreads * kNElts + tidx] = dpre_halo
+
+        barrier()
+
+        # === Phase 3: dx (anti-causal conv from smem) ===
         @parameter
-        if contig_inner:
-            dx_ptr[dx_base + t] = dx_val.cast[dtype]()
-        else:
-            dx_ptr[dx_base + t * dx_l_stride] = dx_val.cast[dtype]()
+        for i in range(kNElts):
+            var t = seq_start + i
+            if t < seqlen:
+                var dx_val: Scalar[accum_t] = 0
 
-    # === Phase 4: block-reduce dweight (one scalar reduce per k), dbias,
-    #     and atomic-add to global. block.sum on a SIMD vector does
-    #     val.reduce_add() FIRST and then block-reduces the scalar, so we
-    #     can't pack the W slots into one call -- need W scalar reductions.
+                @parameter
+                for k in range(width):
+                    var smem_idx = tidx * kNElts + i + k
+                    var dpre_smem_val = dpre_smem[smem_idx][0]
+                    dx_val += dpre_smem_val * weights[width - 1 - k]
 
+                @parameter
+                if contig_inner:
+                    dx_ptr[dx_base + t] = dx_val.cast[dtype]()
+                else:
+                    dx_ptr[dx_base + t * dx_l_stride] = dx_val.cast[dtype]()
+
+        # Make sure all phase-3 reads are done before next chunk's
+        # phase 1 overwrites the smem buffer.
+        barrier()
+
+    # === Phase 4: block-reduce dweight, dbias and atomic-add to global ===
     @parameter
     for k in range(width):
         var block_dw_k = gpu_block.sum[
@@ -792,11 +799,8 @@ def causal_conv1d_bwd_full_fp16_w4_silu_bias(
     )
     var stream = ctx.create_external_stream(stream_opaque)
 
-    var grid = (
-        ceildiv(seqlen_int, kNThreads * kNElts),
-        dim_int,
-        batch_int,
-    )
+    # One block per (channel, batch); block walks all chunks of seqlen.
+    var grid = (dim_int, batch_int)
 
     if (
         x_l_stride == 1

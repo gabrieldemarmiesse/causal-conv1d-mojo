@@ -71,29 +71,21 @@ class _CausalConv1dFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
-        # Re-runs F.conv1d + F.silu inside an autograd graph and asks
-        # autograd for all three gradients in a single traversal. This
-        # is slower than upstream's hand-fused causal_conv1d_bwd_kernel
-        # but faster than every other arrangement we tried (manual
-        # gradient formulas, mojo-dx-plus-autograd-dweight, fully fused
-        # mojo backward -- the latter is in the .mojo source as
-        # `bwd_full_kernel` but currently ~6x slower than this path due
-        # to atomic-add contention + 5 sequential block.sum reductions
-        # per block; tracked as a perf TODO).
         x, weight, bias = ctx.saved_tensors
         D, W = weight.shape
-        L = x.shape[-1]
-        with torch.enable_grad():
-            x_g = x.detach().requires_grad_()
-            w_g = weight.detach().requires_grad_()
-            b_g = bias.detach().requires_grad_()
-            out = F.silu(
-                F.conv1d(
-                    x_g, w_g.unsqueeze(1), b_g, padding=W - 1, groups=D
-                )[..., :L]
-            )
-            dx, dw, db = torch.autograd.grad(out, [x_g, w_g, b_g], dout)
-        return dx, dw, db
+
+        if dout.stride(-1) != 1:
+            dout = dout.contiguous()
+
+        dx = torch.empty_like(x)
+        # Per-block dweight/dbias contributions are atomic-added in fp32
+        # to avoid losing mantissa bits across batches.
+        dweight_acc = torch.zeros(D, W, dtype=torch.float32, device=x.device)
+        dbias_acc = torch.zeros(D, dtype=torch.float32, device=x.device)
+
+        _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc)
+
+        return dx, dweight_acc.to(weight.dtype), dbias_acc.to(bias.dtype)
 
 
 def causal_conv1d_fn(
