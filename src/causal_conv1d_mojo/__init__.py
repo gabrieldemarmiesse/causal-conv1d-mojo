@@ -46,6 +46,19 @@ def _native_bwd_dx(dpre, weight, dx):
     )
 
 
+def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc):
+    _native_mod.causal_conv1d_bwd_full_fp16_w4_silu_bias(
+        x.data_ptr(), weight.data_ptr(), bias.data_ptr(), dout.data_ptr(),
+        dx.data_ptr(), dweight_acc.data_ptr(), dbias_acc.data_ptr(),
+        x.shape[0], x.shape[1], x.shape[2],
+        x.stride(0), x.stride(1), x.stride(2),
+        weight.stride(0), weight.stride(1),
+        dout.stride(0), dout.stride(1), dout.stride(2),
+        dx.stride(0), dx.stride(1), dx.stride(2),
+        torch.cuda.current_stream().cuda_stream,
+    )
+
+
 class _CausalConv1dFn(torch.autograd.Function):
     """fp16 / width=4 / has_bias=True / silu autograd op."""
 
@@ -58,38 +71,28 @@ class _CausalConv1dFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
+        # Re-runs F.conv1d + F.silu inside an autograd graph and asks
+        # autograd for all three gradients in a single traversal. This
+        # is slower than upstream's hand-fused causal_conv1d_bwd_kernel
+        # but faster than every other arrangement we tried (manual
+        # gradient formulas, mojo-dx-plus-autograd-dweight, fully fused
+        # mojo backward -- the latter is in the .mojo source as
+        # `bwd_full_kernel` but currently ~6x slower than this path due
+        # to atomic-add contention + 5 sequential block.sum reductions
+        # per block; tracked as a perf TODO).
         x, weight, bias = ctx.saved_tensors
         D, W = weight.shape
         L = x.shape[-1]
-
-        if dout.stride(-1) != 1:
-            dout = dout.contiguous()
-
-        # Single pytorch forward inside an autograd graph: just the
-        # conv1d (no silu, no autograd through silu). silu' is computed
-        # by hand and folded into dpre. Then one autograd.grad call
-        # gets dweight/dbias from the conv1d graph using dpre as the
-        # upstream gradient. dx is our native kernel.
         with torch.enable_grad():
+            x_g = x.detach().requires_grad_()
             w_g = weight.detach().requires_grad_()
             b_g = bias.detach().requires_grad_()
-            pre = F.conv1d(
-                x.detach(),
-                w_g.unsqueeze(1),
-                b_g,
-                padding=W - 1,
-                groups=D,
-            )[..., :L]
-            pre_d = pre.detach()
-            sig = torch.sigmoid(pre_d)
-            silu_grad = sig * (1.0 + pre_d * (1.0 - sig))
-            dpre = (dout * silu_grad).contiguous()
-            dw, db = torch.autograd.grad(pre, [w_g, b_g], dpre)
-
-        # dx via the native anti-causal kernel.
-        dx = torch.empty_like(x)
-        _native_bwd_dx(dpre, weight, dx)
-
+            out = F.silu(
+                F.conv1d(
+                    x_g, w_g.unsqueeze(1), b_g, padding=W - 1, groups=D
+                )[..., :L]
+            )
+            dx, dw, db = torch.autograd.grad(out, [x_g, w_g, b_g], dout)
         return dx, dw, db
 
 

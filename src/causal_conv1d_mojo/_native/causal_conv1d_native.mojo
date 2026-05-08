@@ -21,6 +21,7 @@ because the compiler can no longer constant-fold the index math.
 """
 
 from std.os import abort
+from std.os.atomic import Atomic
 from std.math import ceildiv, exp
 from std.memory import OpaquePointer
 from std.python import PythonObject
@@ -29,7 +30,11 @@ from std.gpu.host import DeviceContext
 from std.gpu import (
     block_idx_int as block_idx,
     thread_idx_int as thread_idx,
+    barrier,
 )
+from std.gpu.memory import AddressSpace
+from std.gpu.primitives import block as gpu_block
+from layout import Layout, LayoutTensor
 
 
 comptime kNThreads: Int = 128
@@ -269,6 +274,212 @@ fn bwd_dx_kernel[
             dx_ptr[dx_base + t * dx_l_stride] = acc.cast[dtype]()
 
 
+fn bwd_full_kernel[
+    dtype: DType,
+    width: Int,
+    contig_inner: Bool,
+](
+    seqlen: Int,
+    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    dout_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    dx_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    dweight_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
+    dbias_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
+    x_batch_stride: Int,
+    x_c_stride: Int,
+    x_l_stride: Int,
+    weight_c_stride: Int,
+    weight_w_stride: Int,
+    dout_batch_stride: Int,
+    dout_c_stride: Int,
+    dout_l_stride: Int,
+    dx_batch_stride: Int,
+    dx_c_stride: Int,
+    dx_l_stride: Int,
+):
+    """Fused backward pass: dpre + dx + (dweight, dbias) accumulation.
+
+    For each (batch, channel) and chunk of seqlen:
+      1. Recompute pre = conv1d(x, w) + b at each output position.
+      2. dpre = dout * silu'(pre); store in shared memory.
+      3. Threads 0..(W-2) compute dpre for the W-1 lookahead positions
+         (next chunk's first W-1 outputs) so we have the halo for dx.
+      4. While computing dpre, accumulate per-thread:
+         - local_dweight[k] += dpre * x[t + k - (W-1)]
+         - local_dbias    += dpre
+      5. After barrier, each thread reads dpre + halo from smem and
+         emits its dx outputs (anti-causal conv with reversed weights).
+      6. Block-reduce local_dweight and local_dbias, then thread 0
+         atomic-adds to fp32 global accumulators (caller casts to fp16).
+    """
+    alias accum_t = DType.float32
+    alias kBufSize: Int = kNThreads * kNElts + (width - 1)
+    alias smem_layout = Layout.row_major(kBufSize)
+
+    var tidx: Int = thread_idx.x
+    var batch_id: Int = block_idx.z
+    var channel_id: Int = block_idx.y
+    var chunk_id: Int = block_idx.x
+
+    # Load weights, bias into per-block fp32 registers.
+    var weights = InlineArray[Scalar[accum_t], width](uninitialized=True)
+    var weight_base = channel_id * weight_c_stride
+
+    @parameter
+    for k in range(width):
+
+        @parameter
+        if contig_inner:
+            weights[k] = weight_ptr[weight_base + k].cast[accum_t]()
+        else:
+            weights[k] = weight_ptr[weight_base + k * weight_w_stride].cast[accum_t]()
+
+    var cur_bias: Scalar[accum_t] = bias_ptr[channel_id].cast[accum_t]()
+
+    # Smem buffer for dpre values (in fp32 for precision).
+    var dpre_smem = LayoutTensor[
+        accum_t,
+        smem_layout,
+        MutAnyOrigin,
+        address_space=AddressSpace.SHARED,
+    ].stack_allocation()
+
+    var chunk_start: Int = chunk_id * kNThreads * kNElts
+    var seq_start: Int = chunk_start + tidx * kNElts
+
+    var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
+    var dout_base = batch_id * dout_batch_stride + channel_id * dout_c_stride
+    var dx_base = batch_id * dx_batch_stride + channel_id * dx_c_stride
+
+    # Per-thread accumulators for dweight (fp32, length W) and dbias.
+    var local_dweight = SIMD[accum_t, width](0)
+    var local_dbias: Scalar[accum_t] = 0
+
+    # === Phase 1: compute dpre for own chunk + accumulate dweight, dbias ===
+    @parameter
+    for i in range(kNElts):
+        var t = seq_start + i
+        var dpre_val: Scalar[accum_t] = 0
+        if t < seqlen:
+            # Recompute pre.
+            var pre: Scalar[accum_t] = cur_bias
+            var x_window = SIMD[accum_t, width](0)
+
+            @parameter
+            for k in range(width):
+                var src_t = t + k - (width - 1)
+                if src_t >= 0:
+
+                    @parameter
+                    if contig_inner:
+                        x_window[k] = x_ptr[x_base + src_t].cast[accum_t]()
+                    else:
+                        x_window[k] = x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
+                pre += x_window[k] * weights[k]
+
+            # silu'(pre)
+            var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+            var silu_grad: Scalar[accum_t] = sig * (1.0 + pre * (1.0 - sig))
+
+            var dout_val: Scalar[accum_t]
+
+            @parameter
+            if contig_inner:
+                dout_val = dout_ptr[dout_base + t].cast[accum_t]()
+            else:
+                dout_val = dout_ptr[dout_base + t * dout_l_stride].cast[accum_t]()
+
+            dpre_val = dout_val * silu_grad
+            local_dbias += dpre_val
+
+            # dweight[d, k] += dpre * x[t + k - (W-1)]; reuse x_window.
+            @parameter
+            for k in range(width):
+                local_dweight[k] += dpre_val * x_window[k]
+
+        dpre_smem[tidx * kNElts + i] = dpre_val
+
+    # === Phase 2: halo dpre values for next chunk's first W-1 positions ===
+    if tidx < (width - 1):
+        var t_halo = chunk_start + kNThreads * kNElts + tidx
+        var dpre_halo: Scalar[accum_t] = 0
+        if t_halo < seqlen:
+            var pre: Scalar[accum_t] = cur_bias
+
+            @parameter
+            for k in range(width):
+                var src_t = t_halo + k - (width - 1)
+                var val: Scalar[accum_t] = 0
+                if src_t >= 0:
+
+                    @parameter
+                    if contig_inner:
+                        val = x_ptr[x_base + src_t].cast[accum_t]()
+                    else:
+                        val = x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
+                pre += val * weights[k]
+
+            var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+            var silu_grad: Scalar[accum_t] = sig * (1.0 + pre * (1.0 - sig))
+            var dout_val: Scalar[accum_t]
+
+            @parameter
+            if contig_inner:
+                dout_val = dout_ptr[dout_base + t_halo].cast[accum_t]()
+            else:
+                dout_val = dout_ptr[dout_base + t_halo * dout_l_stride].cast[accum_t]()
+
+            dpre_halo = dout_val * silu_grad
+
+        dpre_smem[kNThreads * kNElts + tidx] = dpre_halo
+
+    barrier()
+
+    # === Phase 3: dx (anti-causal conv from smem) ===
+    @parameter
+    for i in range(kNElts):
+        var t = seq_start + i
+        if t >= seqlen:
+            break
+        var dx_val: Scalar[accum_t] = 0
+
+        @parameter
+        for k in range(width):
+            var smem_idx = tidx * kNElts + i + k
+            var dpre_smem_val = dpre_smem[smem_idx][0]
+            dx_val += dpre_smem_val * weights[width - 1 - k]
+
+        @parameter
+        if contig_inner:
+            dx_ptr[dx_base + t] = dx_val.cast[dtype]()
+        else:
+            dx_ptr[dx_base + t * dx_l_stride] = dx_val.cast[dtype]()
+
+    # === Phase 4: block-reduce dweight (one scalar reduce per k), dbias,
+    #     and atomic-add to global. block.sum on a SIMD vector does
+    #     val.reduce_add() FIRST and then block-reduces the scalar, so we
+    #     can't pack the W slots into one call -- need W scalar reductions.
+
+    @parameter
+    for k in range(width):
+        var block_dw_k = gpu_block.sum[
+            block_size=kNThreads, broadcast=False
+        ](local_dweight[k])
+        if tidx == 0:
+            _ = Atomic.fetch_add(
+                dweight_acc_ptr + channel_id * width + k,
+                block_dw_k,
+            )
+
+    var block_dbias = gpu_block.sum[
+        block_size=kNThreads, broadcast=False
+    ](local_dbias)
+    if tidx == 0:
+        _ = Atomic.fetch_add(dbias_acc_ptr + channel_id, block_dbias)
+
+
 def causal_conv1d_fwd_fp16_w4_silu_bias(
     mut py_self: PythonObject,
     mut args: PythonObject,
@@ -496,6 +707,164 @@ def causal_conv1d_bwd_dx_fp16_w4(
     return PythonObject(None)
 
 
+def causal_conv1d_bwd_full_fp16_w4_silu_bias(
+    mut py_self: PythonObject,
+    mut args: PythonObject,
+) raises -> PythonObject:
+    """Specialized fused backward launch: fp16 / width=4 / has_bias / silu.
+
+    Caller must zero dweight_acc / dbias_acc (fp32 buffers) before this call.
+
+    Python tuple positional args (24, in order):
+        0  x_data_ptr  (int)
+        1  weight_data_ptr  (int)
+        2  bias_data_ptr  (int)
+        3  dout_data_ptr  (int)
+        4  dx_data_ptr  (int)
+        5  dweight_acc_data_ptr  (int, fp32)
+        6  dbias_acc_data_ptr  (int, fp32)
+        7  batch  (int)
+        8  dim    (int)
+        9  seqlen (int)
+        10 x_batch_stride  (int)
+        11 x_c_stride      (int)
+        12 x_l_stride      (int)
+        13 weight_c_stride (int)
+        14 weight_w_stride (int)
+        15 dout_batch_stride  (int)
+        16 dout_c_stride      (int)
+        17 dout_l_stride      (int)
+        18 dx_batch_stride  (int)
+        19 dx_c_stride      (int)
+        20 dx_l_stride      (int)
+        21 cuda_stream_handle (int)
+    """
+    var x_addr: Int = Int(py=args[0])
+    var w_addr: Int = Int(py=args[1])
+    var b_addr: Int = Int(py=args[2])
+    var dout_addr: Int = Int(py=args[3])
+    var dx_addr: Int = Int(py=args[4])
+    var dweight_acc_addr: Int = Int(py=args[5])
+    var dbias_acc_addr: Int = Int(py=args[6])
+
+    var x_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
+        unsafe_from_address=x_addr
+    )
+    var w_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
+        unsafe_from_address=w_addr
+    )
+    var b_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
+        unsafe_from_address=b_addr
+    )
+    var dout_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
+        unsafe_from_address=dout_addr
+    )
+    var dx_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
+        unsafe_from_address=dx_addr
+    )
+    var dweight_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
+        unsafe_from_address=dweight_acc_addr
+    )
+    var dbias_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
+        unsafe_from_address=dbias_acc_addr
+    )
+
+    var batch_int: Int = Int(py=args[7])
+    var dim_int: Int = Int(py=args[8])
+    var seqlen_int: Int = Int(py=args[9])
+
+    var x_b_stride: Int = Int(py=args[10])
+    var x_c_stride: Int = Int(py=args[11])
+    var x_l_stride: Int = Int(py=args[12])
+    var w_c_stride: Int = Int(py=args[13])
+    var w_w_stride: Int = Int(py=args[14])
+    var dout_b_stride: Int = Int(py=args[15])
+    var dout_c_stride: Int = Int(py=args[16])
+    var dout_l_stride: Int = Int(py=args[17])
+    var dx_b_stride: Int = Int(py=args[18])
+    var dx_c_stride: Int = Int(py=args[19])
+    var dx_l_stride: Int = Int(py=args[20])
+    var stream_handle_addr: Int = Int(py=args[21])
+
+    var ctx = DeviceContext()
+    var stream_opaque = OpaquePointer[MutAnyOrigin](
+        unsafe_from_address=stream_handle_addr
+    )
+    var stream = ctx.create_external_stream(stream_opaque)
+
+    var grid = (
+        ceildiv(seqlen_int, kNThreads * kNElts),
+        dim_int,
+        batch_int,
+    )
+
+    if (
+        x_l_stride == 1
+        and w_w_stride == 1
+        and dout_l_stride == 1
+        and dx_l_stride == 1
+    ):
+        var compiled = ctx.compile_function[
+            bwd_full_kernel[DType.float16, 4, True],
+            bwd_full_kernel[DType.float16, 4, True],
+        ]()
+        stream.enqueue_function(
+            compiled,
+            seqlen_int,
+            x_ptr,
+            w_ptr,
+            b_ptr,
+            dout_ptr,
+            dx_ptr,
+            dweight_acc_ptr,
+            dbias_acc_ptr,
+            x_b_stride,
+            x_c_stride,
+            x_l_stride,
+            w_c_stride,
+            w_w_stride,
+            dout_b_stride,
+            dout_c_stride,
+            dout_l_stride,
+            dx_b_stride,
+            dx_c_stride,
+            dx_l_stride,
+            grid_dim=grid,
+            block_dim=(kNThreads,),
+        )
+    else:
+        var compiled = ctx.compile_function[
+            bwd_full_kernel[DType.float16, 4, False],
+            bwd_full_kernel[DType.float16, 4, False],
+        ]()
+        stream.enqueue_function(
+            compiled,
+            seqlen_int,
+            x_ptr,
+            w_ptr,
+            b_ptr,
+            dout_ptr,
+            dx_ptr,
+            dweight_acc_ptr,
+            dbias_acc_ptr,
+            x_b_stride,
+            x_c_stride,
+            x_l_stride,
+            w_c_stride,
+            w_w_stride,
+            dout_b_stride,
+            dout_c_stride,
+            dout_l_stride,
+            dx_b_stride,
+            dx_c_stride,
+            dx_l_stride,
+            grid_dim=grid,
+            block_dim=(kNThreads,),
+        )
+
+    return PythonObject(None)
+
+
 @export
 def PyInit_causal_conv1d_native() -> PythonObject:
     try:
@@ -505,6 +874,9 @@ def PyInit_causal_conv1d_native() -> PythonObject:
         )
         m.def_py_function[causal_conv1d_bwd_dx_fp16_w4](
             "causal_conv1d_bwd_dx_fp16_w4"
+        )
+        m.def_py_function[causal_conv1d_bwd_full_fp16_w4_silu_bias](
+            "causal_conv1d_bwd_full_fp16_w4_silu_bias"
         )
         return m.finalize()
     except e:
