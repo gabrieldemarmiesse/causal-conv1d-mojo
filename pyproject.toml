@@ -48,10 +48,13 @@ no-build-isolation = ["causal-conv1d"]
 causal-conv1d-mojo = { path = ".", editable = true }
 
 [tool.pixi.tasks]
-build-native = "mojo build src/causal_conv1d_mojo/_native/causal_conv1d_native.mojo --emit shared-lib -o src/causal_conv1d_mojo/_native/causal_conv1d_native.so"
-test = { cmd = "pytest", depends-on = ["build-native"] }
-bench = { cmd = "python benchmarks/bench_causal_conv1d.py", depends-on = ["build-native"] }
-bench-gpu = { cmd = "python benchmarks/bench_gpu_kernel_time.py", depends-on = ["build-native"] }
-bench-python = { cmd = "python benchmarks/bench_python_overhead.py", depends-on = ["build-native"] }
-bench-vs-pytorch = { cmd = "python benchmarks/bench_vs_pytorch.py", depends-on = ["build-native"] }
-plot-bench = { cmd = "python benchmarks/plot_bench.py", depends-on = ["build-native"] }
+# The Mojo source is compiled lazily on first `import causal_conv1d_mojo` --
+# `mojo.importer` registers an import hook that runs `mojo build` and caches
+# the .so under src/causal_conv1d_mojo/_native/__mojocache__/. So none of the
+# tasks below need to pre-build anything.
+test = "pytest"
+bench = "python benchmarks/bench_causal_conv1d.py"
+bench-gpu = "python benchmarks/bench_gpu_kernel_time.py"
+bench-python = "python benchmarks/bench_python_overhead.py"
+bench-vs-pytorch = "python benchmarks/bench_vs_pytorch.py"
+plot-bench = "python benchmarks/plot_bench.py"

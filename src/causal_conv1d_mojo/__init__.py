@@ -18,6 +18,13 @@ from __future__ import annotations
 
 import torch
 
+# `mojo.importer` registers a Python import hook so that
+#   from causal_conv1d_mojo._native import causal_conv1d_native
+# triggers a one-time `mojo build --emit shared-lib` of the matching
+# .mojo source on first import, caching the resulting .so under
+# __mojocache__/. No manual `pixi run build-native` needed.
+import mojo.importer  # noqa: F401  (registers the import hook)
+
 from causal_conv1d_mojo._native import causal_conv1d_native as _native_mod
 
 

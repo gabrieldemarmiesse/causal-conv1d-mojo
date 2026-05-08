@@ -19,5 +19,6 @@ wheels/
 # pytest
 .pytest_cache/
 
-# mojo extension build artifact
+# mojo extension build artifact (manual build) and runtime-compile cache
 *.so
+__mojocache__/

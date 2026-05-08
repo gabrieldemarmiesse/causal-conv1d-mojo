@@ -53,8 +53,13 @@ Specialized for the Mamba forward path: fp16 inputs, `width=4`,
 ## Run it
 
 ```sh
-pixi run build-native       # one-time mojo build of the .so
 pixi run test               # correctness
 pixi run bench-vs-pytorch   # wall-time numbers
 pixi run plot-bench         # regenerate docs/bench.png
 ```
+
+The Mojo source is compiled lazily on first `import causal_conv1d_mojo`
+via `mojo.importer` — it runs `mojo build --emit shared-lib` and caches
+the resulting `.so` under `src/causal_conv1d_mojo/_native/__mojocache__/`.
+First import takes a few seconds; subsequent imports are cache hits.
+No manual build step.
