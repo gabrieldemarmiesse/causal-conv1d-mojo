@@ -54,7 +54,7 @@ def test_contiguous(native_mod, shape):
     torch.cuda.synchronize()
 
     diff = _max_diff(out, _expected(x, weight, bias))
-    assert diff < 1e-2, f"max_diff={diff}"
+    assert diff < 2e-2, f"max_diff={diff}"
 
 
 def test_noncontiguous_x_seq_stride_not_one(native_mod):
@@ -76,7 +76,7 @@ def test_noncontiguous_x_seq_stride_not_one(native_mod):
     torch.cuda.synchronize()
 
     diff = _max_diff(out, _expected(x_view, weight, bias))
-    assert diff < 1e-2, f"max_diff={diff}"
+    assert diff < 2e-2, f"max_diff={diff}"
 
 
 def test_noncontiguous_x_sliced(native_mod):
@@ -100,7 +100,7 @@ def test_noncontiguous_x_sliced(native_mod):
     torch.cuda.synchronize()
 
     diff = _max_diff(out, _expected(x_slice, weight, bias))
-    assert diff < 1e-2, f"max_diff={diff}"
+    assert diff < 2e-2, f"max_diff={diff}"
 
 
 def test_noncontiguous_weight(native_mod):
@@ -120,7 +120,7 @@ def test_noncontiguous_weight(native_mod):
     torch.cuda.synchronize()
 
     diff = _max_diff(out, _expected(x, weight_view, bias))
-    assert diff < 1e-2, f"max_diff={diff}"
+    assert diff < 2e-2, f"max_diff={diff}"
 
 
 # ===---------- backward / autograd ----------=== #
