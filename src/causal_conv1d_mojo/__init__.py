@@ -1,22 +1,15 @@
 """causal_conv1d, fused into a single Mojo GPU kernel and called via a
 direct Python <-> Mojo CPython extension (no MAX framework).
 
-The extension is built from `_native/causal_conv1d_native.mojo`. Run
-`pixi run build-native` once after edits.
-
-Current specialization grid (single combo):
-    dtype = fp16
-    width = 4
-    has_bias = True
-    activation = "silu"
-    initial_states = None
-    return_final_states = False
-
-Anything outside that raises NotImplementedError.
+Forward goes through the native Mojo kernel. Backward is a pure-PyTorch
+implementation -- it's the slow path (one call per training step) and
+recomposes well-known torch ops, so the cost of a custom kernel didn't
+seem worth it.
 """
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 # `mojo.importer` registers a Python import hook so that
 #   from causal_conv1d_mojo._native import causal_conv1d_native
@@ -29,6 +22,51 @@ from causal_conv1d_mojo._native import causal_conv1d_native as _native_mod
 
 
 __version__ = "1.6.1"
+
+
+def _native_fwd(x, weight, bias, out):
+    _native_mod.causal_conv1d_fwd_fp16_w4_silu_bias(
+        x.data_ptr(), weight.data_ptr(), bias.data_ptr(), out.data_ptr(),
+        x.shape[0], x.shape[1], x.shape[2],
+        x.stride(0), x.stride(1), x.stride(2),
+        weight.stride(0), weight.stride(1),
+        out.stride(0), out.stride(1), out.stride(2),
+        torch.cuda.current_stream().cuda_stream,
+    )
+
+
+class _CausalConv1dFn(torch.autograd.Function):
+    """fp16 / width=4 / has_bias=True / silu autograd op."""
+
+    @staticmethod
+    def forward(ctx, x, weight, bias):
+        out = torch.empty_like(x)
+        _native_fwd(x, weight, bias, out)
+        ctx.save_for_backward(x, weight, bias)
+        return out
+
+    @staticmethod
+    def backward(ctx, dout):
+        x, weight, bias = ctx.saved_tensors
+        D, W = weight.shape
+        L = x.shape[-1]
+
+        # Re-run a pure-pytorch forward inside an autograd graph and let
+        # torch's optimized conv1d/silu backward kernels do the work. This
+        # is the slow path -- one call per training step -- so the cost of
+        # running the forward twice (once via the native fwd, once via
+        # F.conv1d) is acceptable. Hand-rolling the gradient formulas by
+        # hand was substantially slower than this in our benchmarks.
+        with torch.enable_grad():
+            x_g = x.detach().requires_grad_()
+            w_g = weight.detach().requires_grad_()
+            b_g = bias.detach().requires_grad_()
+            pre = F.conv1d(
+                x_g, w_g.unsqueeze(1), b_g, padding=W - 1, groups=D
+            )[..., :L]
+            out = F.silu(pre)
+            dx, dw, db = torch.autograd.grad(out, [x_g, w_g, b_g], dout)
+        return dx, dw, db
 
 
 def causal_conv1d_fn(
@@ -71,23 +109,4 @@ def causal_conv1d_fn(
     if weight.shape[1] != 4:
         raise NotImplementedError(f"only width=4 is supported (got {weight.shape[1]})")
 
-    out = torch.empty_like(x)
-    _native_mod.causal_conv1d_fwd_fp16_w4_silu_bias(
-        x.data_ptr(),
-        weight.data_ptr(),
-        bias.data_ptr(),
-        out.data_ptr(),
-        x.shape[0],
-        x.shape[1],
-        x.shape[2],
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        torch.cuda.current_stream().cuda_stream,
-    )
-    return out
+    return _CausalConv1dFn.apply(x, weight, bias)

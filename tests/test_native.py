@@ -5,6 +5,7 @@ has_bias=True / activation="silu" / no initial_states / no return_final_states.
 """
 import pytest
 import torch
+import torch.nn.functional as F
 
 from causal_conv1d.causal_conv1d_interface import causal_conv1d_ref
 
@@ -120,3 +121,62 @@ def test_noncontiguous_weight(native_mod):
 
     diff = _max_diff(out, _expected(x, weight_view, bias))
     assert diff < 1e-2, f"max_diff={diff}"
+
+
+# ===---------- backward / autograd ----------=== #
+
+
+def _ref_grads(x, weight, bias, dout):
+    """Reference: pytorch impl of causal_conv1d_fwd, backward via autograd."""
+    x_g = x.detach().requires_grad_()
+    w_g = weight.detach().requires_grad_()
+    b_g = bias.detach().requires_grad_()
+    D, W = w_g.shape
+    L = x_g.shape[-1]
+    pre = F.conv1d(x_g, w_g.unsqueeze(1), b_g, padding=W - 1, groups=D)[..., :L]
+    out = F.silu(pre)
+    out.backward(dout)
+    return x_g.grad, w_g.grad, b_g.grad
+
+
+@pytest.mark.parametrize("shape", [(1, 8, 16), (2, 64, 128), (4, 256, 512)])
+def test_backward_matches_pytorch_ref(shape):
+    import causal_conv1d_mojo
+
+    B, D, L = shape
+    W = 4
+    x = torch.randn(B, D, L, dtype=torch.float16, device="cuda", requires_grad=True)
+    weight = torch.randn(D, W, dtype=torch.float16, device="cuda", requires_grad=True)
+    bias = torch.randn(D, dtype=torch.float16, device="cuda", requires_grad=True)
+    dout = torch.randn(B, D, L, dtype=torch.float16, device="cuda")
+
+    out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")
+    out.backward(dout)
+
+    dx_ref, dw_ref, db_ref = _ref_grads(x, weight, bias, dout)
+
+    # fp16 grads accumulate over (B, L); allow looser tol than forward.
+    assert _max_diff(x.grad, dx_ref) < 1e-1, f"dx max_diff={_max_diff(x.grad, dx_ref)}"
+    assert _max_diff(weight.grad, dw_ref) < 1.0, (
+        f"dw max_diff={_max_diff(weight.grad, dw_ref)} (sums over B*L=" f"{B*L} terms)"
+    )
+    assert _max_diff(bias.grad, db_ref) < 1.0, (
+        f"db max_diff={_max_diff(bias.grad, db_ref)} (sums over B*L=" f"{B*L} terms)"
+    )
+
+
+def test_backward_shapes_and_dtypes():
+    import causal_conv1d_mojo
+
+    B, D, L, W = 2, 64, 128, 4
+    x = torch.randn(B, D, L, dtype=torch.float16, device="cuda", requires_grad=True)
+    weight = torch.randn(D, W, dtype=torch.float16, device="cuda", requires_grad=True)
+    bias = torch.randn(D, dtype=torch.float16, device="cuda", requires_grad=True)
+    dout = torch.randn_like(x)
+
+    out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")
+    out.backward(dout)
+
+    assert x.grad.shape == x.shape and x.grad.dtype == x.dtype
+    assert weight.grad.shape == weight.shape and weight.grad.dtype == weight.dtype
+    assert bias.grad.shape == bias.shape and bias.grad.dtype == bias.dtype
