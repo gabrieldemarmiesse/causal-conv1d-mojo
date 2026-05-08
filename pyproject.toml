@@ -52,3 +52,4 @@ test = { cmd = "pytest", depends-on = ["build-native"] }
 bench = { cmd = "python benchmarks/bench_causal_conv1d.py", depends-on = ["build-native"] }
 bench-gpu = { cmd = "python benchmarks/bench_gpu_kernel_time.py", depends-on = ["build-native"] }
 bench-python = { cmd = "python benchmarks/bench_python_overhead.py", depends-on = ["build-native"] }
+bench-vs-pytorch = { cmd = "python benchmarks/bench_vs_pytorch.py", depends-on = ["build-native"] }
