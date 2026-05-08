@@ -35,16 +35,12 @@ ITERS = 100
 def _kind(name: str) -> str:
     """Classify a CUDA kernel symbol as mojo (our op) or upstream (Tri Dao's).
 
-    Mojo's `foreach` lowers to symbols like `std_algorithm_backend_gpu_el<hash>`;
-    the upstream Tri Dao op is `causal_conv1d_fwd_kernel`. We also count the
-    small Fill kernel from the placeholder `torch.zeros(1,1,1)` we currently
-    pass for absent `initial_states` -- it runs once per call inside our wrapper.
+    The native kernel built via 'mojo build --emit shared-lib' shows up as
+    'mojo_pkg_<hash>'. The upstream Tri Dao op is 'causal_conv1d_fwd_kernel'.
     """
-    if "causal_conv1d_fwd_kernel" in name:
+    if name.startswith("void causal_conv1d_fwd_kernel"):
         return "upstream"
-    if name.startswith("std_algorithm_backend_gpu_el"):
-        return "mojo"
-    if "FillFunctor" in name:
+    if name.startswith("causal_conv1d_native_fwd_kernel"):
         return "mojo"
     return ""
 

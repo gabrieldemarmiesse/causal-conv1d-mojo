@@ -11,6 +11,13 @@ for the benchmark workload: fp16 inputs, width=4, has_bias=True,
 has_initial_states=False, activation="silu". (Specialization grid is
 intentionally tiny for now; the goal is to measure the framework-overhead
 delta vs the MAX path, not to ship a general op.)
+
+Two kernel variants are baked in: a fast path that assumes the innermost
+strides are 1 (the contiguous case) and a fallback that takes the inner
+strides as runtime args. Folding the stride-1 multiplies into the fast
+path matters: passing inner strides as runtime args around the kernel,
+even when always 1, costs ~2x kernel time on a memory-bound workload
+because the compiler can no longer constant-fold the index math.
 """
 
 from std.os import abort
@@ -33,7 +40,76 @@ fn _silu_f32(x: Float32) -> Float32:
     return x / (Float32(1) + exp(-x))
 
 
-fn fwd_kernel[
+fn fwd_kernel_contig[
+    dtype: DType,
+    width: Int,
+    has_bias: Bool,
+    activation: StaticString,
+](
+    seqlen: Int,
+    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    x_batch_stride: Int,
+    x_c_stride: Int,
+    weight_c_stride: Int,
+    out_batch_stride: Int,
+    out_c_stride: Int,
+):
+    """Fast path: x.stride(2)=1, weight.stride(1)=1, output.stride(2)=1."""
+    alias accum_t = DType.float32
+
+    var tidx: Int = thread_idx.x
+    var batch_id: Int = block_idx.z
+    var channel_id: Int = block_idx.y
+    var chunk_id: Int = block_idx.x
+
+    var weights = InlineArray[Scalar[accum_t], width](uninitialized=True)
+    var weight_base = channel_id * weight_c_stride
+
+    @parameter
+    for k in range(width):
+        weights[k] = weight_ptr[weight_base + k].cast[accum_t]()
+
+    var cur_bias: Scalar[accum_t] = 0
+
+    @parameter
+    if has_bias:
+        cur_bias = bias_ptr[channel_id].cast[accum_t]()
+
+    var seq_start = chunk_id * kNThreads * kNElts + tidx * kNElts
+    if seq_start >= seqlen:
+        return
+
+    var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
+    var out_base = batch_id * out_batch_stride + channel_id * out_c_stride
+
+    @parameter
+    for i in range(kNElts):
+        var t = seq_start + i
+        if t >= seqlen:
+            break
+        var acc: Scalar[accum_t] = cur_bias
+
+        @parameter
+        for k in range(width):
+            var src_t = t + k - (width - 1)
+            var val: Scalar[accum_t]
+            if src_t < 0:
+                val = 0
+            else:
+                val = x_ptr[x_base + src_t].cast[accum_t]()
+            acc += val * weights[k]
+
+        @parameter
+        if activation == "silu":
+            acc = _silu_f32(Float32(acc))
+
+        output_ptr[out_base + t] = acc.cast[dtype]()
+
+
+fn fwd_kernel_strided[
     dtype: DType,
     width: Int,
     has_bias: Bool,
@@ -53,6 +129,7 @@ fn fwd_kernel[
     out_c_stride: Int,
     out_l_stride: Int,
 ):
+    """Slow path: any inner stride may be non-1."""
     alias accum_t = DType.float32
 
     var tidx: Int = thread_idx.x
@@ -167,33 +244,55 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
     )
     var stream = ctx.create_external_stream(stream_opaque)
 
-    var compiled_func = ctx.compile_function[
-        fwd_kernel[DType.float16, 4, True, "silu"],
-        fwd_kernel[DType.float16, 4, True, "silu"],
-    ]()
-
-    stream.enqueue_function(
-        compiled_func,
-        seqlen_int,
-        x_ptr,
-        w_ptr,
-        b_ptr,
-        o_ptr,
-        x_b_stride,
-        x_c_stride,
-        x_l_stride,
-        w_c_stride,
-        w_w_stride,
-        o_b_stride,
-        o_c_stride,
-        o_l_stride,
-        grid_dim=(
-            ceildiv(seqlen_int, kNThreads * kNElts),
-            dim_int,
-            batch_int,
-        ),
-        block_dim=(kNThreads,),
+    var grid = (
+        ceildiv(seqlen_int, kNThreads * kNElts),
+        dim_int,
+        batch_int,
     )
+
+    if x_l_stride == 1 and w_w_stride == 1 and o_l_stride == 1:
+        var compiled = ctx.compile_function[
+            fwd_kernel_contig[DType.float16, 4, True, "silu"],
+            fwd_kernel_contig[DType.float16, 4, True, "silu"],
+        ]()
+        stream.enqueue_function(
+            compiled,
+            seqlen_int,
+            x_ptr,
+            w_ptr,
+            b_ptr,
+            o_ptr,
+            x_b_stride,
+            x_c_stride,
+            w_c_stride,
+            o_b_stride,
+            o_c_stride,
+            grid_dim=grid,
+            block_dim=(kNThreads,),
+        )
+    else:
+        var compiled = ctx.compile_function[
+            fwd_kernel_strided[DType.float16, 4, True, "silu"],
+            fwd_kernel_strided[DType.float16, 4, True, "silu"],
+        ]()
+        stream.enqueue_function(
+            compiled,
+            seqlen_int,
+            x_ptr,
+            w_ptr,
+            b_ptr,
+            o_ptr,
+            x_b_stride,
+            x_c_stride,
+            x_l_stride,
+            w_c_stride,
+            w_w_stride,
+            o_b_stride,
+            o_c_stride,
+            o_l_stride,
+            grid_dim=grid,
+            block_dim=(kNThreads,),
+        )
 
     return PythonObject(None)
 
