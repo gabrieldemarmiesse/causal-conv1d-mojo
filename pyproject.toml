@@ -36,6 +36,7 @@ platforms = ["linux-64"]
 [tool.pixi.dependencies]
 cuda-nvcc = "12.8.*"
 pytest = "*"
+matplotlib = "*"
 
 [tool.pixi.system-requirements]
 libc = "2.34"
@@ -53,3 +54,4 @@ bench = { cmd = "python benchmarks/bench_causal_conv1d.py", depends-on = ["build
 bench-gpu = { cmd = "python benchmarks/bench_gpu_kernel_time.py", depends-on = ["build-native"] }
 bench-python = { cmd = "python benchmarks/bench_python_overhead.py", depends-on = ["build-native"] }
 bench-vs-pytorch = { cmd = "python benchmarks/bench_vs_pytorch.py", depends-on = ["build-native"] }
+plot-bench = { cmd = "python benchmarks/plot_bench.py", depends-on = ["build-native"] }
