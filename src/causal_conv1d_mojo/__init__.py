@@ -26,8 +26,8 @@ from causal_conv1d_mojo._native import causal_conv1d_native as _native_mod
 __version__ = "1.6.1"
 
 
-def _native_fwd(x, weight, bias, out):
-    _native_mod.causal_conv1d_fwd_fp16_w4_silu_bias(
+def _native_fwd(x, weight, bias, out, apply_silu):
+    _native_mod.causal_conv1d_fwd_fp16_w4_bias(
         x.data_ptr(),
         weight.data_ptr(),
         bias.data_ptr(),
@@ -43,12 +43,13 @@ def _native_fwd(x, weight, bias, out):
         out.stride(0),
         out.stride(1),
         out.stride(2),
+        int(apply_silu),
         torch.cuda.current_stream().cuda_stream,
     )
 
 
-def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc):
-    _native_mod.causal_conv1d_bwd_full_fp16_w4_silu_bias(
+def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu):
+    _native_mod.causal_conv1d_bwd_full_fp16_w4_bias(
         x.data_ptr(),
         weight.data_ptr(),
         bias.data_ptr(),
@@ -70,12 +71,13 @@ def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc):
         dx.stride(0),
         dx.stride(1),
         dx.stride(2),
+        int(apply_silu),
         torch.cuda.current_stream().cuda_stream,
     )
 
 
-def _native_fwd_cpu(x, weight, bias, out):
-    _native_mod.causal_conv1d_fwd_cpu_fp16_w4_silu_bias(
+def _native_fwd_cpu(x, weight, bias, out, apply_silu):
+    _native_mod.causal_conv1d_fwd_cpu_fp16_w4_bias(
         x.data_ptr(),
         weight.data_ptr(),
         bias.data_ptr(),
@@ -91,11 +93,12 @@ def _native_fwd_cpu(x, weight, bias, out):
         out.stride(0),
         out.stride(1),
         out.stride(2),
+        int(apply_silu),
     )
 
 
-def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc):
-    _native_mod.causal_conv1d_bwd_full_cpu_fp16_w4_silu_bias(
+def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu):
+    _native_mod.causal_conv1d_bwd_full_cpu_fp16_w4_bias(
         x.data_ptr(),
         weight.data_ptr(),
         bias.data_ptr(),
@@ -117,31 +120,34 @@ def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc):
         dx.stride(0),
         dx.stride(1),
         dx.stride(2),
+        int(apply_silu),
     )
 
 
 class _CausalConv1dFn(torch.autograd.Function):
-    """fp16 / width=4 / has_bias=True / silu autograd op (CUDA + CPU).
+    """fp16 / width=4 / has_bias=True autograd op (CUDA + CPU).
 
     Dispatches to the GPU launcher when `x.is_cuda`, otherwise to the
     pure-mojo CPU launcher (parallelized over (B, D) via
-    `sync_parallelize`). Same fp32 dweight/dbias accumulator pattern in
-    both paths so the cast-back is shared.
+    `sync_parallelize`). `apply_silu` is plumbed through both paths
+    and cached on `ctx` so backward picks the matching specialisation.
     """
 
     @staticmethod
-    def forward(ctx, x, weight, bias):
+    def forward(ctx, x, weight, bias, apply_silu):
         out = torch.empty_like(x)
         if x.is_cuda:
-            _native_fwd(x, weight, bias, out)
+            _native_fwd(x, weight, bias, out, apply_silu)
         else:
-            _native_fwd_cpu(x, weight, bias, out)
+            _native_fwd_cpu(x, weight, bias, out, apply_silu)
         ctx.save_for_backward(x, weight, bias)
+        ctx.apply_silu = apply_silu
         return out
 
     @staticmethod
     def backward(ctx, dout):
         x, weight, bias = ctx.saved_tensors
+        apply_silu = ctx.apply_silu
         D, W = weight.shape
 
         if dout.stride(-1) != 1:
@@ -154,11 +160,17 @@ class _CausalConv1dFn(torch.autograd.Function):
         dbias_acc = torch.zeros(D, dtype=torch.float32, device=x.device)
 
         if x.is_cuda:
-            _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc)
+            _native_bwd_full(
+                x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu
+            )
         else:
-            _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc)
+            _native_bwd_full_cpu(
+                x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu
+            )
 
-        return dx, dweight_acc.to(weight.dtype), dbias_acc.to(bias.dtype)
+        # `apply_silu` is a non-tensor input — autograd expects one return per
+        # forward input, with `None` for non-differentiable inputs.
+        return dx, dweight_acc.to(weight.dtype), dbias_acc.to(bias.dtype), None
 
 
 def causal_conv1d_fn(
@@ -188,8 +200,10 @@ def causal_conv1d_fn(
         raise NotImplementedError("initial_states is not supported")
     if return_final_states or final_states_out is not None:
         raise NotImplementedError("return_final_states is not supported")
-    if activation not in ("silu", "swish"):
-        raise NotImplementedError("only activation in {'silu', 'swish'} is supported")
+    if activation not in (None, "silu", "swish"):
+        raise NotImplementedError(
+            "only activation in {None, 'silu', 'swish'} is supported"
+        )
     if bias is None:
         raise NotImplementedError("bias is required")
     if (
@@ -206,4 +220,7 @@ def causal_conv1d_fn(
             f"(got x={x.device}, weight={weight.device}, bias={bias.device})"
         )
 
-    return _CausalConv1dFn.apply(x, weight, bias)
+    # silu and swish are the same function (x * sigmoid(x)); activation=None
+    # is the bias-only path.
+    apply_silu = activation in ("silu", "swish")
+    return _CausalConv1dFn.apply(x, weight, bias, apply_silu)

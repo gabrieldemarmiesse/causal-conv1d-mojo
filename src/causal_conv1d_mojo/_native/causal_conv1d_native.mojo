@@ -1,23 +1,20 @@
-"""Direct Python -> Mojo extension that launches the causal_conv1d GPU
-kernel without going through MAX's CustomOpLibrary.
+"""Direct Python -> Mojo extension for causal_conv1d (fp16, width=4,
+has_bias=True), no MAX framework.
 
 Built as a CPython extension via:
     mojo build causal_conv1d_native.mojo --emit shared-lib -o causal_conv1d_native.so
 
 Then importable as `from causal_conv1d_mojo._native import causal_conv1d_native`.
 
-The single entry point `causal_conv1d_fwd_fp16_w4_silu_bias` is specialized
-for the benchmark workload: fp16 inputs, width=4, has_bias=True,
-has_initial_states=False, activation="silu". (Specialization grid is
-intentionally tiny for now; the goal is to measure the framework-overhead
-delta vs the MAX path, not to ship a general op.)
+Four entry points: GPU + CPU × forward + backward, each fp16 / width=4 /
+has_bias=True. Activation (silu vs none) and contiguity of inner strides
+are passed as runtime ints/bools and dispatched to comptime-specialised
+kernels at the launcher.
 
-Two kernel variants are baked in: a fast path that assumes the innermost
-strides are 1 (the contiguous case) and a fallback that takes the inner
-strides as runtime args. Folding the stride-1 multiplies into the fast
-path matters: passing inner strides as runtime args around the kernel,
-even when always 1, costs ~2x kernel time on a memory-bound workload
-because the compiler can no longer constant-fold the index math.
+Folding the stride-1 multiplies into the fast contig path matters:
+passing inner strides as runtime args around the kernel, even when
+always 1, costs ~2× kernel time on a memory-bound workload because the
+compiler can no longer constant-fold the index math.
 """
 
 from std.os import abort
@@ -137,6 +134,7 @@ fn fwd_kernel[
     dtype: DType,
     width: Int,
     has_bias: Bool,
+    apply_silu: Bool,
     contig_inner: Bool,
 ](
     seqlen: Int,
@@ -219,8 +217,9 @@ fn fwd_kernel[
                     ].cast[accum_t]()
             acc += val * weights[k]
 
-        # silu (= swish) is the only activation we ship; no comptime branch.
-        acc = _silu_f32(Float32(acc))
+        @parameter
+        if apply_silu:
+            acc = _silu_f32(Float32(acc))
 
         @parameter
         if contig_inner:
@@ -232,6 +231,7 @@ fn fwd_kernel[
 fn bwd_full_kernel[
     dtype: DType,
     width: Int,
+    apply_silu: Bool,
     contig_inner: Bool,
     aligned_seq: Bool,
 ](
@@ -430,34 +430,22 @@ fn bwd_full_kernel[
             for i in range(kNElts):
                 x_prev[i] = smem_x[(tidx - 1) * kNElts + i].cast[accum_t]()
 
-        # ---- [P3] recompute pre + silu' to derive dpre = dout * silu' ----
-        # x_window[k] for output position i is at x_full index `i + k - (W-1)`,
-        # where x_full = [x_prev (kNElts) || x_curr (kNElts)] indexed kNElts +
-        # (i + k - (W-1)).
+        # ---- [P3] derive dpre from dout (and silu' if activation was silu) ----
+        # When apply_silu, dpre = dout * silu'(pre); otherwise dpre = dout
+        # (the bias-only forward has identity gradient w.r.t. pre).
+        # silu'(pre) requires recomputing pre = bias + sum_k weights[k] *
+        # x_window[k]; x_window comes from [x_prev || x_curr] using the same
+        # offset arithmetic as the forward.
         var dpre = SIMD[accum_t, kNElts](0)
 
         @parameter
-        for i in range(kNElts):
+        if apply_silu:
 
             @parameter
-            if aligned_seq:
-                var pre: Scalar[accum_t] = cur_bias
+            for i in range(kNElts):
 
                 @parameter
-                for k in range(width):
-                    alias offset_w: Int = k - (width - 1)
-
-                    @parameter
-                    if i + offset_w >= 0:
-                        pre += x_curr[i + offset_w] * weights[k]
-                    else:
-                        pre += x_prev[kNElts + i + offset_w] * weights[k]
-
-                var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
-                var silu_grad: Scalar[accum_t] = sig * (1.0 + pre * (1.0 - sig))
-                dpre[i] = dout_curr[i] * silu_grad
-            else:
-                if seq_start + i < seqlen:
+                if aligned_seq:
                     var pre: Scalar[accum_t] = cur_bias
 
                     @parameter
@@ -475,6 +463,31 @@ fn bwd_full_kernel[
                         1.0 + pre * (1.0 - sig)
                     )
                     dpre[i] = dout_curr[i] * silu_grad
+                else:
+                    if seq_start + i < seqlen:
+                        var pre: Scalar[accum_t] = cur_bias
+
+                        @parameter
+                        for k in range(width):
+                            alias offset_w: Int = k - (width - 1)
+
+                            @parameter
+                            if i + offset_w >= 0:
+                                pre += x_curr[i + offset_w] * weights[k]
+                            else:
+                                pre += (
+                                    x_prev[kNElts + i + offset_w] * weights[k]
+                                )
+
+                        var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+                        var silu_grad: Scalar[accum_t] = sig * (
+                            1.0 + pre * (1.0 - sig)
+                        )
+                        dpre[i] = dout_curr[i] * silu_grad
+        else:
+            # No silu — dpre is just dout. `dout_curr` already has out-of-
+            # bounds positions zeroed (loaded that way in [P1]).
+            dpre = dout_curr
 
         # dbias += sum(dpre)
         local_dbias += dpre.reduce_add()
@@ -618,6 +631,7 @@ fn bwd_full_kernel[
 fn _cpu_dpre_at[
     dtype: DType,
     width: Int,
+    apply_silu: Bool,
 ](
     t: Int,
     seqlen: Int,
@@ -630,9 +644,19 @@ fn _cpu_dpre_at[
     dout_base: Int,
     dout_l_stride: Int,
 ) -> Float32:
-    """`dpre[t] = silu'(pre[t]) * dout[t]`, or 0 if `t` is out of [0, seqlen)."""
+    """`dpre[t]` for the CPU backward, 0 if `t` is out of [0, seqlen).
+
+    With `apply_silu`, `dpre[t] = silu'(pre[t]) * dout[t]` (the bias-aware
+    sigmoid-derivative path). Without it, `dpre[t] = dout[t]` directly —
+    bias-only forward has identity gradient w.r.t. pre.
+    """
     if t < 0 or t >= seqlen:
         return 0
+
+    @parameter
+    if not apply_silu:
+        return dout_ptr[dout_base + t * dout_l_stride].cast[DType.float32]()
+
     var pre: Float32 = bias_v
 
     @parameter
@@ -653,6 +677,7 @@ fn _cpu_dpre_at[
 fn fwd_kernel_cpu[
     dtype: DType,
     width: Int,
+    apply_silu: Bool,
 ](
     batch: Int,
     dim: Int,
@@ -670,7 +695,11 @@ fn fwd_kernel_cpu[
     out_c_stride: Int,
     out_l_stride: Int,
 ):
-    """fp16 / silu / has_bias / width=W causal conv1d forward, CPU path."""
+    """fp16 / has_bias / width=W causal conv1d forward, CPU path.
+
+    `apply_silu` (comptime): apply silu (= swish) on the output, or skip
+    it for the bias-only `activation=None` case.
+    """
     alias accum_t = DType.float32
 
     @parameter
@@ -702,9 +731,14 @@ fn fwd_kernel_cpu[
                         x_base + src_t * x_l_stride
                     ].cast[accum_t]()
 
-            output_ptr[out_base + t * out_l_stride] = _silu_f32(pre).cast[
-                dtype
-            ]()
+            var out_v: Scalar[accum_t]
+
+            @parameter
+            if apply_silu:
+                out_v = _silu_f32(pre)
+            else:
+                out_v = pre
+            output_ptr[out_base + t * out_l_stride] = out_v.cast[dtype]()
 
     sync_parallelize[process_bc](batch * dim)
 
@@ -712,6 +746,7 @@ fn fwd_kernel_cpu[
 fn bwd_kernel_cpu[
     dtype: DType,
     width: Int,
+    apply_silu: Bool,
 ](
     batch: Int,
     dim: Int,
@@ -777,7 +812,7 @@ fn bwd_kernel_cpu[
 
         @parameter
         for k in range(width):
-            dpre_win[k] = _cpu_dpre_at[dtype, width](
+            dpre_win[k] = _cpu_dpre_at[dtype, width, apply_silu](
                 k,
                 seqlen,
                 bias_v,
@@ -819,7 +854,7 @@ fn bwd_kernel_cpu[
             @parameter
             for k in range(width - 1):
                 dpre_win[k] = dpre_win[k + 1]
-            dpre_win[width - 1] = _cpu_dpre_at[dtype, width](
+            dpre_win[width - 1] = _cpu_dpre_at[dtype, width, apply_silu](
                 t + width,
                 seqlen,
                 bias_v,
@@ -846,13 +881,13 @@ fn bwd_kernel_cpu[
     sync_parallelize[process_bc](batch * dim)
 
 
-def causal_conv1d_fwd_fp16_w4_silu_bias(
+def causal_conv1d_fwd_fp16_w4_bias(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    """Specialized launch: fp16 / width=4 / has_bias=True / silu.
+    """Specialized launch: fp16 / width=4 / has_bias=True.
 
-    Python tuple positional args (16, in order):
+    Python tuple positional args (17, in order):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int)
@@ -868,7 +903,8 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
         12 out_batch_stride  (int)
         13 out_c_stride      (int)
         14 out_l_stride      (int)
-        15 cuda_stream_handle (int)  -- torch.cuda.current_stream().cuda_stream
+        15 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish on the output
+        16 cuda_stream_handle (int)  -- torch.cuda.current_stream().cuda_stream
     """
 
     var x_addr: Int = Int(py=args[0])
@@ -901,7 +937,8 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
     var o_b_stride: Int = Int(py=args[12])
     var o_c_stride: Int = Int(py=args[13])
     var o_l_stride: Int = Int(py=args[14])
-    var stream_handle_addr: Int = Int(py=args[15])
+    var apply_silu_rt: Bool = Int(py=args[15]) != 0
+    var stream_handle_addr: Int = Int(py=args[16])
 
     var ctx = DeviceContext()
     var stream_opaque = OpaquePointer[MutAnyOrigin](
@@ -914,11 +951,19 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
         dim_int,
         batch_int,
     )
+    var contig_inner_rt: Bool = (
+        x_l_stride == 1 and w_w_stride == 1 and o_l_stride == 1
+    )
 
-    if x_l_stride == 1 and w_w_stride == 1 and o_l_stride == 1:
+    # Nested @parameter fn captures all runtime args; only the comptime
+    # specialisation of `fwd_kernel` differs per leg. Mojo expands one
+    # specialised body per (apply_silu, contig_inner) pair, with no
+    # runtime branch inside the kernel body.
+    @parameter
+    fn enqueue_fwd[apply_silu: Bool, contig_inner: Bool]() raises:
         var compiled = ctx.compile_function[
-            fwd_kernel[DType.float16, 4, True, True],
-            fwd_kernel[DType.float16, 4, True, True],
+            fwd_kernel[DType.float16, 4, True, apply_silu, contig_inner],
+            fwd_kernel[DType.float16, 4, True, apply_silu, contig_inner],
         ]()
         stream.enqueue_function(
             compiled,
@@ -938,42 +983,28 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
             grid_dim=grid,
             block_dim=(kNThreads,),
         )
+
+    if apply_silu_rt and contig_inner_rt:
+        enqueue_fwd[True, True]()
+    elif apply_silu_rt:
+        enqueue_fwd[True, False]()
+    elif contig_inner_rt:
+        enqueue_fwd[False, True]()
     else:
-        var compiled = ctx.compile_function[
-            fwd_kernel[DType.float16, 4, True, False],
-            fwd_kernel[DType.float16, 4, True, False],
-        ]()
-        stream.enqueue_function(
-            compiled,
-            seqlen_int,
-            x_ptr,
-            w_ptr,
-            b_ptr,
-            o_ptr,
-            x_b_stride,
-            x_c_stride,
-            x_l_stride,
-            w_c_stride,
-            w_w_stride,
-            o_b_stride,
-            o_c_stride,
-            o_l_stride,
-            grid_dim=grid,
-            block_dim=(kNThreads,),
-        )
+        enqueue_fwd[False, False]()
 
     return PythonObject(None)
 
 
-def causal_conv1d_bwd_full_fp16_w4_silu_bias(
+def causal_conv1d_bwd_full_fp16_w4_bias(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    """Specialized fused backward launch: fp16 / width=4 / has_bias / silu.
+    """Specialized fused backward launch: fp16 / width=4 / has_bias.
 
     Caller must zero dweight_acc / dbias_acc (fp32 buffers) before this call.
 
-    Python tuple positional args (24, in order):
+    Python tuple positional args (23, in order):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int)
@@ -995,7 +1026,8 @@ def causal_conv1d_bwd_full_fp16_w4_silu_bias(
         18 dx_batch_stride  (int)
         19 dx_c_stride      (int)
         20 dx_l_stride      (int)
-        21 cuda_stream_handle (int)
+        21 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish was applied on fwd
+        22 cuda_stream_handle (int)
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -1042,7 +1074,8 @@ def causal_conv1d_bwd_full_fp16_w4_silu_bias(
     var dx_b_stride: Int = Int(py=args[18])
     var dx_c_stride: Int = Int(py=args[19])
     var dx_l_stride: Int = Int(py=args[20])
-    var stream_handle_addr: Int = Int(py=args[21])
+    var apply_silu_rt: Bool = Int(py=args[21]) != 0
+    var stream_handle_addr: Int = Int(py=args[22])
 
     var ctx = DeviceContext()
     var stream_opaque = OpaquePointer[MutAnyOrigin](
@@ -1061,10 +1094,19 @@ def causal_conv1d_bwd_full_fp16_w4_silu_bias(
     )
     var aligned_seq_rt: Bool = seqlen_int % (kNThreads * kNEltsBwd) == 0
 
-    if contig_inner_rt and aligned_seq_rt:
+    @parameter
+    fn enqueue_bwd[
+        apply_silu: Bool,
+        contig_inner: Bool,
+        aligned_seq: Bool,
+    ]() raises:
         var compiled = ctx.compile_function[
-            bwd_full_kernel[DType.float16, 4, True, True],
-            bwd_full_kernel[DType.float16, 4, True, True],
+            bwd_full_kernel[
+                DType.float16, 4, apply_silu, contig_inner, aligned_seq
+            ],
+            bwd_full_kernel[
+                DType.float16, 4, apply_silu, contig_inner, aligned_seq
+            ],
         ]()
         stream.enqueue_function(
             compiled,
@@ -1090,75 +1132,30 @@ def causal_conv1d_bwd_full_fp16_w4_silu_bias(
             grid_dim=grid,
             block_dim=(kNThreads,),
         )
+
+    if apply_silu_rt and contig_inner_rt and aligned_seq_rt:
+        enqueue_bwd[True, True, True]()
+    elif apply_silu_rt and contig_inner_rt:
+        enqueue_bwd[True, True, False]()
+    elif apply_silu_rt:
+        enqueue_bwd[True, False, False]()
+    elif contig_inner_rt and aligned_seq_rt:
+        enqueue_bwd[False, True, True]()
     elif contig_inner_rt:
-        var compiled = ctx.compile_function[
-            bwd_full_kernel[DType.float16, 4, True, False],
-            bwd_full_kernel[DType.float16, 4, True, False],
-        ]()
-        stream.enqueue_function(
-            compiled,
-            seqlen_int,
-            x_ptr,
-            w_ptr,
-            b_ptr,
-            dout_ptr,
-            dx_ptr,
-            dweight_acc_ptr,
-            dbias_acc_ptr,
-            x_b_stride,
-            x_c_stride,
-            x_l_stride,
-            w_c_stride,
-            w_w_stride,
-            dout_b_stride,
-            dout_c_stride,
-            dout_l_stride,
-            dx_b_stride,
-            dx_c_stride,
-            dx_l_stride,
-            grid_dim=grid,
-            block_dim=(kNThreads,),
-        )
+        enqueue_bwd[False, True, False]()
     else:
-        var compiled = ctx.compile_function[
-            bwd_full_kernel[DType.float16, 4, False, False],
-            bwd_full_kernel[DType.float16, 4, False, False],
-        ]()
-        stream.enqueue_function(
-            compiled,
-            seqlen_int,
-            x_ptr,
-            w_ptr,
-            b_ptr,
-            dout_ptr,
-            dx_ptr,
-            dweight_acc_ptr,
-            dbias_acc_ptr,
-            x_b_stride,
-            x_c_stride,
-            x_l_stride,
-            w_c_stride,
-            w_w_stride,
-            dout_b_stride,
-            dout_c_stride,
-            dout_l_stride,
-            dx_b_stride,
-            dx_c_stride,
-            dx_l_stride,
-            grid_dim=grid,
-            block_dim=(kNThreads,),
-        )
+        enqueue_bwd[False, False, False]()
 
     return PythonObject(None)
 
 
-def causal_conv1d_fwd_cpu_fp16_w4_silu_bias(
+def causal_conv1d_fwd_cpu_fp16_w4_bias(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    """CPU forward: fp16 / width=4 / has_bias / silu.
+    """CPU forward: fp16 / width=4 / has_bias.
 
-    Python tuple positional args (15, in order):
+    Python tuple positional args (16, in order):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int)
@@ -1174,6 +1171,7 @@ def causal_conv1d_fwd_cpu_fp16_w4_silu_bias(
         12 out_batch_stride  (int)
         13 out_c_stride      (int)
         14 out_l_stride      (int)
+        15 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish on the output
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -1196,38 +1194,54 @@ def causal_conv1d_fwd_cpu_fp16_w4_silu_bias(
     var batch_int: Int = Int(py=args[4])
     var dim_int: Int = Int(py=args[5])
     var seqlen_int: Int = Int(py=args[6])
+    var x_b_stride: Int = Int(py=args[7])
+    var x_c_stride: Int = Int(py=args[8])
+    var x_l_stride: Int = Int(py=args[9])
+    var w_c_stride: Int = Int(py=args[10])
+    var w_w_stride: Int = Int(py=args[11])
+    var o_b_stride: Int = Int(py=args[12])
+    var o_c_stride: Int = Int(py=args[13])
+    var o_l_stride: Int = Int(py=args[14])
+    var apply_silu_rt: Bool = Int(py=args[15]) != 0
 
-    fwd_kernel_cpu[DType.float16, 4](
-        batch_int,
-        dim_int,
-        seqlen_int,
-        x_ptr,
-        w_ptr,
-        b_ptr,
-        o_ptr,
-        Int(py=args[7]),  # x_batch_stride
-        Int(py=args[8]),  # x_c_stride
-        Int(py=args[9]),  # x_l_stride
-        Int(py=args[10]),  # weight_c_stride
-        Int(py=args[11]),  # weight_w_stride
-        Int(py=args[12]),  # out_batch_stride
-        Int(py=args[13]),  # out_c_stride
-        Int(py=args[14]),  # out_l_stride
-    )
+    @parameter
+    def run[apply_silu: Bool]():
+        fwd_kernel_cpu[DType.float16, 4, apply_silu](
+            batch_int,
+            dim_int,
+            seqlen_int,
+            x_ptr,
+            w_ptr,
+            b_ptr,
+            o_ptr,
+            x_b_stride,
+            x_c_stride,
+            x_l_stride,
+            w_c_stride,
+            w_w_stride,
+            o_b_stride,
+            o_c_stride,
+            o_l_stride,
+        )
+
+    if apply_silu_rt:
+        run[True]()
+    else:
+        run[False]()
 
     return PythonObject(None)
 
 
-def causal_conv1d_bwd_full_cpu_fp16_w4_silu_bias(
+def causal_conv1d_bwd_full_cpu_fp16_w4_bias(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    """CPU backward: fp16 / width=4 / has_bias / silu.
+    """CPU backward: fp16 / width=4 / has_bias.
 
     Caller must zero `dweight_acc` / `dbias_acc` (fp32 buffers) before this
     call. Same arg layout as the GPU launcher minus the `cuda_stream_handle`.
 
-    Python tuple positional args (21, in order):
+    Python tuple positional args (22, in order):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int)
@@ -1249,6 +1263,7 @@ def causal_conv1d_bwd_full_cpu_fp16_w4_silu_bias(
         18 dx_batch_stride  (int)
         19 dx_c_stride      (int)
         20 dx_l_stride      (int)
+        21 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish was applied on fwd
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -1283,30 +1298,49 @@ def causal_conv1d_bwd_full_cpu_fp16_w4_silu_bias(
     var batch_int: Int = Int(py=args[7])
     var dim_int: Int = Int(py=args[8])
     var seqlen_int: Int = Int(py=args[9])
+    var x_b_stride: Int = Int(py=args[10])
+    var x_c_stride: Int = Int(py=args[11])
+    var x_l_stride: Int = Int(py=args[12])
+    var w_c_stride: Int = Int(py=args[13])
+    var w_w_stride: Int = Int(py=args[14])
+    var dout_b_stride: Int = Int(py=args[15])
+    var dout_c_stride: Int = Int(py=args[16])
+    var dout_l_stride: Int = Int(py=args[17])
+    var dx_b_stride: Int = Int(py=args[18])
+    var dx_c_stride: Int = Int(py=args[19])
+    var dx_l_stride: Int = Int(py=args[20])
+    var apply_silu_rt: Bool = Int(py=args[21]) != 0
 
-    bwd_kernel_cpu[DType.float16, 4](
-        batch_int,
-        dim_int,
-        seqlen_int,
-        x_ptr,
-        w_ptr,
-        b_ptr,
-        dout_ptr,
-        dx_ptr,
-        dweight_acc_ptr,
-        dbias_acc_ptr,
-        Int(py=args[10]),  # x_batch_stride
-        Int(py=args[11]),  # x_c_stride
-        Int(py=args[12]),  # x_l_stride
-        Int(py=args[13]),  # weight_c_stride
-        Int(py=args[14]),  # weight_w_stride
-        Int(py=args[15]),  # dout_batch_stride
-        Int(py=args[16]),  # dout_c_stride
-        Int(py=args[17]),  # dout_l_stride
-        Int(py=args[18]),  # dx_batch_stride
-        Int(py=args[19]),  # dx_c_stride
-        Int(py=args[20]),  # dx_l_stride
-    )
+    @parameter
+    def run[apply_silu: Bool]():
+        bwd_kernel_cpu[DType.float16, 4, apply_silu](
+            batch_int,
+            dim_int,
+            seqlen_int,
+            x_ptr,
+            w_ptr,
+            b_ptr,
+            dout_ptr,
+            dx_ptr,
+            dweight_acc_ptr,
+            dbias_acc_ptr,
+            x_b_stride,
+            x_c_stride,
+            x_l_stride,
+            w_c_stride,
+            w_w_stride,
+            dout_b_stride,
+            dout_c_stride,
+            dout_l_stride,
+            dx_b_stride,
+            dx_c_stride,
+            dx_l_stride,
+        )
+
+    if apply_silu_rt:
+        run[True]()
+    else:
+        run[False]()
 
     return PythonObject(None)
 
@@ -1315,17 +1349,17 @@ def causal_conv1d_bwd_full_cpu_fp16_w4_silu_bias(
 def PyInit_causal_conv1d_native() -> PythonObject:
     try:
         var m = PythonModuleBuilder("causal_conv1d_native")
-        m.def_py_function[causal_conv1d_fwd_fp16_w4_silu_bias](
-            "causal_conv1d_fwd_fp16_w4_silu_bias"
+        m.def_py_function[causal_conv1d_fwd_fp16_w4_bias](
+            "causal_conv1d_fwd_fp16_w4_bias"
         )
-        m.def_py_function[causal_conv1d_bwd_full_fp16_w4_silu_bias](
-            "causal_conv1d_bwd_full_fp16_w4_silu_bias"
+        m.def_py_function[causal_conv1d_bwd_full_fp16_w4_bias](
+            "causal_conv1d_bwd_full_fp16_w4_bias"
         )
-        m.def_py_function[causal_conv1d_fwd_cpu_fp16_w4_silu_bias](
-            "causal_conv1d_fwd_cpu_fp16_w4_silu_bias"
+        m.def_py_function[causal_conv1d_fwd_cpu_fp16_w4_bias](
+            "causal_conv1d_fwd_cpu_fp16_w4_bias"
         )
-        m.def_py_function[causal_conv1d_bwd_full_cpu_fp16_w4_silu_bias](
-            "causal_conv1d_bwd_full_cpu_fp16_w4_silu_bias"
+        m.def_py_function[causal_conv1d_bwd_full_cpu_fp16_w4_bias](
+            "causal_conv1d_bwd_full_cpu_fp16_w4_bias"
         )
         return m.finalize()
     except e:

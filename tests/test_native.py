@@ -29,8 +29,15 @@ def device(request):
     return request.param
 
 
-def _expected(x, weight, bias):
-    return causal_conv1d_ref(x, weight, bias=bias, activation="silu")
+# Activations the public API accepts. silu and swish are the same op; None
+# is the bias-only forward (no activation). Tests run all three.
+@pytest.fixture(params=[None, "silu", "swish"])
+def activation(request):
+    return request.param
+
+
+def _expected(x, weight, bias, activation):
+    return causal_conv1d_ref(x, weight, bias=bias, activation=activation)
 
 
 def _max_diff(a, b):
@@ -38,20 +45,22 @@ def _max_diff(a, b):
 
 
 @pytest.mark.parametrize("shape", [(1, 8, 16), (2, 64, 128), (4, 256, 512)])
-def test_contiguous(device, shape):
+def test_contiguous(device, shape, activation):
     B, D, L = shape
     W = 4
     x = torch.randn(B, D, L, dtype=torch.float16, device=device)
     weight = torch.randn(D, W, dtype=torch.float16, device=device)
     bias = torch.randn(D, dtype=torch.float16, device=device)
 
-    out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight, bias=bias, activation=activation
+    )
 
-    diff = _max_diff(out, _expected(x, weight, bias))
+    diff = _max_diff(out, _expected(x, weight, bias, activation))
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_x_seq_stride_not_one(device):
+def test_noncontiguous_x_seq_stride_not_one(device, activation):
     """x is (B, D, L) but came from a transpose so stride(2) != 1."""
     B, D, L = 2, 64, 128
     W = 4
@@ -66,14 +75,14 @@ def test_noncontiguous_x_seq_stride_not_one(device):
     bias = torch.randn(D, dtype=torch.float16, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
-        x_view, weight, bias=bias, activation="silu"
+        x_view, weight, bias=bias, activation=activation
     )
 
-    diff = _max_diff(out, _expected(x_view, weight, bias))
+    diff = _max_diff(out, _expected(x_view, weight, bias, activation))
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_x_sliced(device):
+def test_noncontiguous_x_sliced(device, activation):
     """x is a slice of a larger tensor (contiguous stride=1 on last dim, but
     leading strides are larger than the slice's shape would imply if it
     were contiguous)."""
@@ -90,14 +99,14 @@ def test_noncontiguous_x_sliced(device):
     bias = torch.randn(D, dtype=torch.float16, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
-        x_slice, weight, bias=bias, activation="silu"
+        x_slice, weight, bias=bias, activation=activation
     )
 
-    diff = _max_diff(out, _expected(x_slice, weight, bias))
+    diff = _max_diff(out, _expected(x_slice, weight, bias, activation))
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_weight(device):
+def test_noncontiguous_weight(device, activation):
     """weight is (D, W) but stride(1) != 1 (e.g., from transpose)."""
     B, D, L = 2, 64, 128
     W = 4
@@ -110,17 +119,17 @@ def test_noncontiguous_weight(device):
     bias = torch.randn(D, dtype=torch.float16, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
-        x, weight_view, bias=bias, activation="silu"
+        x, weight_view, bias=bias, activation=activation
     )
 
-    diff = _max_diff(out, _expected(x, weight_view, bias))
+    diff = _max_diff(out, _expected(x, weight_view, bias, activation))
     assert diff < 2e-2, f"max_diff={diff}"
 
 
 # ===---------- backward / autograd ----------=== #
 
 
-def _ref_grads(x, weight, bias, dout):
+def _ref_grads(x, weight, bias, dout, activation):
     """Reference: pytorch impl of causal_conv1d_fwd, backward via autograd."""
     x_g = x.detach().requires_grad_()
     w_g = weight.detach().requires_grad_()
@@ -128,13 +137,13 @@ def _ref_grads(x, weight, bias, dout):
     D, W = w_g.shape
     L = x_g.shape[-1]
     pre = F.conv1d(x_g, w_g.unsqueeze(1), b_g, padding=W - 1, groups=D)[..., :L]
-    out = F.silu(pre)
+    out = F.silu(pre) if activation in ("silu", "swish") else pre
     out.backward(dout)
     return x_g.grad, w_g.grad, b_g.grad
 
 
 @pytest.mark.parametrize("shape", [(1, 8, 16), (2, 64, 128), (4, 256, 512)])
-def test_backward_matches_pytorch_ref(device, shape):
+def test_backward_matches_pytorch_ref(device, shape, activation):
     B, D, L = shape
     W = 4
     x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
@@ -142,10 +151,12 @@ def test_backward_matches_pytorch_ref(device, shape):
     bias = torch.randn(D, dtype=torch.float16, device=device, requires_grad=True)
     dout = torch.randn(B, D, L, dtype=torch.float16, device=device)
 
-    out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight, bias=bias, activation=activation
+    )
     out.backward(dout)
 
-    dx_ref, dw_ref, db_ref = _ref_grads(x, weight, bias, dout)
+    dx_ref, dw_ref, db_ref = _ref_grads(x, weight, bias, dout, activation)
 
     # fp16 grads accumulate over (B, L); allow looser tol than forward.
     assert _max_diff(x.grad, dx_ref) < 1e-1, f"dx max_diff={_max_diff(x.grad, dx_ref)}"
@@ -157,14 +168,16 @@ def test_backward_matches_pytorch_ref(device, shape):
     )
 
 
-def test_backward_shapes_and_dtypes(device):
+def test_backward_shapes_and_dtypes(device, activation):
     B, D, L, W = 2, 64, 128, 4
     x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
     weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
     bias = torch.randn(D, dtype=torch.float16, device=device, requires_grad=True)
     dout = torch.randn_like(x)
 
-    out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight, bias=bias, activation=activation
+    )
     out.backward(dout)
 
     assert x.grad.shape == x.shape and x.grad.dtype == x.dtype
