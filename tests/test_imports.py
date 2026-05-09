@@ -39,9 +39,7 @@ def _signature_from_source(path: Path, fn_name: str) -> str:
 def test_causal_conv1d_fn_signature_matches_upstream():
     from causal_conv1d_mojo import causal_conv1d_fn
 
-    mojo_sig = ast.unparse(
-        ast.parse(inspect.getsource(causal_conv1d_fn)).body[0].args
-    )
+    mojo_sig = ast.unparse(ast.parse(inspect.getsource(causal_conv1d_fn)).body[0].args)
     upstream_sig = _signature_from_source(UPSTREAM_INTERFACE, "causal_conv1d_fn")
     assert mojo_sig == upstream_sig, (
         f"signature drift: mojo={mojo_sig!r} upstream={upstream_sig!r}"

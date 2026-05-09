@@ -12,6 +12,7 @@ Reports two numbers per call: wall-clock per call (sync after each
 call) and host-only submit time (one sync at the end). Both at fp16
 with bias and silu, the bench config our native path specializes for.
 """
+
 from __future__ import annotations
 
 import statistics
@@ -104,13 +105,15 @@ def main() -> None:
         weight = torch.randn(dim, width, generator=g).to(
             device=device, dtype=torch.float16
         )
-        bias = torch.randn(dim, generator=g).to(
-            device=device, dtype=torch.float16
-        )
+        bias = torch.randn(dim, generator=g).to(device=device, dtype=torch.float16)
 
         kw = dict(bias=bias, activation="silu")
-        m_wall = bench_wall(lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw))
-        m_host = bench_host(lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw))
+        m_wall = bench_wall(
+            lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw)
+        )
+        m_host = bench_host(
+            lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw)
+        )
         u_wall = bench_wall(lambda: upstream_fn(x, weight, **kw))
         u_host = bench_host(lambda: upstream_fn(x, weight, **kw))
         p_wall = bench_wall(lambda: call_pytorch(x, weight, bias))

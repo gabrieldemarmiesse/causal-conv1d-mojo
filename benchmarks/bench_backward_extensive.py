@@ -4,6 +4,7 @@ Sweeps a wide grid over (batch, dim, seqlen) for width=4 fp16 silu+bias.
 Each iteration rebuilds the autograd graph and runs forward + backward.
 Reports median per-iter wall time; ratios vs mojo.
 """
+
 import statistics
 import time
 
@@ -70,7 +71,9 @@ def _make(B, D, L, W):
 def _pytorch_fwd(x, weight, bias):
     D, W = weight.shape
     L = x.shape[-1]
-    return F.silu(F.conv1d(x, weight.unsqueeze(1), bias, padding=W - 1, groups=D)[..., :L])
+    return F.silu(
+        F.conv1d(x, weight.unsqueeze(1), bias, padding=W - 1, groups=D)[..., :L]
+    )
 
 
 def bench_one(make_call) -> float:
@@ -90,7 +93,7 @@ def bench_one(make_call) -> float:
 
 def fmt_us(t):
     if t >= 1000:
-        return f"{t/1000:>7.2f}ms"
+        return f"{t / 1000:>7.2f}ms"
     return f"{t:>7.1f}μs"
 
 
@@ -147,7 +150,7 @@ def main() -> None:
         print(
             f"{(B, D, L)!s:>20} | "
             f"{fmt_us(m)} | {fmt_us(u)} | {fmt_us(p)} | "
-            f"{m/u:>6.2f}x | {m/p:>6.2f}x"
+            f"{m / u:>6.2f}x | {m / p:>6.2f}x"
         )
 
     # Summary

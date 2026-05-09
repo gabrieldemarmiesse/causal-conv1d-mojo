@@ -29,6 +29,14 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+# E741: "ambiguous variable name `l`" — `l` is conventional for seqlen
+# in ML code (matches upstream causal_conv1d). Same for `B`, `D`, etc.
+ignore = ["E741"]
+
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = ["linux-64"]
@@ -37,6 +45,8 @@ platforms = ["linux-64"]
 cuda-nvcc = "12.8.*"
 pytest = "*"
 matplotlib = "*"
+ruff = "*"
+pre-commit = "*"
 
 [tool.pixi.system-requirements]
 libc = "2.34"
@@ -59,3 +69,7 @@ bench-python = "python benchmarks/bench_python_overhead.py"
 bench-vs-pytorch = "python benchmarks/bench_vs_pytorch.py"
 bench-backward = "python benchmarks/bench_backward.py"
 plot-bench = "python benchmarks/plot_bench.py"
+# Run all pre-commit hooks on every tracked file (CI use). Use
+# `pixi run pre-commit-install` once locally to wire `.git/hooks/pre-commit`.
+lint = "pre-commit run --all-files"
+pre-commit-install = "pre-commit install"

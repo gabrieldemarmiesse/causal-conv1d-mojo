@@ -1,6 +1,7 @@
 """Run the wall-time benches (forward + forward+backward) and emit
 docs/bench_forward.png and docs/bench_backward.png.
 """
+
 from __future__ import annotations
 
 import statistics
@@ -55,7 +56,13 @@ def grouped_bar(labels, pt, up, mojo, *, title, out_path):
     x_pos = list(range(n))
     bw = 0.27
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar([p - bw for p in x_pos], pt, bw, label="pure PyTorch (F.conv1d + F.silu)", color="#bbbbbb")
+    ax.bar(
+        [p - bw for p in x_pos],
+        pt,
+        bw,
+        label="pure PyTorch (F.conv1d + F.silu)",
+        color="#bbbbbb",
+    )
     ax.bar(x_pos, up, bw, label="upstream (Tri Dao CUDA)", color="#3a78c2")
     ax.bar([p + bw for p in x_pos], mojo, bw, label="mojo (this repo)", color="#d05050")
     ax.set_xticks(x_pos)
@@ -88,10 +95,16 @@ def main() -> None:
         weight = torch.randn(d, w, generator=g).to("cuda", torch.float16)
         bias = torch.randn(d, generator=g).to("cuda", torch.float16)
         kw = dict(bias=bias, activation="silu")
-        m_f = bench_wall(lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw), WARMUP_FWD, ITERS_FWD)
+        m_f = bench_wall(
+            lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw),
+            WARMUP_FWD,
+            ITERS_FWD,
+        )
         u_f = bench_wall(lambda: upstream_fn(x, weight, **kw), WARMUP_FWD, ITERS_FWD)
         p_f = bench_wall(lambda: pytorch_fwd(x, weight, bias), WARMUP_FWD, ITERS_FWD)
-        fwd_mojo.append(m_f); fwd_up.append(u_f); fwd_pt.append(p_f)
+        fwd_mojo.append(m_f)
+        fwd_up.append(u_f)
+        fwd_pt.append(p_f)
 
         # ------- forward + backward -------
         dout = torch.randn(b, d, l, generator=g).to("cuda", torch.float16)
@@ -102,26 +115,34 @@ def main() -> None:
                 w_g = weight.detach().requires_grad_()
                 b_g = bias.detach().requires_grad_()
                 if impl == "mojo":
-                    out = causal_conv1d_mojo.causal_conv1d_fn(x_g, w_g, bias=b_g, activation="silu")
+                    out = causal_conv1d_mojo.causal_conv1d_fn(
+                        x_g, w_g, bias=b_g, activation="silu"
+                    )
                 elif impl == "upstream":
                     out = upstream_fn(x_g, w_g, bias=b_g, activation="silu")
                 else:
                     out = pytorch_fwd(x_g, w_g, b_g)
                 out.backward(dout)
+
             return step
 
         m_b = bench_wall(make_fwd_bwd("mojo"), WARMUP_BWD, ITERS_BWD)
         u_b = bench_wall(make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD)
         p_b = bench_wall(make_fwd_bwd("pytorch"), WARMUP_BWD, ITERS_BWD)
-        bwd_mojo.append(m_b); bwd_up.append(u_b); bwd_pt.append(p_b)
+        bwd_mojo.append(m_b)
+        bwd_up.append(u_b)
+        bwd_pt.append(p_b)
 
         print(
-            f"{(b,d,l,w)!s:>22}  fwd: mojo={m_f:7.1f} up={u_f:7.1f} pt={p_f:7.1f} | "
+            f"{(b, d, l, w)!s:>22}  fwd: mojo={m_f:7.1f} up={u_f:7.1f} pt={p_f:7.1f} | "
             f"fwd+bwd: mojo={m_b:7.1f} up={u_b:7.1f} pt={p_b:7.1f}"
         )
 
     grouped_bar(
-        labels, fwd_pt, fwd_up, fwd_mojo,
+        labels,
+        fwd_pt,
+        fwd_up,
+        fwd_mojo,
         title=(
             f"causal_conv1d FORWARD — {gpu_name}\n"
             f"fp16, bias, silu, {ITERS_FWD} iters, sync after each call"
@@ -129,7 +150,10 @@ def main() -> None:
         out_path=DOCS / "bench_forward.png",
     )
     grouped_bar(
-        labels, bwd_pt, bwd_up, bwd_mojo,
+        labels,
+        bwd_pt,
+        bwd_up,
+        bwd_mojo,
         title=(
             f"causal_conv1d FORWARD + BACKWARD — {gpu_name}\n"
             f"fp16, bias, silu, {ITERS_BWD} iters, sync after each call"

@@ -9,6 +9,7 @@ mojo:     causal_conv1d_mojo.causal_conv1d_fn (native fwd + custom bwd)
 upstream: causal_conv1d.causal_conv1d_fn (Tri Dao CUDA fwd + bwd)
 pytorch:  pure F.conv1d(groups=D)+F.silu, autograd-driven backward
 """
+
 from __future__ import annotations
 
 import statistics
@@ -45,7 +46,9 @@ def _make(B, D, L, W):
 def _pytorch_fwd(x, weight, bias):
     D, W = weight.shape
     L = x.shape[-1]
-    return F.silu(F.conv1d(x, weight.unsqueeze(1), bias, padding=W - 1, groups=D)[..., :L])
+    return F.silu(
+        F.conv1d(x, weight.unsqueeze(1), bias, padding=W - 1, groups=D)[..., :L]
+    )
 
 
 def bench_one(make_call) -> float:
@@ -75,10 +78,7 @@ def main() -> None:
         f"activation=silu | bias=True | iters={ITERS} (forward + backward)\n"
     )
 
-    h = (
-        f"{'shape (B,D,L,W)':>22} | "
-        f"{'mojo':>10} | {'upstream':>10} | {'pytorch':>10}"
-    )
+    h = f"{'shape (B,D,L,W)':>22} | {'mojo':>10} | {'upstream':>10} | {'pytorch':>10}"
     print(h)
     print("-" * len(h))
 
@@ -87,27 +87,36 @@ def main() -> None:
         kw = dict(bias=bias, activation="silu")
 
         def call_mojo():
-            x_, w_, b_ = x.detach().requires_grad_(), weight.detach().requires_grad_(), bias.detach().requires_grad_()
+            x_, w_, b_ = (
+                x.detach().requires_grad_(),
+                weight.detach().requires_grad_(),
+                bias.detach().requires_grad_(),
+            )
             out = causal_conv1d_mojo.causal_conv1d_fn(x_, w_, **{**kw, "bias": b_})
             return out, dout
 
         def call_upstream():
-            x_, w_, b_ = x.detach().requires_grad_(), weight.detach().requires_grad_(), bias.detach().requires_grad_()
+            x_, w_, b_ = (
+                x.detach().requires_grad_(),
+                weight.detach().requires_grad_(),
+                bias.detach().requires_grad_(),
+            )
             out = upstream_fn(x_, w_, **{**kw, "bias": b_})
             return out, dout
 
         def call_pytorch():
-            x_, w_, b_ = x.detach().requires_grad_(), weight.detach().requires_grad_(), bias.detach().requires_grad_()
+            x_, w_, b_ = (
+                x.detach().requires_grad_(),
+                weight.detach().requires_grad_(),
+                bias.detach().requires_grad_(),
+            )
             out = _pytorch_fwd(x_, w_, b_)
             return out, dout
 
         m = bench_one(call_mojo)
         u = bench_one(call_upstream)
         p = bench_one(call_pytorch)
-        print(
-            f"{(B, D, L, W)!s:>22} | "
-            f"{m:9.1f}u | {u:9.1f}u | {p:9.1f}u"
-        )
+        print(f"{(B, D, L, W)!s:>22} | {m:9.1f}u | {u:9.1f}u | {p:9.1f}u")
 
 
 if __name__ == "__main__":

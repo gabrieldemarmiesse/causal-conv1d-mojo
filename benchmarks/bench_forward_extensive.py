@@ -1,4 +1,5 @@
 """Extensive forward-only bench: mojo vs upstream vs pure PyTorch."""
+
 import statistics
 import time
 
@@ -57,7 +58,9 @@ def _make(B, D, L, W):
 def _pytorch_fwd(x, weight, bias):
     D, W = weight.shape
     L = x.shape[-1]
-    return F.silu(F.conv1d(x, weight.unsqueeze(1), bias, padding=W - 1, groups=D)[..., :L])
+    return F.silu(
+        F.conv1d(x, weight.unsqueeze(1), bias, padding=W - 1, groups=D)[..., :L]
+    )
 
 
 def bench_one(call) -> float:
@@ -75,7 +78,7 @@ def bench_one(call) -> float:
 
 def fmt_us(t):
     if t >= 1000:
-        return f"{t/1000:>7.2f}ms"
+        return f"{t / 1000:>7.2f}ms"
     return f"{t:>7.1f}μs"
 
 
@@ -95,11 +98,17 @@ def main() -> None:
     rows = []
     for B, D, L, W in SHAPES:
         x, weight, bias = _make(B, D, L, W)
-        m = bench_one(lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu"))
+        m = bench_one(
+            lambda: causal_conv1d_mojo.causal_conv1d_fn(
+                x, weight, bias=bias, activation="silu"
+            )
+        )
         u = bench_one(lambda: upstream_fn(x, weight, bias=bias, activation="silu"))
         p = bench_one(lambda: _pytorch_fwd(x, weight, bias))
         rows.append((B, D, L, m, u, p))
-        print(f"{(B, D, L)!s:>20} | {fmt_us(m)} | {fmt_us(u)} | {fmt_us(p)} | {m/u:>6.2f}x | {m/p:>6.2f}x")
+        print(
+            f"{(B, D, L)!s:>20} | {fmt_us(m)} | {fmt_us(u)} | {fmt_us(p)} | {m / u:>6.2f}x | {m / p:>6.2f}x"
+        )
 
     ratios_up = [m / u for _, _, _, m, u, _ in rows]
     ratios_pt = [m / p for _, _, _, m, _, p in rows]

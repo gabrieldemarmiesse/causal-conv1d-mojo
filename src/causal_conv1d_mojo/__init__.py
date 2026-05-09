@@ -1,15 +1,14 @@
-"""causal_conv1d, fused into a single Mojo GPU kernel and called via a
-direct Python <-> Mojo CPython extension (no MAX framework).
+"""causal_conv1d, fused into Mojo GPU kernels and called via a direct
+Python <-> Mojo CPython extension (no MAX framework).
 
-Forward goes through the native Mojo kernel. Backward is a pure-PyTorch
-implementation -- it's the slow path (one call per training step) and
-recomposes well-known torch ops, so the cost of a custom kernel didn't
-seem worth it.
+Both forward and backward go through native Mojo kernels. The backward
+is a single fused kernel: dx + dweight + dbias accumulation in one
+launch (mirrors upstream's `causal_conv1d_bwd_kernel`).
 """
+
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 
 # `mojo.importer` registers a Python import hook so that
 #   from causal_conv1d_mojo._native import causal_conv1d_native
@@ -26,35 +25,68 @@ __version__ = "1.6.1"
 
 def _native_fwd(x, weight, bias, out):
     _native_mod.causal_conv1d_fwd_fp16_w4_silu_bias(
-        x.data_ptr(), weight.data_ptr(), bias.data_ptr(), out.data_ptr(),
-        x.shape[0], x.shape[1], x.shape[2],
-        x.stride(0), x.stride(1), x.stride(2),
-        weight.stride(0), weight.stride(1),
-        out.stride(0), out.stride(1), out.stride(2),
+        x.data_ptr(),
+        weight.data_ptr(),
+        bias.data_ptr(),
+        out.data_ptr(),
+        x.shape[0],
+        x.shape[1],
+        x.shape[2],
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
         torch.cuda.current_stream().cuda_stream,
     )
 
 
 def _native_bwd_dx(dpre, weight, dx):
     _native_mod.causal_conv1d_bwd_dx_fp16_w4(
-        dpre.data_ptr(), weight.data_ptr(), dx.data_ptr(),
-        dpre.shape[0], dpre.shape[1], dpre.shape[2],
-        dpre.stride(0), dpre.stride(1), dpre.stride(2),
-        weight.stride(0), weight.stride(1),
-        dx.stride(0), dx.stride(1), dx.stride(2),
+        dpre.data_ptr(),
+        weight.data_ptr(),
+        dx.data_ptr(),
+        dpre.shape[0],
+        dpre.shape[1],
+        dpre.shape[2],
+        dpre.stride(0),
+        dpre.stride(1),
+        dpre.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        dx.stride(0),
+        dx.stride(1),
+        dx.stride(2),
         torch.cuda.current_stream().cuda_stream,
     )
 
 
 def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc):
     _native_mod.causal_conv1d_bwd_full_fp16_w4_silu_bias(
-        x.data_ptr(), weight.data_ptr(), bias.data_ptr(), dout.data_ptr(),
-        dx.data_ptr(), dweight_acc.data_ptr(), dbias_acc.data_ptr(),
-        x.shape[0], x.shape[1], x.shape[2],
-        x.stride(0), x.stride(1), x.stride(2),
-        weight.stride(0), weight.stride(1),
-        dout.stride(0), dout.stride(1), dout.stride(2),
-        dx.stride(0), dx.stride(1), dx.stride(2),
+        x.data_ptr(),
+        weight.data_ptr(),
+        bias.data_ptr(),
+        dout.data_ptr(),
+        dx.data_ptr(),
+        dweight_acc.data_ptr(),
+        dbias_acc.data_ptr(),
+        x.shape[0],
+        x.shape[1],
+        x.shape[2],
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        dout.stride(0),
+        dout.stride(1),
+        dout.stride(2),
+        dx.stride(0),
+        dx.stride(1),
+        dx.stride(2),
         torch.cuda.current_stream().cuda_stream,
     )
 
@@ -116,12 +148,14 @@ def causal_conv1d_fn(
     if return_final_states or final_states_out is not None:
         raise NotImplementedError("return_final_states is not supported")
     if activation not in ("silu", "swish"):
-        raise NotImplementedError(
-            "only activation in {'silu', 'swish'} is supported"
-        )
+        raise NotImplementedError("only activation in {'silu', 'swish'} is supported")
     if bias is None:
         raise NotImplementedError("bias is required")
-    if x.dtype != torch.float16 or weight.dtype != torch.float16 or bias.dtype != torch.float16:
+    if (
+        x.dtype != torch.float16
+        or weight.dtype != torch.float16
+        or bias.dtype != torch.float16
+    ):
         raise NotImplementedError("only fp16 is supported")
     if not x.is_cuda:
         raise NotImplementedError("only CUDA tensors are supported")

@@ -7,9 +7,9 @@ impl and the upstream CUDA op N times each, wrapped in NVTX-style
 record_function ranges. The profiler then reports per-kernel cumulative
 GPU time, which we group back into "mojo" / "upstream" buckets.
 """
+
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 
 import torch
@@ -53,7 +53,9 @@ def main() -> None:
     activation = "silu"
     g = torch.Generator(device="cpu").manual_seed(0)
 
-    print(f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | activation=silu | bias=True | iters={ITERS}\n")
+    print(
+        f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | activation=silu | bias=True | iters={ITERS}\n"
+    )
     header = f"{'shape (B,D,L,W)':>22} | {'mojo (us/call)':>15} | {'upstream (us/call)':>19} | {'ratio':>7}"
     print(header)
     print("-" * len(header))
@@ -65,7 +67,9 @@ def main() -> None:
 
         # Warmup: not under the profiler.
         for _ in range(20):
-            causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation=activation)
+            causal_conv1d_mojo.causal_conv1d_fn(
+                x, weight, bias=bias, activation=activation
+            )
             upstream_fn(x, weight, bias=bias, activation=activation)
         torch.cuda.synchronize()
 
@@ -75,7 +79,9 @@ def main() -> None:
         ) as prof:
             for _ in range(ITERS):
                 with record_function("mojo"):
-                    causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation=activation)
+                    causal_conv1d_mojo.causal_conv1d_fn(
+                        x, weight, bias=bias, activation=activation
+                    )
                 with record_function("upstream"):
                     upstream_fn(x, weight, bias=bias, activation=activation)
             torch.cuda.synchronize()
@@ -103,7 +109,9 @@ def main() -> None:
         mojo_us = totals["mojo"] / ITERS
         up_us = totals["upstream"] / ITERS
         ratio = mojo_us / up_us if up_us else float("inf")
-        print(f"{(batch, dim, seqlen, width)!s:>22} | {mojo_us:15.1f} | {up_us:19.1f} | {ratio:6.2f}x")
+        print(
+            f"{(batch, dim, seqlen, width)!s:>22} | {mojo_us:15.1f} | {up_us:19.1f} | {ratio:6.2f}x"
+        )
 
 
 if __name__ == "__main__":

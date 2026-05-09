@@ -17,6 +17,7 @@ reports two more numbers per call:
 Mojo path = causal_conv1d_mojo (MAX CustomOpLibrary -> Mojo kernel).
 Upstream  = causal_conv1d.causal_conv1d_fn (torch.library.custom_op -> CUDA).
 """
+
 from __future__ import annotations
 
 import statistics
@@ -76,7 +77,9 @@ def main() -> None:
     device = torch.device("cuda")
     dtype = torch.float16
     g = torch.Generator(device="cpu").manual_seed(0)
-    print(f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | activation=silu | bias=True | iters={ITERS}\n")
+    print(
+        f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | activation=silu | bias=True | iters={ITERS}\n"
+    )
 
     h = (
         f"{'shape (B,D,L,W)':>22} | "

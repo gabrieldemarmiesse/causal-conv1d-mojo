@@ -1,0 +1,41 @@
+# Quick pre-commit checks: ruff + mojo build sanity.
+#
+#   pixi run pre-commit-install   # wire .git/hooks/pre-commit (one-shot)
+#   pixi run lint                 # run all hooks on all tracked files (CI)
+#
+# All hooks are `language: system` and shell out to `pixi run ...` so they
+# share the project's pinned mojo / ruff / cuda-nvcc versions instead of
+# pre-commit fetching its own.
+#
+# Note on `mojo format`: not wired up. The conda-forge `max` package
+# doesn't ship a formatter, and the standalone `mblack` on PyPI is at
+# 0.2.dev1 — too old to parse current Mojo syntax (`fn ... -> Float32:`
+# fails to parse). `mojo build` below catches actual syntax/type errors.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: pixi run ruff check --fix
+        language: system
+        types: [python]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format
+        entry: pixi run ruff format
+        language: system
+        types: [python]
+        require_serial: true
+
+      # Sanity-check that the GPU kernel still compiles. `mojo build --emit
+      # shared-lib` writes the .so to /tmp; we don't keep it (the runtime
+      # `mojo.importer` hook produces the real cached .so on first import).
+      # ~2s on a warm cache, so cheap enough for every commit.
+      - id: mojo-build
+        name: mojo build (kernel sanity)
+        entry: bash -c 'pixi run mojo build --emit shared-lib src/causal_conv1d_mojo/_native/causal_conv1d_native.mojo -o /tmp/cc1d_precommit_check.so && rm -f /tmp/cc1d_precommit_check.so'
+        language: system
+        files: ^src/causal_conv1d_mojo/_native/.*\.mojo$
+        pass_filenames: false
+        require_serial: true

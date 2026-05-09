@@ -3,6 +3,7 @@
 The native extension currently only specializes fp16 / width=4 /
 has_bias=True / activation="silu" / no initial_states / no return_final_states.
 """
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -10,12 +11,15 @@ import torch.nn.functional as F
 from causal_conv1d.causal_conv1d_interface import causal_conv1d_ref
 
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="native path is CUDA-only")
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="native path is CUDA-only"
+)
 
 
 @pytest.fixture(scope="module")
 def native_mod():
     from causal_conv1d_mojo._native import causal_conv1d_native
+
     return causal_conv1d_native
 
 
@@ -25,10 +29,17 @@ def _call(native_mod, x, weight, bias, out):
         weight.data_ptr(),
         bias.data_ptr(),
         out.data_ptr(),
-        x.shape[0], x.shape[1], x.shape[2],
-        x.stride(0), x.stride(1), x.stride(2),
-        weight.stride(0), weight.stride(1),
-        out.stride(0), out.stride(1), out.stride(2),
+        x.shape[0],
+        x.shape[1],
+        x.shape[2],
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
         torch.cuda.current_stream().cuda_stream,
     )
 
@@ -158,10 +169,10 @@ def test_backward_matches_pytorch_ref(shape):
     # fp16 grads accumulate over (B, L); allow looser tol than forward.
     assert _max_diff(x.grad, dx_ref) < 1e-1, f"dx max_diff={_max_diff(x.grad, dx_ref)}"
     assert _max_diff(weight.grad, dw_ref) < 1.0, (
-        f"dw max_diff={_max_diff(weight.grad, dw_ref)} (sums over B*L=" f"{B*L} terms)"
+        f"dw max_diff={_max_diff(weight.grad, dw_ref)} (sums over B*L={B * L} terms)"
     )
     assert _max_diff(bias.grad, db_ref) < 1.0, (
-        f"db max_diff={_max_diff(bias.grad, db_ref)} (sums over B*L=" f"{B*L} terms)"
+        f"db max_diff={_max_diff(bias.grad, db_ref)} (sums over B*L={B * L} terms)"
     )
 
 
