@@ -44,26 +44,6 @@ def _native_fwd(x, weight, bias, out):
     )
 
 
-def _native_bwd_dx(dpre, weight, dx):
-    _native_mod.causal_conv1d_bwd_dx_fp16_w4(
-        dpre.data_ptr(),
-        weight.data_ptr(),
-        dx.data_ptr(),
-        dpre.shape[0],
-        dpre.shape[1],
-        dpre.shape[2],
-        dpre.stride(0),
-        dpre.stride(1),
-        dpre.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        dx.stride(0),
-        dx.stride(1),
-        dx.stride(2),
-        torch.cuda.current_stream().cuda_stream,
-    )
-
-
 def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc):
     _native_mod.causal_conv1d_bwd_full_fp16_w4_silu_bias(
         x.data_ptr(),
