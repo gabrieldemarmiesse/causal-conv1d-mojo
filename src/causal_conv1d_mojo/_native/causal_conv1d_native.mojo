@@ -137,7 +137,6 @@ fn fwd_kernel[
     dtype: DType,
     width: Int,
     has_bias: Bool,
-    activation: StaticString,
     contig_inner: Bool,
 ](
     seqlen: Int,
@@ -220,9 +219,8 @@ fn fwd_kernel[
                     ].cast[accum_t]()
             acc += val * weights[k]
 
-        @parameter
-        if activation == "silu":
-            acc = _silu_f32(Float32(acc))
+        # silu (= swish) is the only activation we ship; no comptime branch.
+        acc = _silu_f32(Float32(acc))
 
         @parameter
         if contig_inner:
@@ -919,8 +917,8 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
 
     if x_l_stride == 1 and w_w_stride == 1 and o_l_stride == 1:
         var compiled = ctx.compile_function[
-            fwd_kernel[DType.float16, 4, True, "silu", True],
-            fwd_kernel[DType.float16, 4, True, "silu", True],
+            fwd_kernel[DType.float16, 4, True, True],
+            fwd_kernel[DType.float16, 4, True, True],
         ]()
         stream.enqueue_function(
             compiled,
@@ -942,8 +940,8 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
         )
     else:
         var compiled = ctx.compile_function[
-            fwd_kernel[DType.float16, 4, True, "silu", False],
-            fwd_kernel[DType.float16, 4, True, "silu", False],
+            fwd_kernel[DType.float16, 4, True, False],
+            fwd_kernel[DType.float16, 4, True, False],
         ]()
         stream.enqueue_function(
             compiled,
