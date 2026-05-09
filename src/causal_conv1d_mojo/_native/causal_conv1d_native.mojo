@@ -133,80 +133,12 @@ fn _block_sum_f32[block_size: Int](val: Float32) -> Float32:
     return block_val
 
 
-fn fwd_kernel_contig[
+fn fwd_kernel[
     dtype: DType,
     width: Int,
     has_bias: Bool,
     activation: StaticString,
-](
-    seqlen: Int,
-    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    x_batch_stride: Int,
-    x_c_stride: Int,
-    weight_c_stride: Int,
-    out_batch_stride: Int,
-    out_c_stride: Int,
-):
-    """Fast path: x.stride(2)=1, weight.stride(1)=1, output.stride(2)=1."""
-    alias accum_t = DType.float32
-
-    var tidx: Int = thread_idx.x
-    var batch_id: Int = block_idx.z
-    var channel_id: Int = block_idx.y
-    var chunk_id: Int = block_idx.x
-
-    var weights = InlineArray[Scalar[accum_t], width](uninitialized=True)
-    var weight_base = channel_id * weight_c_stride
-
-    @parameter
-    for k in range(width):
-        weights[k] = weight_ptr[weight_base + k].cast[accum_t]()
-
-    var cur_bias: Scalar[accum_t] = 0
-
-    @parameter
-    if has_bias:
-        cur_bias = bias_ptr[channel_id].cast[accum_t]()
-
-    var seq_start = chunk_id * kNThreads * kNElts + tidx * kNElts
-    if seq_start >= seqlen:
-        return
-
-    var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
-    var out_base = batch_id * out_batch_stride + channel_id * out_c_stride
-
-    @parameter
-    for i in range(kNElts):
-        var t = seq_start + i
-        if t >= seqlen:
-            break
-        var acc: Scalar[accum_t] = cur_bias
-
-        @parameter
-        for k in range(width):
-            var src_t = t + k - (width - 1)
-            var val: Scalar[accum_t]
-            if src_t < 0:
-                val = 0
-            else:
-                val = x_ptr[x_base + src_t].cast[accum_t]()
-            acc += val * weights[k]
-
-        @parameter
-        if activation == "silu":
-            acc = _silu_f32(Float32(acc))
-
-        output_ptr[out_base + t] = acc.cast[dtype]()
-
-
-fn fwd_kernel_strided[
-    dtype: DType,
-    width: Int,
-    has_bias: Bool,
-    activation: StaticString,
+    contig_inner: Bool,
 ](
     seqlen: Int,
     x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -222,7 +154,14 @@ fn fwd_kernel_strided[
     out_c_stride: Int,
     out_l_stride: Int,
 ):
-    """Slow path: any inner stride may be non-1."""
+    """fp16 / silu / has_bias / width=W causal conv1d forward, GPU.
+
+    `contig_inner` is the comptime fast path: when True, the innermost
+    axes of x / weight / out have stride=1 and we drop the
+    `* x_l_stride` / `* weight_w_stride` / `* out_l_stride` multiplies
+    so the compiler can constant-fold the index math (~2× kernel time
+    on memory-bound shapes if we don't).
+    """
     alias accum_t = DType.float32
 
     var tidx: Int = thread_idx.x
@@ -235,7 +174,14 @@ fn fwd_kernel_strided[
 
     @parameter
     for k in range(width):
-        weights[k] = weight_ptr[weight_base + k * weight_w_stride].cast[accum_t]()
+
+        @parameter
+        if contig_inner:
+            weights[k] = weight_ptr[weight_base + k].cast[accum_t]()
+        else:
+            weights[k] = weight_ptr[
+                weight_base + k * weight_w_stride
+            ].cast[accum_t]()
 
     var cur_bias: Scalar[accum_t] = 0
 
@@ -264,14 +210,25 @@ fn fwd_kernel_strided[
             if src_t < 0:
                 val = 0
             else:
-                val = x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
+
+                @parameter
+                if contig_inner:
+                    val = x_ptr[x_base + src_t].cast[accum_t]()
+                else:
+                    val = x_ptr[
+                        x_base + src_t * x_l_stride
+                    ].cast[accum_t]()
             acc += val * weights[k]
 
         @parameter
         if activation == "silu":
             acc = _silu_f32(Float32(acc))
 
-        output_ptr[out_base + t * out_l_stride] = acc.cast[dtype]()
+        @parameter
+        if contig_inner:
+            output_ptr[out_base + t] = acc.cast[dtype]()
+        else:
+            output_ptr[out_base + t * out_l_stride] = acc.cast[dtype]()
 
 
 fn bwd_full_kernel[
@@ -962,8 +919,8 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
 
     if x_l_stride == 1 and w_w_stride == 1 and o_l_stride == 1:
         var compiled = ctx.compile_function[
-            fwd_kernel_contig[DType.float16, 4, True, "silu"],
-            fwd_kernel_contig[DType.float16, 4, True, "silu"],
+            fwd_kernel[DType.float16, 4, True, "silu", True],
+            fwd_kernel[DType.float16, 4, True, "silu", True],
         ]()
         stream.enqueue_function(
             compiled,
@@ -974,16 +931,19 @@ def causal_conv1d_fwd_fp16_w4_silu_bias(
             o_ptr,
             x_b_stride,
             x_c_stride,
+            x_l_stride,
             w_c_stride,
+            w_w_stride,
             o_b_stride,
             o_c_stride,
+            o_l_stride,
             grid_dim=grid,
             block_dim=(kNThreads,),
         )
     else:
         var compiled = ctx.compile_function[
-            fwd_kernel_strided[DType.float16, 4, True, "silu"],
-            fwd_kernel_strided[DType.float16, 4, True, "silu"],
+            fwd_kernel[DType.float16, 4, True, "silu", False],
+            fwd_kernel[DType.float16, 4, True, "silu", False],
         ]()
         stream.enqueue_function(
             compiled,

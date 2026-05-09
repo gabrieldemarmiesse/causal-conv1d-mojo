@@ -63,9 +63,7 @@ causal-conv1d-mojo = { path = ".", editable = true }
 # the .so under src/causal_conv1d_mojo/_native/__mojocache__/. So none of the
 # tasks below need to pre-build anything.
 test = "pytest"
-bench = "python benchmarks/bench_causal_conv1d.py"
 bench-gpu = "python benchmarks/bench_gpu_kernel_time.py"
-bench-python = "python benchmarks/bench_python_overhead.py"
 bench-vs-pytorch = "python benchmarks/bench_vs_pytorch.py"
 bench-backward = "python benchmarks/bench_backward.py"
 plot-bench = "python benchmarks/plot_bench.py"
