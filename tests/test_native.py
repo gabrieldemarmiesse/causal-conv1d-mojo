@@ -36,6 +36,19 @@ def activation(request):
     return request.param
 
 
+# `bias=None` is the bias-free forward (`out = silu(conv1d(x, w))`). The
+# kernel's `has_bias` comptime parameter selects the path.
+@pytest.fixture(params=[True, False], ids=["with_bias", "no_bias"])
+def bias_present(request):
+    return request.param
+
+
+def _make_bias(D, *, dtype, device, present, requires_grad=False):
+    if not present:
+        return None
+    return torch.randn(D, dtype=dtype, device=device, requires_grad=requires_grad)
+
+
 def _expected(x, weight, bias, activation):
     return causal_conv1d_ref(x, weight, bias=bias, activation=activation)
 
@@ -45,12 +58,12 @@ def _max_diff(a, b):
 
 
 @pytest.mark.parametrize("shape", [(1, 8, 16), (2, 64, 128), (4, 256, 512)])
-def test_contiguous(device, shape, activation):
+def test_contiguous(device, shape, activation, bias_present):
     B, D, L = shape
     W = 4
     x = torch.randn(B, D, L, dtype=torch.float16, device=device)
     weight = torch.randn(D, W, dtype=torch.float16, device=device)
-    bias = torch.randn(D, dtype=torch.float16, device=device)
+    bias = _make_bias(D, dtype=torch.float16, device=device, present=bias_present)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
         x, weight, bias=bias, activation=activation
@@ -60,7 +73,7 @@ def test_contiguous(device, shape, activation):
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_x_seq_stride_not_one(device, activation):
+def test_noncontiguous_x_seq_stride_not_one(device, activation, bias_present):
     """x is (B, D, L) but came from a transpose so stride(2) != 1."""
     B, D, L = 2, 64, 128
     W = 4
@@ -72,7 +85,7 @@ def test_noncontiguous_x_seq_stride_not_one(device, activation):
     assert x_view.stride(2) != 1
 
     weight = torch.randn(D, W, dtype=torch.float16, device=device)
-    bias = torch.randn(D, dtype=torch.float16, device=device)
+    bias = _make_bias(D, dtype=torch.float16, device=device, present=bias_present)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
         x_view, weight, bias=bias, activation=activation
@@ -82,7 +95,7 @@ def test_noncontiguous_x_seq_stride_not_one(device, activation):
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_x_sliced(device, activation):
+def test_noncontiguous_x_sliced(device, activation, bias_present):
     """x is a slice of a larger tensor (contiguous stride=1 on last dim, but
     leading strides are larger than the slice's shape would imply if it
     were contiguous)."""
@@ -96,7 +109,7 @@ def test_noncontiguous_x_sliced(device, activation):
     assert x_slice.stride(1) == L * 2  # gap between rows
 
     weight = torch.randn(D, W, dtype=torch.float16, device=device)
-    bias = torch.randn(D, dtype=torch.float16, device=device)
+    bias = _make_bias(D, dtype=torch.float16, device=device, present=bias_present)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
         x_slice, weight, bias=bias, activation=activation
@@ -106,7 +119,7 @@ def test_noncontiguous_x_sliced(device, activation):
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_weight(device, activation):
+def test_noncontiguous_weight(device, activation, bias_present):
     """weight is (D, W) but stride(1) != 1 (e.g., from transpose)."""
     B, D, L = 2, 64, 128
     W = 4
@@ -116,7 +129,7 @@ def test_noncontiguous_weight(device, activation):
     assert not weight_view.is_contiguous()
     assert weight_view.stride(1) != 1
 
-    bias = torch.randn(D, dtype=torch.float16, device=device)
+    bias = _make_bias(D, dtype=torch.float16, device=device, present=bias_present)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
         x, weight_view, bias=bias, activation=activation
@@ -133,22 +146,24 @@ def _ref_grads(x, weight, bias, dout, activation):
     """Reference: pytorch impl of causal_conv1d_fwd, backward via autograd."""
     x_g = x.detach().requires_grad_()
     w_g = weight.detach().requires_grad_()
-    b_g = bias.detach().requires_grad_()
+    b_g = bias.detach().requires_grad_() if bias is not None else None
     D, W = w_g.shape
     L = x_g.shape[-1]
     pre = F.conv1d(x_g, w_g.unsqueeze(1), b_g, padding=W - 1, groups=D)[..., :L]
     out = F.silu(pre) if activation in ("silu", "swish") else pre
     out.backward(dout)
-    return x_g.grad, w_g.grad, b_g.grad
+    return x_g.grad, w_g.grad, (b_g.grad if b_g is not None else None)
 
 
 @pytest.mark.parametrize("shape", [(1, 8, 16), (2, 64, 128), (4, 256, 512)])
-def test_backward_matches_pytorch_ref(device, shape, activation):
+def test_backward_matches_pytorch_ref(device, shape, activation, bias_present):
     B, D, L = shape
     W = 4
     x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
     weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
-    bias = torch.randn(D, dtype=torch.float16, device=device, requires_grad=True)
+    bias = _make_bias(
+        D, dtype=torch.float16, device=device, present=bias_present, requires_grad=True
+    )
     dout = torch.randn(B, D, L, dtype=torch.float16, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
@@ -163,16 +178,21 @@ def test_backward_matches_pytorch_ref(device, shape, activation):
     assert _max_diff(weight.grad, dw_ref) < 1.0, (
         f"dw max_diff={_max_diff(weight.grad, dw_ref)} (sums over B*L={B * L} terms)"
     )
-    assert _max_diff(bias.grad, db_ref) < 1.0, (
-        f"db max_diff={_max_diff(bias.grad, db_ref)} (sums over B*L={B * L} terms)"
-    )
+    if bias_present:
+        assert _max_diff(bias.grad, db_ref) < 1.0, (
+            f"db max_diff={_max_diff(bias.grad, db_ref)} (sums over B*L={B * L} terms)"
+        )
+    else:
+        assert bias is None and db_ref is None
 
 
-def test_backward_shapes_and_dtypes(device, activation):
+def test_backward_shapes_and_dtypes(device, activation, bias_present):
     B, D, L, W = 2, 64, 128, 4
     x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
     weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
-    bias = torch.randn(D, dtype=torch.float16, device=device, requires_grad=True)
+    bias = _make_bias(
+        D, dtype=torch.float16, device=device, present=bias_present, requires_grad=True
+    )
     dout = torch.randn_like(x)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
@@ -182,7 +202,8 @@ def test_backward_shapes_and_dtypes(device, activation):
 
     assert x.grad.shape == x.shape and x.grad.dtype == x.dtype
     assert weight.grad.shape == weight.shape and weight.grad.dtype == weight.dtype
-    assert bias.grad.shape == bias.shape and bias.grad.dtype == bias.dtype
+    if bias_present:
+        assert bias.grad.shape == bias.shape and bias.grad.dtype == bias.dtype
 
 
 # ===---------- zero-sized tensors ----------=== #
@@ -194,12 +215,12 @@ def test_backward_shapes_and_dtypes(device, activation):
 
 
 @pytest.mark.parametrize("shape", [(0, 64, 128), (2, 0, 128), (2, 64, 0), (0, 0, 0)])
-def test_zero_sized_forward(device, shape, activation):
+def test_zero_sized_forward(device, shape, activation, bias_present):
     B, D, L = shape
     W = 4
     x = torch.randn(B, D, L, dtype=torch.float16, device=device)
     weight = torch.randn(D, W, dtype=torch.float16, device=device)
-    bias = torch.randn(D, dtype=torch.float16, device=device)
+    bias = _make_bias(D, dtype=torch.float16, device=device, present=bias_present)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
         x, weight, bias=bias, activation=activation
@@ -211,12 +232,14 @@ def test_zero_sized_forward(device, shape, activation):
 
 
 @pytest.mark.parametrize("shape", [(0, 64, 128), (2, 0, 128), (2, 64, 0), (0, 0, 0)])
-def test_zero_sized_backward(device, shape, activation):
+def test_zero_sized_backward(device, shape, activation, bias_present):
     B, D, L = shape
     W = 4
     x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
     weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
-    bias = torch.randn(D, dtype=torch.float16, device=device, requires_grad=True)
+    bias = _make_bias(
+        D, dtype=torch.float16, device=device, present=bias_present, requires_grad=True
+    )
     dout = torch.randn_like(x)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
@@ -226,4 +249,5 @@ def test_zero_sized_backward(device, shape, activation):
 
     assert x.grad.shape == x.shape and x.grad.dtype == x.dtype
     assert weight.grad.shape == weight.shape and weight.grad.dtype == weight.dtype
-    assert bias.grad.shape == bias.shape and bias.grad.dtype == bias.dtype
+    if bias_present:
+        assert bias.grad.shape == bias.shape and bias.grad.dtype == bias.dtype
