@@ -2,6 +2,9 @@
 
 The native extension currently only specializes fp16 / width=4 /
 has_bias=True / activation="silu" / no initial_states / no return_final_states.
+
+Each test runs on every available device. CPU is always present; CUDA is
+exercised only if a GPU is detected.
 """
 
 import pytest
@@ -12,9 +15,18 @@ import causal_conv1d_mojo
 from causal_conv1d.causal_conv1d_interface import causal_conv1d_ref
 
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="native path is CUDA-only"
-)
+# Devices to run every test against. CPU is always available; CUDA is
+# parametrised in but skipped per-test if the box has no GPU. fp16 on CPU
+# is supported on PyTorch 2.x — the native CPU kernel computes everything
+# in fp32 internally and casts back at the boundary.
+_DEVICES = ["cpu"]
+if torch.cuda.is_available():
+    _DEVICES.append("cuda")
+
+
+@pytest.fixture(params=_DEVICES)
+def device(request):
+    return request.param
 
 
 def _expected(x, weight, bias):
@@ -26,12 +38,12 @@ def _max_diff(a, b):
 
 
 @pytest.mark.parametrize("shape", [(1, 8, 16), (2, 64, 128), (4, 256, 512)])
-def test_contiguous(shape):
+def test_contiguous(device, shape):
     B, D, L = shape
     W = 4
-    x = torch.randn(B, D, L, dtype=torch.float16, device="cuda")
-    weight = torch.randn(D, W, dtype=torch.float16, device="cuda")
-    bias = torch.randn(D, dtype=torch.float16, device="cuda")
+    x = torch.randn(B, D, L, dtype=torch.float16, device=device)
+    weight = torch.randn(D, W, dtype=torch.float16, device=device)
+    bias = torch.randn(D, dtype=torch.float16, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")
 
@@ -39,19 +51,19 @@ def test_contiguous(shape):
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_x_seq_stride_not_one():
+def test_noncontiguous_x_seq_stride_not_one(device):
     """x is (B, D, L) but came from a transpose so stride(2) != 1."""
     B, D, L = 2, 64, 128
     W = 4
     # Allocate as (B, L, D) then transpose to expose (B, D, L) with non-unit
     # innermost stride. After transpose: stride(2) == D, stride(1) == 1.
-    x_view = torch.randn(B, L, D, dtype=torch.float16, device="cuda").transpose(1, 2)
+    x_view = torch.randn(B, L, D, dtype=torch.float16, device=device).transpose(1, 2)
     assert x_view.shape == (B, D, L)
     assert not x_view.is_contiguous()
     assert x_view.stride(2) != 1
 
-    weight = torch.randn(D, W, dtype=torch.float16, device="cuda")
-    bias = torch.randn(D, dtype=torch.float16, device="cuda")
+    weight = torch.randn(D, W, dtype=torch.float16, device=device)
+    bias = torch.randn(D, dtype=torch.float16, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
         x_view, weight, bias=bias, activation="silu"
@@ -61,21 +73,21 @@ def test_noncontiguous_x_seq_stride_not_one():
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_x_sliced():
+def test_noncontiguous_x_sliced(device):
     """x is a slice of a larger tensor (contiguous stride=1 on last dim, but
     leading strides are larger than the slice's shape would imply if it
     were contiguous)."""
     B, D, L = 2, 64, 128
     W = 4
-    big_x = torch.randn(B, D, L * 2, dtype=torch.float16, device="cuda")
+    big_x = torch.randn(B, D, L * 2, dtype=torch.float16, device=device)
     x_slice = big_x[:, :, :L]
     assert x_slice.shape == (B, D, L)
     assert not x_slice.is_contiguous()
     assert x_slice.stride(2) == 1
     assert x_slice.stride(1) == L * 2  # gap between rows
 
-    weight = torch.randn(D, W, dtype=torch.float16, device="cuda")
-    bias = torch.randn(D, dtype=torch.float16, device="cuda")
+    weight = torch.randn(D, W, dtype=torch.float16, device=device)
+    bias = torch.randn(D, dtype=torch.float16, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
         x_slice, weight, bias=bias, activation="silu"
@@ -85,17 +97,17 @@ def test_noncontiguous_x_sliced():
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_weight():
+def test_noncontiguous_weight(device):
     """weight is (D, W) but stride(1) != 1 (e.g., from transpose)."""
     B, D, L = 2, 64, 128
     W = 4
-    x = torch.randn(B, D, L, dtype=torch.float16, device="cuda")
-    weight_view = torch.randn(W, D, dtype=torch.float16, device="cuda").transpose(0, 1)
+    x = torch.randn(B, D, L, dtype=torch.float16, device=device)
+    weight_view = torch.randn(W, D, dtype=torch.float16, device=device).transpose(0, 1)
     assert weight_view.shape == (D, W)
     assert not weight_view.is_contiguous()
     assert weight_view.stride(1) != 1
 
-    bias = torch.randn(D, dtype=torch.float16, device="cuda")
+    bias = torch.randn(D, dtype=torch.float16, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
         x, weight_view, bias=bias, activation="silu"
@@ -122,13 +134,13 @@ def _ref_grads(x, weight, bias, dout):
 
 
 @pytest.mark.parametrize("shape", [(1, 8, 16), (2, 64, 128), (4, 256, 512)])
-def test_backward_matches_pytorch_ref(shape):
+def test_backward_matches_pytorch_ref(device, shape):
     B, D, L = shape
     W = 4
-    x = torch.randn(B, D, L, dtype=torch.float16, device="cuda", requires_grad=True)
-    weight = torch.randn(D, W, dtype=torch.float16, device="cuda", requires_grad=True)
-    bias = torch.randn(D, dtype=torch.float16, device="cuda", requires_grad=True)
-    dout = torch.randn(B, D, L, dtype=torch.float16, device="cuda")
+    x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
+    weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
+    bias = torch.randn(D, dtype=torch.float16, device=device, requires_grad=True)
+    dout = torch.randn(B, D, L, dtype=torch.float16, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")
     out.backward(dout)
@@ -145,11 +157,11 @@ def test_backward_matches_pytorch_ref(shape):
     )
 
 
-def test_backward_shapes_and_dtypes():
+def test_backward_shapes_and_dtypes(device):
     B, D, L, W = 2, 64, 128, 4
-    x = torch.randn(B, D, L, dtype=torch.float16, device="cuda", requires_grad=True)
-    weight = torch.randn(D, W, dtype=torch.float16, device="cuda", requires_grad=True)
-    bias = torch.randn(D, dtype=torch.float16, device="cuda", requires_grad=True)
+    x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
+    weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
+    bias = torch.randn(D, dtype=torch.float16, device=device, requires_grad=True)
     dout = torch.randn_like(x)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")

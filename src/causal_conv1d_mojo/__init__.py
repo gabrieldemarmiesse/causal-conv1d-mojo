@@ -1,9 +1,12 @@
-"""causal_conv1d, fused into Mojo GPU kernels and called via a direct
+"""causal_conv1d, fused into Mojo kernels and called via a direct
 Python <-> Mojo CPython extension (no MAX framework).
 
-Both forward and backward go through native Mojo kernels. The backward
-is a single fused kernel: dx + dweight + dbias accumulation in one
-launch (mirrors upstream's `causal_conv1d_bwd_kernel`).
+Both forward and backward go through native Mojo kernels. On CUDA the
+backward is a single fused kernel: dx + dweight + dbias accumulation
+in one launch (mirrors upstream's `causal_conv1d_bwd_kernel`). On CPU
+there's a parallel-over-(B,D) implementation that exists so the
+package works on a GPU-less machine without users needing to
+`pip install causal-conv1d` (which requires a C++ toolchain).
 """
 
 from __future__ import annotations
@@ -71,13 +74,68 @@ def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc):
     )
 
 
+def _native_fwd_cpu(x, weight, bias, out):
+    _native_mod.causal_conv1d_fwd_cpu_fp16_w4_silu_bias(
+        x.data_ptr(),
+        weight.data_ptr(),
+        bias.data_ptr(),
+        out.data_ptr(),
+        x.shape[0],
+        x.shape[1],
+        x.shape[2],
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+    )
+
+
+def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc):
+    _native_mod.causal_conv1d_bwd_full_cpu_fp16_w4_silu_bias(
+        x.data_ptr(),
+        weight.data_ptr(),
+        bias.data_ptr(),
+        dout.data_ptr(),
+        dx.data_ptr(),
+        dweight_acc.data_ptr(),
+        dbias_acc.data_ptr(),
+        x.shape[0],
+        x.shape[1],
+        x.shape[2],
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        dout.stride(0),
+        dout.stride(1),
+        dout.stride(2),
+        dx.stride(0),
+        dx.stride(1),
+        dx.stride(2),
+    )
+
+
 class _CausalConv1dFn(torch.autograd.Function):
-    """fp16 / width=4 / has_bias=True / silu autograd op."""
+    """fp16 / width=4 / has_bias=True / silu autograd op (CUDA + CPU).
+
+    Dispatches to the GPU launcher when `x.is_cuda`, otherwise to the
+    pure-mojo CPU launcher (parallelized over (B, D) via
+    `sync_parallelize`). Same fp32 dweight/dbias accumulator pattern in
+    both paths so the cast-back is shared.
+    """
 
     @staticmethod
     def forward(ctx, x, weight, bias):
         out = torch.empty_like(x)
-        _native_fwd(x, weight, bias, out)
+        if x.is_cuda:
+            _native_fwd(x, weight, bias, out)
+        else:
+            _native_fwd_cpu(x, weight, bias, out)
         ctx.save_for_backward(x, weight, bias)
         return out
 
@@ -95,7 +153,10 @@ class _CausalConv1dFn(torch.autograd.Function):
         dweight_acc = torch.zeros(D, W, dtype=torch.float32, device=x.device)
         dbias_acc = torch.zeros(D, dtype=torch.float32, device=x.device)
 
-        _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc)
+        if x.is_cuda:
+            _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc)
+        else:
+            _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc)
 
         return dx, dweight_acc.to(weight.dtype), dbias_acc.to(bias.dtype)
 
@@ -137,9 +198,12 @@ def causal_conv1d_fn(
         or bias.dtype != torch.float16
     ):
         raise NotImplementedError("only fp16 is supported")
-    if not x.is_cuda:
-        raise NotImplementedError("only CUDA tensors are supported")
     if weight.shape[1] != 4:
         raise NotImplementedError(f"only width=4 is supported (got {weight.shape[1]})")
+    if x.device != weight.device or x.device != bias.device:
+        raise NotImplementedError(
+            f"x, weight, bias must all be on the same device "
+            f"(got x={x.device}, weight={weight.device}, bias={bias.device})"
+        )
 
     return _CausalConv1dFn.apply(x, weight, bias)
