@@ -76,8 +76,19 @@ and `benchmarks/bench_forward_extensive.py`.
 
 ## Layout
 
-* `src/causal_conv1d_mojo/_native/causal_conv1d_native.mojo` — the GPU
-  forward kernel + CPython extension entry point.
+* `src/causal_conv1d_mojo/_native/` — Mojo source, one file per concern,
+  matching upstream's `causal-conv1d/csrc/` layout:
+    * `causal_conv1d_common.mojo` — shared constants + `_silu_f32`
+      (mirrors `causal_conv1d_common.h`).
+    * `causal_conv1d_fwd.mojo` — GPU forward kernel
+      (mirrors `causal_conv1d_fwd.cu`).
+    * `causal_conv1d_bwd.mojo` — GPU fused backward kernel + warp/block
+      reductions (mirrors `causal_conv1d_bwd.cu`).
+    * `causal_conv1d_cpu.mojo` — pure-mojo CPU forward + backward
+      (no upstream analogue).
+    * `causal_conv1d_native.mojo` — dispatcher: 4 launchers (parses
+      Python args, builds the `(dtype × width × flags)` comptime tree)
+      + `PyInit_*` (mirrors `causal_conv1d.cpp`).
 * `src/causal_conv1d_mojo/__init__.py` — Python wrapper. Wraps forward
   in a `torch.autograd.Function`; backward delegates to PyTorch autograd.
 * `tests/test_native.py` — correctness for forward (incl. non-contiguous
