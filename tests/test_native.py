@@ -8,40 +8,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import causal_conv1d_mojo
 from causal_conv1d.causal_conv1d_interface import causal_conv1d_ref
 
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="native path is CUDA-only"
 )
-
-
-@pytest.fixture(scope="module")
-def native_mod():
-    from causal_conv1d_mojo._native import causal_conv1d_native
-
-    return causal_conv1d_native
-
-
-def _call(native_mod, x, weight, bias, out):
-    native_mod.causal_conv1d_fwd_fp16_w4_silu_bias(
-        x.data_ptr(),
-        weight.data_ptr(),
-        bias.data_ptr(),
-        out.data_ptr(),
-        x.shape[0],
-        x.shape[1],
-        x.shape[2],
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        torch.cuda.current_stream().cuda_stream,
-    )
 
 
 def _expected(x, weight, bias):
@@ -53,22 +26,20 @@ def _max_diff(a, b):
 
 
 @pytest.mark.parametrize("shape", [(1, 8, 16), (2, 64, 128), (4, 256, 512)])
-def test_contiguous(native_mod, shape):
+def test_contiguous(shape):
     B, D, L = shape
     W = 4
     x = torch.randn(B, D, L, dtype=torch.float16, device="cuda")
     weight = torch.randn(D, W, dtype=torch.float16, device="cuda")
     bias = torch.randn(D, dtype=torch.float16, device="cuda")
-    out = torch.empty_like(x)
 
-    _call(native_mod, x, weight, bias, out)
-    torch.cuda.synchronize()
+    out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")
 
     diff = _max_diff(out, _expected(x, weight, bias))
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_x_seq_stride_not_one(native_mod):
+def test_noncontiguous_x_seq_stride_not_one():
     """x is (B, D, L) but came from a transpose so stride(2) != 1."""
     B, D, L = 2, 64, 128
     W = 4
@@ -81,16 +52,16 @@ def test_noncontiguous_x_seq_stride_not_one(native_mod):
 
     weight = torch.randn(D, W, dtype=torch.float16, device="cuda")
     bias = torch.randn(D, dtype=torch.float16, device="cuda")
-    out = torch.empty(B, D, L, dtype=torch.float16, device="cuda")
 
-    _call(native_mod, x_view, weight, bias, out)
-    torch.cuda.synchronize()
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x_view, weight, bias=bias, activation="silu"
+    )
 
     diff = _max_diff(out, _expected(x_view, weight, bias))
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_x_sliced(native_mod):
+def test_noncontiguous_x_sliced():
     """x is a slice of a larger tensor (contiguous stride=1 on last dim, but
     leading strides are larger than the slice's shape would imply if it
     were contiguous)."""
@@ -105,16 +76,16 @@ def test_noncontiguous_x_sliced(native_mod):
 
     weight = torch.randn(D, W, dtype=torch.float16, device="cuda")
     bias = torch.randn(D, dtype=torch.float16, device="cuda")
-    out = torch.empty(B, D, L, dtype=torch.float16, device="cuda")
 
-    _call(native_mod, x_slice, weight, bias, out)
-    torch.cuda.synchronize()
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x_slice, weight, bias=bias, activation="silu"
+    )
 
     diff = _max_diff(out, _expected(x_slice, weight, bias))
     assert diff < 2e-2, f"max_diff={diff}"
 
 
-def test_noncontiguous_weight(native_mod):
+def test_noncontiguous_weight():
     """weight is (D, W) but stride(1) != 1 (e.g., from transpose)."""
     B, D, L = 2, 64, 128
     W = 4
@@ -125,10 +96,10 @@ def test_noncontiguous_weight(native_mod):
     assert weight_view.stride(1) != 1
 
     bias = torch.randn(D, dtype=torch.float16, device="cuda")
-    out = torch.empty_like(x)
 
-    _call(native_mod, x, weight_view, bias, out)
-    torch.cuda.synchronize()
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight_view, bias=bias, activation="silu"
+    )
 
     diff = _max_diff(out, _expected(x, weight_view, bias))
     assert diff < 2e-2, f"max_diff={diff}"
@@ -152,8 +123,6 @@ def _ref_grads(x, weight, bias, dout):
 
 @pytest.mark.parametrize("shape", [(1, 8, 16), (2, 64, 128), (4, 256, 512)])
 def test_backward_matches_pytorch_ref(shape):
-    import causal_conv1d_mojo
-
     B, D, L = shape
     W = 4
     x = torch.randn(B, D, L, dtype=torch.float16, device="cuda", requires_grad=True)
@@ -177,8 +146,6 @@ def test_backward_matches_pytorch_ref(shape):
 
 
 def test_backward_shapes_and_dtypes():
-    import causal_conv1d_mojo
-
     B, D, L, W = 2, 64, 128, 4
     x = torch.randn(B, D, L, dtype=torch.float16, device="cuda", requires_grad=True)
     weight = torch.randn(D, W, dtype=torch.float16, device="cuda", requires_grad=True)
