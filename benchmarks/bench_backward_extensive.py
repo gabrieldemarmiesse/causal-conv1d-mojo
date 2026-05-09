@@ -77,6 +77,8 @@ def _pytorch_fwd(x, weight, bias):
 
 
 def bench_one(make_call) -> float:
+    # Min over samples: tightest noise-free estimate (median is biased
+    # upward by transient system load).
     for _ in range(WARMUP):
         out, dout = make_call()
         out.backward(dout)
@@ -88,7 +90,7 @@ def bench_one(make_call) -> float:
         out.backward(dout)
         torch.cuda.synchronize()
         samples.append(time.perf_counter_ns() - t0)
-    return statistics.median(samples) / 1_000.0
+    return min(samples) / 1_000.0
 
 
 def fmt_us(t):

@@ -50,6 +50,8 @@ def pytorch_fwd(x, weight, bias):
 
 
 def bench_fwd(call) -> float:
+    # Min over samples: CPU benches are extra noisy (other processes,
+    # threadpool startup); min picks the cleanest run.
     for _ in range(WARMUP):
         call()
     samples = []
@@ -57,7 +59,7 @@ def bench_fwd(call) -> float:
         t0 = time.perf_counter_ns()
         call()
         samples.append(time.perf_counter_ns() - t0)
-    return statistics.median(samples) / 1_000.0
+    return min(samples) / 1_000.0
 
 
 def bench_fwd_bwd(make_call) -> float:
@@ -70,7 +72,7 @@ def bench_fwd_bwd(make_call) -> float:
         out, dout = make_call()
         out.backward(dout)
         samples.append(time.perf_counter_ns() - t0)
-    return statistics.median(samples) / 1_000.0
+    return min(samples) / 1_000.0
 
 
 def fmt(t):

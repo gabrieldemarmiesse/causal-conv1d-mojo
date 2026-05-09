@@ -12,7 +12,6 @@ pytorch:  pure F.conv1d(groups=D)+F.silu, autograd-driven backward
 
 from __future__ import annotations
 
-import statistics
 import time
 
 import torch
@@ -53,7 +52,9 @@ def _pytorch_fwd(x, weight, bias):
 
 def bench_one(make_call) -> float:
     """make_call() must rebuild the autograd graph and return (out, dout).
-    Returns median per-iter wall time in us covering forward + backward + sync.
+    Returns minimum per-iter wall time in μs covering forward + backward
+    + sync. Min over samples: kernel time is "this many cycles + possible
+    interference"; min is the tightest noise-free estimate.
     """
     for _ in range(WARMUP):
         out, dout = make_call()
@@ -66,7 +67,7 @@ def bench_one(make_call) -> float:
         out.backward(dout)
         torch.cuda.synchronize()
         samples.append(time.perf_counter_ns() - t0)
-    return statistics.median(samples) / 1_000.0
+    return min(samples) / 1_000.0
 
 
 def main() -> None:

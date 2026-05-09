@@ -4,7 +4,6 @@ docs/bench_forward.png and docs/bench_backward.png.
 
 from __future__ import annotations
 
-import statistics
 import time
 from pathlib import Path
 
@@ -39,6 +38,7 @@ def pytorch_fwd(x, weight, bias):
 
 
 def bench_wall(fn, warmup: int, iters: int) -> float:
+    # Min over samples: tightest noise-free estimate.
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -48,7 +48,7 @@ def bench_wall(fn, warmup: int, iters: int) -> float:
         fn()
         torch.cuda.synchronize()
         samples.append(time.perf_counter_ns() - t0)
-    return statistics.median(samples) / 1_000.0
+    return min(samples) / 1_000.0
 
 
 def grouped_bar(labels, pt, up, mojo, *, title, out_path):

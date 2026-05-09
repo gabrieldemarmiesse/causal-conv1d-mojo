@@ -15,7 +15,6 @@ with bias and silu, the bench config our native path specializes for.
 
 from __future__ import annotations
 
-import statistics
 import time
 
 import torch
@@ -55,6 +54,10 @@ def call_pytorch(x, weight, bias) -> torch.Tensor:
 
 
 def bench_wall(fn) -> float:
+    # Min over samples: kernel time is "this many cycles + possible
+    # interference"; min picks the run that wasn't disturbed. Mean and
+    # median are both shifted upward by system noise; min is the
+    # tightest noise-free estimate.
     for _ in range(WARMUP):
         fn()
     torch.cuda.synchronize()
@@ -64,7 +67,7 @@ def bench_wall(fn) -> float:
         fn()
         torch.cuda.synchronize()
         samples.append(time.perf_counter_ns() - t0)
-    return statistics.median(samples) / 1_000.0
+    return min(samples) / 1_000.0
 
 
 def bench_host(fn) -> float:
