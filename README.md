@@ -89,14 +89,20 @@ and `benchmarks/bench_forward_extensive.py`.
 
 ## Status / scope
 
-Specialized for the Mamba path: `width=4`. Inputs may be fp16, bf16,
-or fp32; `x` / `weight` / `bias` must share a dtype. `bias` may be
-`None` or a `(dim,)` tensor; `activation` may be `None`, `"silu"`,
-or `"swish"` (silu/swish are the same op). `seq_idx`, `initial_states`,
-and `return_final_states` / `final_states_out` raise `NotImplementedError`
-from the public `causal_conv1d_fn` wrapper. Both forward and backward go
-through native Mojo kernels (GPU + CPU); the autograd `Function` just
-plumbs `apply_silu` / `has_bias` through.
+Width: 2, 3, or 4 (Mamba uses 4). Inputs may be fp16, bf16, or fp32;
+`x` / `weight` / `bias` must share a dtype. `bias` may be `None` or a
+`(dim,)` tensor; `activation` may be `None`, `"silu"`, or `"swish"`
+(silu/swish are the same op). `seq_idx` and `initial_states` are
+both supported on the forward path: `seq_idx` masks reads at packed-
+sequence boundaries (padding rows with `seq_idx < 0` produce zero
+output); `initial_states` supplies a `(B, D, W-1)` historical context
+before `t=0` for chunked stateful execution (`final_states_out[i]`
+of one chunk feeds `initial_states[i+1]` of the next, byte-identical
+to a one-shot call). Backward through `seq_idx` or `initial_states`
+raises `NotImplementedError` (inference under `no_grad` works fine).
+`return_final_states` / `final_states_out` is full forward + backward.
+Both forward and backward go through native Mojo kernels (GPU + CPU);
+the autograd `Function` plumbs all flags through.
 
 ## Run it
 

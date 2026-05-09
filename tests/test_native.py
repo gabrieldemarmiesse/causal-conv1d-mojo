@@ -1,8 +1,8 @@
 """Tests for the pure-Mojo native path (no MAX framework).
 
-The native extension supports fp16 / bf16 / fp32, width=4, optional bias,
-optional silu/swish activation. `seq_idx`, `initial_states`, and
-`return_final_states` raise `NotImplementedError`.
+The native extension supports fp16 / bf16 / fp32, width in {2, 3, 4},
+optional bias, optional silu/swish activation, optional seq_idx (fwd
+only), optional initial_states (fwd only), and return_final_states.
 
 Each test runs on every available device + every supported dtype. CPU is
 always present; CUDA is exercised only if a GPU is detected.
@@ -163,6 +163,78 @@ def test_noncontiguous_weight(device, dtype, activation, bias_present):
 
     diff = _max_diff(out, _expected(x, weight_view, bias, activation))
     assert diff < _FWD_TOL[dtype], f"max_diff={diff}"
+
+
+# ===---------- width sweep (2 / 3 / 4) ----------=== #
+# The bulk of the suite exercises width=4 (Mamba's setting). These
+# tests exist to guard the cheaper widths. Forward, backward, and the
+# seq_idx path are each hit at all three widths.
+
+
+@pytest.fixture(params=[2, 3, 4], ids=["w2", "w3", "w4"])
+def width(request):
+    return request.param
+
+
+def test_width_forward(device, dtype, width, activation, bias_present):
+    B, D, L = 2, 32, 128
+    x = torch.randn(B, D, L, dtype=dtype, device=device)
+    weight = torch.randn(D, width, dtype=dtype, device=device)
+    bias = _make_bias(D, dtype=dtype, device=device, present=bias_present)
+
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight, bias=bias, activation=activation
+    )
+    diff = _max_diff(out, _expected(x, weight, bias, activation))
+    assert diff < _FWD_TOL[dtype], f"width={width}, max_diff={diff}"
+
+
+def test_width_backward(device, dtype, width, bias_present):
+    B, D, L = 2, 32, 128
+    x = torch.randn(B, D, L, dtype=dtype, device=device, requires_grad=True)
+    weight = torch.randn(D, width, dtype=dtype, device=device, requires_grad=True)
+    bias = _make_bias(
+        D, dtype=dtype, device=device, present=bias_present, requires_grad=True
+    )
+    dout = torch.randn(B, D, L, dtype=dtype, device=device)
+
+    out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, bias=bias, activation="silu")
+    out.backward(dout)
+
+    dx_ref, dw_ref, db_ref = _ref_grads(x, weight, bias, dout, "silu")
+    assert _max_diff(x.grad, dx_ref) < _DX_TOL[dtype]
+    assert _max_diff(weight.grad, dw_ref) < _DW_TOL[dtype]
+    if bias_present:
+        assert _max_diff(bias.grad, db_ref) < _DW_TOL[dtype]
+
+
+def test_width_seq_idx_forward(device, dtype, width):
+    """Packed-sequence forward at every width — guards that the seq_idx
+    mask honours the W-1 lookback correctly for width != 4."""
+    B, D, L = 1, 16, 64
+    x = torch.randn(B, D, L, dtype=dtype, device=device)
+    weight = torch.randn(D, width, dtype=dtype, device=device)
+    seq_idx = torch.cat(
+        [
+            torch.zeros(B, L // 2, dtype=torch.int32, device=device),
+            torch.ones(B, L - L // 2, dtype=torch.int32, device=device),
+        ],
+        dim=1,
+    )
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight, seq_idx=seq_idx, activation=None
+    )
+    expected = _ref_with_seq_idx(x, weight, None, seq_idx, None)
+    assert _max_diff(out, expected) < _FWD_TOL[dtype]
+
+
+def test_width_invalid_raises():
+    """Widths outside {2, 3, 4} are rejected by the validator before
+    touching the kernel."""
+    x = torch.randn(1, 8, 16, dtype=torch.float16)
+    weight = torch.randn(8, 5, dtype=torch.float16)
+    with pytest.raises(NotImplementedError, match="width in"):
+        causal_conv1d_mojo.causal_conv1d_fn(x, weight)
 
 
 # ===---------- backward / autograd ----------=== #
@@ -369,6 +441,111 @@ def test_final_states_short_seqlen(device, dtype):
     pad = (W - 1) - L
     assert torch.all(fs[..., :pad] == 0)
     assert _max_diff(fs[..., pad:], x) == 0.0
+
+
+# ===---------- initial_states (chunked stateful execution) ----------=== #
+
+
+def _expected_with_initial_states(x, weight, bias, initial_states, activation):
+    """Reference: pre-pend initial_states to x along seqlen, run conv with
+    padding=0, slice back. Mirrors upstream's `causal_conv1d_ref` branch.
+    """
+    seqlen = x.shape[-1]
+    D, W = weight.shape
+    x_full = torch.cat([initial_states, x], dim=-1)
+    pre = F.conv1d(x_full, weight.unsqueeze(1), bias, padding=0, groups=D)[..., :seqlen]
+    return F.silu(pre) if activation in ("silu", "swish") else pre
+
+
+def test_initial_states_forward(device, dtype, width, activation, bias_present):
+    """initial_states matches the cat([init, x]) reference."""
+    B, D, L = 2, 16, 64
+    x = torch.randn(B, D, L, dtype=dtype, device=device)
+    weight = torch.randn(D, width, dtype=dtype, device=device)
+    bias = _make_bias(D, dtype=dtype, device=device, present=bias_present)
+    initial_states = torch.randn(B, D, width - 1, dtype=dtype, device=device)
+
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x,
+        weight,
+        bias=bias,
+        initial_states=initial_states,
+        activation=activation,
+    )
+    expected = _expected_with_initial_states(
+        x, weight, bias, initial_states, activation
+    )
+    diff = _max_diff(out, expected)
+    assert diff < _FWD_TOL[dtype], f"width={width}, max_diff={diff}"
+
+
+def test_initial_states_chunked_roundtrip(device, dtype, bias_present):
+    """Threading `final_states_out[i]` → `initial_states[i+1]` reproduces a
+    full-sequence forward. This is the canonical use case for both APIs.
+    """
+    B, D, L, W = 1, 16, 96, 4
+    x = torch.randn(B, D, L, dtype=dtype, device=device)
+    weight = torch.randn(D, W, dtype=dtype, device=device)
+    bias = _make_bias(D, dtype=dtype, device=device, present=bias_present)
+
+    # Reference: one shot.
+    full_out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight, bias=bias, activation="silu"
+    )
+
+    # Chunked: split x along seqlen, run kernel per chunk, thread state.
+    chunks = [x[..., :32], x[..., 32:64], x[..., 64:]]
+    init = None
+    chunked_outs = []
+    for c in chunks:
+        out_c, init = causal_conv1d_mojo.causal_conv1d_fn(
+            c,
+            weight,
+            bias=bias,
+            initial_states=init,
+            return_final_states=True,
+            activation="silu",
+        )
+        chunked_outs.append(out_c)
+    chunked_out = torch.cat(chunked_outs, dim=-1)
+
+    # Should be bit-identical to the one-shot call (no roundoff diff;
+    # both paths sum the same fp32 accumulators).
+    diff = _max_diff(full_out, chunked_out)
+    assert diff < _FWD_TOL[dtype], f"chunked vs full max_diff={diff}"
+
+
+def test_initial_states_backward_raises(device):
+    """Backward through initial_states is not implemented yet."""
+    B, D, L, W = 1, 8, 32, 4
+    x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
+    weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
+    init = torch.randn(B, D, W - 1, dtype=torch.float16, device=device)
+
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight, initial_states=init, activation="silu"
+    )
+    with pytest.raises(NotImplementedError, match="backward through initial_states"):
+        out.sum().backward()
+
+
+def test_initial_states_mutual_exclusion_with_seq_idx():
+    x = torch.randn(1, 8, 16, dtype=torch.float16)
+    weight = torch.randn(8, 4, dtype=torch.float16)
+    seq_idx = torch.zeros(1, 16, dtype=torch.int32)
+    init = torch.randn(1, 8, 3, dtype=torch.float16)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        causal_conv1d_mojo.causal_conv1d_fn(
+            x, weight, seq_idx=seq_idx, initial_states=init
+        )
+
+
+def test_initial_states_shape_validation():
+    x = torch.randn(2, 8, 16, dtype=torch.float16)
+    weight = torch.randn(8, 4, dtype=torch.float16)
+    bad = torch.randn(2, 8, 4, dtype=torch.float16)  # should be (2, 8, 3)
+    with pytest.raises(ValueError, match="initial_states shape"):
+        causal_conv1d_mojo.causal_conv1d_fn(x, weight, initial_states=bad)
 
 
 # ===---------- seq_idx (packed sequences) ----------=== #

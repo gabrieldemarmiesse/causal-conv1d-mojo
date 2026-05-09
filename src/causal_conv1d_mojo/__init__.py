@@ -41,8 +41,8 @@ _DTYPE_CODE = {
 }
 
 
-def _native_fwd(x, weight, bias, seq_idx, out, apply_silu):
-    _native_mod.causal_conv1d_fwd_w4_bias(
+def _native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu):
+    _native_mod.causal_conv1d_fwd(
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -66,11 +66,17 @@ def _native_fwd(x, weight, bias, seq_idx, out, apply_silu):
         _ptr(seq_idx),
         seq_idx.stride(0) if seq_idx is not None else 0,
         seq_idx.stride(1) if seq_idx is not None else 0,
+        weight.shape[1],
+        int(initial_states is not None),
+        _ptr(initial_states),
+        initial_states.stride(0) if initial_states is not None else 0,
+        initial_states.stride(1) if initial_states is not None else 0,
+        initial_states.stride(2) if initial_states is not None else 0,
     )
 
 
 def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu):
-    _native_mod.causal_conv1d_bwd_full_w4_bias(
+    _native_mod.causal_conv1d_bwd_full(
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -96,11 +102,12 @@ def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_si
         int(apply_silu),
         _DTYPE_CODE[x.dtype],
         torch.cuda.current_stream().cuda_stream,
+        weight.shape[1],
     )
 
 
-def _native_fwd_cpu(x, weight, bias, seq_idx, out, apply_silu):
-    _native_mod.causal_conv1d_fwd_cpu_w4_bias(
+def _native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu):
+    _native_mod.causal_conv1d_fwd_cpu(
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -123,11 +130,17 @@ def _native_fwd_cpu(x, weight, bias, seq_idx, out, apply_silu):
         _ptr(seq_idx),
         seq_idx.stride(0) if seq_idx is not None else 0,
         seq_idx.stride(1) if seq_idx is not None else 0,
+        weight.shape[1],
+        int(initial_states is not None),
+        _ptr(initial_states),
+        initial_states.stride(0) if initial_states is not None else 0,
+        initial_states.stride(1) if initial_states is not None else 0,
+        initial_states.stride(2) if initial_states is not None else 0,
     )
 
 
 def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu):
-    _native_mod.causal_conv1d_bwd_full_cpu_w4_bias(
+    _native_mod.causal_conv1d_bwd_full_cpu(
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -152,6 +165,7 @@ def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc, appl
         int(bias is not None),
         int(apply_silu),
         _DTYPE_CODE[x.dtype],
+        weight.shape[1],
     )
 
 
@@ -190,12 +204,14 @@ class _CausalConv1dFn(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, weight, bias, seq_idx, apply_silu, final_states_out):
+    def forward(
+        ctx, x, weight, bias, seq_idx, initial_states, apply_silu, final_states_out
+    ):
         out = torch.empty_like(x)
         if x.is_cuda:
-            _native_fwd(x, weight, bias, seq_idx, out, apply_silu)
+            _native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu)
         else:
-            _native_fwd_cpu(x, weight, bias, seq_idx, out, apply_silu)
+            _native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu)
         if final_states_out is not None:
             _write_final_states(x, final_states_out, weight.shape[1])
         # `save_for_backward` accepts None — the slot just won't have a
@@ -204,6 +220,7 @@ class _CausalConv1dFn(torch.autograd.Function):
         ctx.apply_silu = apply_silu
         ctx.has_bias = bias is not None
         ctx.has_seq_idx = seq_idx is not None
+        ctx.has_initial_states = initial_states is not None
         ctx.return_final_states = final_states_out is not None
         if final_states_out is not None:
             return out, final_states_out
@@ -223,6 +240,17 @@ class _CausalConv1dFn(torch.autograd.Function):
                 "backward through seq_idx is not implemented yet — only the "
                 "forward path supports seq_idx. Call the op under "
                 "`torch.no_grad()` for inference."
+            )
+        if ctx.has_initial_states:
+            # Forward initial_states is implemented in the kernels; the
+            # bwd kernel doesn't yet read initial_states for the silu'
+            # recomputation, doesn't accumulate the boundary dweight
+            # contributions, and doesn't emit dinitial_states. Inference
+            # works fine.
+            raise NotImplementedError(
+                "backward through initial_states is not implemented yet — "
+                "only the forward path supports initial_states. Call the op "
+                "under `torch.no_grad()` for inference."
             )
         dout = grad_outputs[0]
         dfinal_states = grad_outputs[1] if ctx.return_final_states else None
@@ -263,10 +291,10 @@ class _CausalConv1dFn(torch.autograd.Function):
                 dx[..., -tail:] += dfinal_states[..., -tail:].to(dx.dtype)
 
         dbias = dbias_acc.to(bias.dtype) if has_bias else None
-        # `seq_idx`, `apply_silu`, and `final_states_out` are non-tensor
-        # / non-diff inputs — autograd expects one return per forward
-        # input, with `None` for non-differentiable inputs.
-        return dx, dweight_acc.to(weight.dtype), dbias, None, None, None
+        # `seq_idx`, `initial_states`, `apply_silu`, and `final_states_out`
+        # are non-tensor / non-diff inputs — autograd expects one return
+        # per forward input, with `None` for non-differentiable inputs.
+        return dx, dweight_acc.to(weight.dtype), dbias, None, None, None, None
 
 
 def causal_conv1d_fn(
@@ -290,8 +318,6 @@ def causal_conv1d_fn(
 
     out: (batch, dim, seqlen)
     """
-    if initial_states is not None:
-        raise NotImplementedError("initial_states is not supported")
     if activation not in (None, "silu", "swish"):
         raise NotImplementedError(
             "only activation in {None, 'silu', 'swish'} is supported"
@@ -308,8 +334,10 @@ def causal_conv1d_fn(
         raise NotImplementedError(
             f"bias.dtype ({bias.dtype}) must match x.dtype ({x.dtype})"
         )
-    if weight.shape[1] != 4:
-        raise NotImplementedError(f"only width=4 is supported (got {weight.shape[1]})")
+    if weight.shape[1] not in (2, 3, 4):
+        raise NotImplementedError(
+            f"only width in {{2, 3, 4}} is supported (got {weight.shape[1]})"
+        )
     if x.device != weight.device or (bias is not None and x.device != bias.device):
         raise NotImplementedError(
             f"x, weight, bias must all be on the same device "
@@ -328,12 +356,16 @@ def causal_conv1d_fn(
     # seq_idx + return_final_states are mutually exclusive (matches
     # upstream): with packed sequences in one batch row, "the last W-1
     # cols" doesn't have a single owning sequence.
+    # seq_idx + initial_states are also mutually exclusive: per-position
+    # masking and a shared "before t=0" context aren't compatible.
     if seq_idx is not None:
         if return_final_states:
             raise ValueError(
                 "seq_idx and return_final_states are mutually exclusive "
                 "(packed sequences have no single 'last W-1 cols')"
             )
+        if initial_states is not None:
+            raise ValueError("seq_idx and initial_states are mutually exclusive")
         if seq_idx.shape != (batch, seqlen):
             raise ValueError(
                 f"seq_idx shape {tuple(seq_idx.shape)} != expected {(batch, seqlen)}"
@@ -346,6 +378,29 @@ def causal_conv1d_fn(
             )
         if not seq_idx.is_contiguous():
             seq_idx = seq_idx.contiguous()
+
+    if initial_states is not None:
+        if initial_states.shape != (batch, dim, width - 1):
+            raise ValueError(
+                f"initial_states shape {tuple(initial_states.shape)} != "
+                f"expected {(batch, dim, width - 1)}"
+            )
+        if initial_states.dtype != x.dtype:
+            raise ValueError(
+                f"initial_states.dtype ({initial_states.dtype}) must match "
+                f"x.dtype ({x.dtype})"
+            )
+        if initial_states.device != x.device:
+            raise ValueError(
+                f"initial_states.device ({initial_states.device}) must "
+                f"match x.device ({x.device})"
+            )
+        # Inner-axis stride must be unit so the kernel's
+        # `is_idx * initial_states_l_stride` indexing reads contiguous
+        # memory; outer axes can be any stride (handled by the
+        # batch/channel base).
+        if initial_states.stride(2) != 1:
+            initial_states = initial_states.contiguous()
 
     if return_final_states:
         if final_states_out is None:
@@ -373,7 +428,7 @@ def causal_conv1d_fn(
     # is the bias-only path.
     apply_silu = activation in ("silu", "swish")
     result = _CausalConv1dFn.apply(
-        x, weight, bias, seq_idx, apply_silu, final_states_out
+        x, weight, bias, seq_idx, initial_states, apply_silu, final_states_out
     )
     if return_final_states:
         # _CausalConv1dFn returns (out, final_states) when final_states_out
