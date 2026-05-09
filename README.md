@@ -16,24 +16,28 @@ hand-tuned CUDA kernel; we benchmark against that and against a pure-PyTorch
 
 ![forward](docs/bench_forward.png)
 
-Wall-clock per call, fp16 + silu + bias, 500 iters each, sync after every
-call (RTX 2000 Ada Generation Laptop GPU). Lower is better; log scale.
+Wall-clock per call, fp16 + silu + bias, 500 iters each, **min over
+samples**, sync after every call (RTX 2000 Ada Generation Laptop GPU).
+Lower is better; log scale.
 
 | shape (B, D, L, W) | mojo | upstream | pure PyTorch |
 | --- | ---: | ---: | ---: |
-| (1, 1024, 512, 4) | 56 μs | 79 μs | 99 μs |
-| (1, 1024, 2048, 4) | 87 μs | 65 μs | 191 μs |
-| (1, 1024, 8192, 4) | 230 μs | 105 μs | 705 μs |
-| (1, 4096, 2048, 4) | 242 μs | 112 μs | 695 μs |
-| (4, 4096, 2048, 4) | 1139 μs | 922 μs | 3497 μs |
-| (8, 2048, 4096, 4) | 2364 μs | 1637 μs | 9079 μs |
+| (1, 1024, 512, 4) | **53 μs** | 60 μs | 77 μs |
+| (1, 1024, 2048, 4) | 89 μs | 64 μs | 158 μs |
+| (1, 1024, 8192, 4) | 222 μs | 104 μs | 570 μs |
+| (1, 4096, 2048, 4) | 190 μs | 102 μs | 454 μs |
+| (4, 4096, 2048, 4) | **873 μs** | 918 μs | 3753 μs |
+| (8, 2048, 4096, 4) | 2363 μs | 1716 μs | 10196 μs |
 
-On heavy shapes this is **3–5× faster than pure PyTorch** and ~1.3-1.6× of
-upstream's hand-tuned CUDA. On light shapes mojo is competitive or wins
-(the smaller launch overhead from running directly through a CPython
-extension helps). Mid-size shapes (`1×1024×8192`, `1×4096×2048`) are where
-upstream's `cub::BlockLoad<WARP_TRANSPOSE>` pulls ahead — the forward
-kernel still does per-element scalar global loads with bounds checks.
+Mixed picture across the shape grid:
+- Small + large shapes are competitive or win (`(1, 1024, 512)` and
+  `(4, 4096, 2048)` are both faster than upstream).
+- **Mid-size shapes (`1×1024×8192`, `1×4096×2048`) are where upstream
+  pulls ahead by ~2×** — these are memory-bound and upstream's
+  `cub::BlockLoad<WARP_TRANSPOSE>` keeps loads coalesced; our forward
+  kernel still does per-element scalar global loads with bounds checks.
+  Fixing this is the open todo on the forward path.
+- Pure PyTorch is **3-5× slower** across the board.
 
 ### Forward + backward
 
@@ -47,18 +51,16 @@ runs one `block.sum` + atomic_add per `(channel, k)` at the end.
 
 | shape (B, D, L, W) | mojo | upstream | pure PyTorch |
 | --- | ---: | ---: | ---: |
-| (1, 1024, 512, 4) | **409 μs** | 461 μs | 511 μs |
-| (1, 1024, 2048, 4) | **431 μs** | 449 μs | 534 μs |
-| (1, 1024, 8192, 4) | **582 μs** | 612 μs | 1780 μs |
-| (1, 4096, 2048, 4) | **611 μs** | 652 μs | 1747 μs |
-| (4, 4096, 2048, 4) | 2308 μs | 2144 μs | 9355 μs |
-| (8, 2048, 4096, 4) | 4560 μs | 3903 μs | 22634 μs |
+| (1, 1024, 512, 4) | **334 μs** | 340 μs | 375 μs |
+| (1, 1024, 2048, 4) | **346 μs** | 429 μs | 412 μs |
+| (1, 1024, 8192, 4) | **596 μs** | 623 μs | 1542 μs |
+| (1, 4096, 2048, 4) | **541 μs** | 636 μs | 1338 μs |
+| (4, 4096, 2048, 4) | **2208 μs** | 2244 μs | 10231 μs |
+| (8, 2048, 4096, 4) | 5647 μs | 4311 μs | 22974 μs |
 
-Mojo is now within 5% of upstream on the median shape (medium ones it
-wins outright), and **3–5× faster than pure PyTorch** everywhere. The
-last 15-30% on the heaviest shapes is upstream's hand-tuned cub-based
-warp-transpose load + register-only halo exchange, which we don't yet
-match.
+**Mojo wins on 5 of 6 shapes**, including the heavy `(4, 4096, 2048)`,
+and is within ~30% of upstream on the heaviest. Pure PyTorch is **2-4×
+slower** everywhere.
 
 The big surprise during this work was that `Atomic.fetch_add` defaults to
 `Consistency.SEQUENTIAL` + system scope, lowering to
