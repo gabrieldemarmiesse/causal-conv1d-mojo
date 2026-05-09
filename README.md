@@ -89,14 +89,14 @@ and `benchmarks/bench_forward_extensive.py`.
 
 ## Status / scope
 
-Specialized for the Mamba path: fp16 inputs, `width=4`. `bias` may
-be `None` or a `(dim,)` fp16 tensor; `activation` may be `None`,
-`"silu"`, or `"swish"` (silu/swish are the same op). `seq_idx`,
-`initial_states`, and `return_final_states` / `final_states_out`
-raise `NotImplementedError` from the public `causal_conv1d_fn`
-wrapper. Both forward and backward go through native Mojo kernels
-(GPU + CPU); the autograd `Function` just plumbs `apply_silu` /
-`has_bias` through.
+Specialized for the Mamba path: `width=4`. Inputs may be fp16, bf16,
+or fp32; `x` / `weight` / `bias` must share a dtype. `bias` may be
+`None` or a `(dim,)` tensor; `activation` may be `None`, `"silu"`,
+or `"swish"` (silu/swish are the same op). `seq_idx`, `initial_states`,
+and `return_final_states` / `final_states_out` raise `NotImplementedError`
+from the public `causal_conv1d_fn` wrapper. Both forward and backward go
+through native Mojo kernels (GPU + CPU); the autograd `Function` just
+plumbs `apply_silu` / `has_bias` through.
 
 ## Run it
 

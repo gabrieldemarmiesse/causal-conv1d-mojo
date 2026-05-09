@@ -1,15 +1,14 @@
-"""Direct Python -> Mojo extension for causal_conv1d (fp16, width=4,
-has_bias=True), no MAX framework.
+"""Direct Python -> Mojo extension for causal_conv1d, no MAX framework.
 
 Built as a CPython extension via:
     mojo build causal_conv1d_native.mojo --emit shared-lib -o causal_conv1d_native.so
 
 Then importable as `from causal_conv1d_mojo._native import causal_conv1d_native`.
 
-Four entry points: GPU + CPU × forward + backward, each fp16 / width=4 /
-has_bias=True. Activation (silu vs none) and contiguity of inner strides
-are passed as runtime ints/bools and dispatched to comptime-specialised
-kernels at the launcher.
+Four entry points: GPU + CPU × forward + backward. Width is fixed at 4.
+Dtype (fp16 / bf16 / fp32), has_bias, apply_silu, and contiguity of the
+inner strides are passed as runtime ints and dispatched to
+comptime-specialised kernels at the launcher.
 
 Folding the stride-1 multiplies into the fast contig path matters:
 passing inner strides as runtime args around the kernel, even when
@@ -66,9 +65,9 @@ fn _shfl_xor_f32(val: Float32, offset: UInt32) -> Float32:
     every wrapper around it, ptxas stops outlining and generates the bare
     SHFL.BFLY (matching upstream).
     """
-    return llvm_intrinsic[
-        "llvm.nvvm.shfl.sync.bfly.f32", Float32
-    ](Int32(-1), val, offset, Int32(31))
+    return llvm_intrinsic["llvm.nvvm.shfl.sync.bfly.f32", Float32](
+        Int32(-1), val, offset, Int32(31)
+    )
 
 
 @always_inline
@@ -113,7 +112,7 @@ fn _block_sum_f32[block_size: Int](val: Float32) -> Float32:
 
     # Step 2: lane 0 of each warp writes its warp's sum to smem.
     var smem = stack_allocation[
-        n_warps, DType.float32, address_space = AddressSpace.SHARED
+        n_warps, DType.float32, address_space=AddressSpace.SHARED
     ]()
     if lane == 0:
         smem[warp] = warp_result
@@ -134,6 +133,7 @@ fn fwd_kernel[
     dtype: DType,
     width: Int,
     has_bias: Bool,
+    has_seq_idx: Bool,
     apply_silu: Bool,
     contig_inner: Bool,
 ](
@@ -141,23 +141,33 @@ fn fwd_kernel[
     x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     x_batch_stride: Int,
     x_c_stride: Int,
     x_l_stride: Int,
     weight_c_stride: Int,
     weight_w_stride: Int,
+    seq_idx_b_stride: Int,
+    seq_idx_l_stride: Int,
     out_batch_stride: Int,
     out_c_stride: Int,
     out_l_stride: Int,
 ):
-    """fp16 / silu / has_bias / width=W causal conv1d forward, GPU.
+    """Causal conv1d forward, GPU.
 
     `contig_inner` is the comptime fast path: when True, the innermost
     axes of x / weight / out have stride=1 and we drop the
     `* x_l_stride` / `* weight_w_stride` / `* out_l_stride` multiplies
     so the compiler can constant-fold the index math (~2× kernel time
     on memory-bound shapes if we don't).
+
+    `has_seq_idx`: when True, `seq_idx_ptr` is a `(B, L)` int32 tensor of
+    sequence ids. For each output position `t`, historical reads from
+    `src_t < t` are masked to 0 unless `seq_idx[b, src_t] == seq_idx[b, t]`,
+    so packed mini-batches don't bleed across sequence boundaries.
+    `seq_idx[b, t] < 0` marks a padding position — its output is forced
+    to 0.
     """
     alias accum_t = DType.float32
 
@@ -176,9 +186,9 @@ fn fwd_kernel[
         if contig_inner:
             weights[k] = weight_ptr[weight_base + k].cast[accum_t]()
         else:
-            weights[k] = weight_ptr[
-                weight_base + k * weight_w_stride
-            ].cast[accum_t]()
+            weights[k] = weight_ptr[weight_base + k * weight_w_stride].cast[
+                accum_t
+            ]()
 
     var cur_bias: Scalar[accum_t] = 0
 
@@ -192,6 +202,7 @@ fn fwd_kernel[
 
     var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
     var out_base = batch_id * out_batch_stride + channel_id * out_c_stride
+    var seq_idx_base: Int = batch_id * seq_idx_b_stride
 
     @parameter
     for i in range(kNElts):
@@ -200,26 +211,44 @@ fn fwd_kernel[
             break
         var acc: Scalar[accum_t] = cur_bias
 
+        var cur_id: Int32 = 0
+
+        @parameter
+        if has_seq_idx:
+            cur_id = seq_idx_ptr[seq_idx_base + t * seq_idx_l_stride]
+
         @parameter
         for k in range(width):
             var src_t = t + k - (width - 1)
-            var val: Scalar[accum_t]
-            if src_t < 0:
-                val = 0
-            else:
+            var val: Scalar[accum_t] = 0
+            if src_t >= 0:
 
                 @parameter
                 if contig_inner:
                     val = x_ptr[x_base + src_t].cast[accum_t]()
                 else:
-                    val = x_ptr[
-                        x_base + src_t * x_l_stride
-                    ].cast[accum_t]()
+                    val = x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
+
+                @parameter
+                if has_seq_idx:
+                    var src_id: Int32 = seq_idx_ptr[
+                        seq_idx_base + src_t * seq_idx_l_stride
+                    ]
+                    if src_id != cur_id:
+                        val = 0
             acc += val * weights[k]
 
         @parameter
         if apply_silu:
             acc = _silu_f32(Float32(acc))
+
+        # Padding tokens (seq_idx[t] < 0): output is forced to 0,
+        # mirroring upstream's behaviour. Done after activation so the
+        # bias/silu don't leak into a "padding" row.
+        @parameter
+        if has_seq_idx:
+            if cur_id < 0:
+                acc = 0
 
         @parameter
         if contig_inner:
@@ -309,7 +338,9 @@ fn bwd_full_kernel[
         if contig_inner:
             weights[k] = weight_ptr[weight_base + k].cast[accum_t]()
         else:
-            weights[k] = weight_ptr[weight_base + k * weight_w_stride].cast[accum_t]()
+            weights[k] = weight_ptr[weight_base + k * weight_w_stride].cast[
+                accum_t
+            ]()
 
     var cur_bias: Scalar[accum_t] = 0
 
@@ -321,10 +352,10 @@ fn bwd_full_kernel[
     # smem_dout: each thread's kNElts dpre values (post-silu') for the
     # *previous chunk's* dx halo (we walk in reverse).
     var smem_x = stack_allocation[
-        kChunkSize, dtype, address_space = AddressSpace.SHARED
+        kChunkSize, dtype, address_space=AddressSpace.SHARED
     ]()
     var smem_dout = stack_allocation[
-        kChunkSize, accum_t, address_space = AddressSpace.SHARED
+        kChunkSize, accum_t, address_space=AddressSpace.SHARED
     ]()
 
     var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
@@ -399,9 +430,9 @@ fn bwd_full_kernel[
                 var t = seq_start + i
                 if t < seqlen:
                     x_curr[i] = x_ptr[x_base + t * x_l_stride].cast[accum_t]()
-                    dout_curr[i] = dout_ptr[
-                        dout_base + t * dout_l_stride
-                    ].cast[accum_t]()
+                    dout_curr[i] = dout_ptr[dout_base + t * dout_l_stride].cast[
+                        accum_t
+                    ]()
 
         # ---- [P2] x halo from previous chunk ----
         # tidx==0: load previous kNElts of x from global (chunk>0 only).
@@ -418,9 +449,9 @@ fn bwd_full_kernel[
                     if contig_inner:
                         x_prev[i] = x_ptr[x_base + t].cast[accum_t]()
                     else:
-                        x_prev[i] = x_ptr[
-                            x_base + t * x_l_stride
-                        ].cast[accum_t]()
+                        x_prev[i] = x_ptr[x_base + t * x_l_stride].cast[
+                            accum_t
+                        ]()
 
         # Publish x_curr to smem so the next thread can pick it up as halo.
         @parameter
@@ -607,7 +638,7 @@ fn bwd_full_kernel[
         var block_dw_k = _block_sum_f32[block_size=kNThreads](local_dweight[k])
         if tidx == 0:
             _ = Atomic[DType.float32, scope="device"].fetch_add[
-                ordering = Consistency.MONOTONIC
+                ordering=Consistency.MONOTONIC
             ](
                 dweight_acc_ptr + channel_id * width + k,
                 block_dw_k,
@@ -618,7 +649,7 @@ fn bwd_full_kernel[
         var block_dbias = _block_sum_f32[block_size=kNThreads](local_dbias)
         if tidx == 0:
             _ = Atomic[DType.float32, scope="device"].fetch_add[
-                ordering = Consistency.MONOTONIC
+                ordering=Consistency.MONOTONIC
             ](dbias_acc_ptr + channel_id, block_dbias)
 
 
@@ -672,14 +703,13 @@ fn _cpu_dpre_at[
     for k in range(width):
         var src_t = t + k - (width - 1)
         if src_t >= 0:
-            pre += weights[k] * x_ptr[
-                x_base + src_t * x_l_stride
-            ].cast[DType.float32]()
+            pre += (
+                weights[k]
+                * x_ptr[x_base + src_t * x_l_stride].cast[DType.float32]()
+            )
     var sig: Float32 = 1.0 / (1.0 + exp(-pre))
     var silu_grad: Float32 = sig * (1.0 + pre * (1.0 - sig))
-    var dout_v = dout_ptr[
-        dout_base + t * dout_l_stride
-    ].cast[DType.float32]()
+    var dout_v = dout_ptr[dout_base + t * dout_l_stride].cast[DType.float32]()
     return dout_v * silu_grad
 
 
@@ -687,6 +717,7 @@ fn fwd_kernel_cpu[
     dtype: DType,
     width: Int,
     has_bias: Bool,
+    has_seq_idx: Bool,
     apply_silu: Bool,
 ](
     batch: Int,
@@ -695,23 +726,29 @@ fn fwd_kernel_cpu[
     x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     x_batch_stride: Int,
     x_c_stride: Int,
     x_l_stride: Int,
     weight_c_stride: Int,
     weight_w_stride: Int,
+    seq_idx_b_stride: Int,
+    seq_idx_l_stride: Int,
     out_batch_stride: Int,
     out_c_stride: Int,
     out_l_stride: Int,
 ):
-    """fp16 / width=W causal conv1d forward, CPU path.
+    """Causal conv1d forward, CPU path.
 
     Comptime params:
         has_bias: load `bias_ptr[d]` per channel, or skip and use 0.
+        has_seq_idx: gate historical reads on `seq_idx[b, src_t] ==
+            seq_idx[b, t]`; force output to 0 when `seq_idx[b, t] < 0`
+            (padding).
         apply_silu: apply silu (= swish) on the output, or skip.
-    When `has_bias=False`, `bias_ptr` is never dereferenced — caller may
-    pass any pointer (we use null from the Python wrapper).
+    When the gate is False, the corresponding pointer is never
+    dereferenced — caller may pass null from the Python wrapper.
     """
     alias accum_t = DType.float32
 
@@ -736,17 +773,34 @@ fn fwd_kernel_cpu[
 
         var x_base = b * x_batch_stride + d * x_c_stride
         var out_base = b * out_batch_stride + d * out_c_stride
+        var seq_idx_base: Int = b * seq_idx_b_stride
 
         for t in range(seqlen):
             var pre: Scalar[accum_t] = bias_v
+
+            var cur_id: Int32 = 0
+
+            @parameter
+            if has_seq_idx:
+                cur_id = seq_idx_ptr[seq_idx_base + t * seq_idx_l_stride]
 
             @parameter
             for k in range(width):
                 var src_t = t + k - (width - 1)
                 if src_t >= 0:
-                    pre += weights[k] * x_ptr[
-                        x_base + src_t * x_l_stride
-                    ].cast[accum_t]()
+                    var include: Bool = True
+
+                    @parameter
+                    if has_seq_idx:
+                        var src_id: Int32 = seq_idx_ptr[
+                            seq_idx_base + src_t * seq_idx_l_stride
+                        ]
+                        include = src_id == cur_id
+                    if include:
+                        pre += (
+                            weights[k]
+                            * x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
+                        )
 
             var out_v: Scalar[accum_t]
 
@@ -755,6 +809,12 @@ fn fwd_kernel_cpu[
                 out_v = _silu_f32(pre)
             else:
                 out_v = pre
+
+            @parameter
+            if has_seq_idx:
+                if cur_id < 0:
+                    out_v = 0
+
             output_ptr[out_base + t * out_l_stride] = out_v.cast[dtype]()
 
     sync_parallelize[process_bc](batch * dim)
@@ -870,9 +930,7 @@ fn bwd_kernel_cpu[
             for k in range(width):
                 var src_t = t + k - (width - 1)
                 if src_t >= 0:
-                    var x_v = x_ptr[x_base + src_t * x_l_stride].cast[
-                        accum_t
-                    ]()
+                    var x_v = x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
                     local_dweight[k] += dpre_t * x_v
 
             # Slide window left, append dpre[t + W] (or 0 past seqlen).
@@ -896,26 +954,26 @@ fn bwd_kernel_cpu[
         # workers may target the same `d` across different batches.
         @parameter
         for k in range(width):
-            _ = Atomic[DType.float32].fetch_add[
-                ordering = Consistency.MONOTONIC
-            ](dweight_acc_ptr + d * width + k, local_dweight[k])
+            _ = Atomic[DType.float32].fetch_add[ordering=Consistency.MONOTONIC](
+                dweight_acc_ptr + d * width + k, local_dweight[k]
+            )
 
         @parameter
         if has_bias:
-            _ = Atomic[DType.float32].fetch_add[
-                ordering = Consistency.MONOTONIC
-            ](dbias_acc_ptr + d, local_dbias)
+            _ = Atomic[DType.float32].fetch_add[ordering=Consistency.MONOTONIC](
+                dbias_acc_ptr + d, local_dbias
+            )
 
     sync_parallelize[process_bc](batch * dim)
 
 
-def causal_conv1d_fwd_fp16_w4_bias(
+def causal_conv1d_fwd_w4_bias(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    """GPU forward: fp16 / width=4.
+    """GPU forward: width=4. dtype is dispatched via `dtype_code`.
 
-    Python tuple positional args (18):
+    Python tuple positional args (23):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int) — pass 0 if `has_bias=0`
@@ -933,26 +991,18 @@ def causal_conv1d_fwd_fp16_w4_bias(
         14 out_l_stride      (int)
         15 has_bias (int, 0 or 1) — 1 ⇒ load `bias_ptr[d]` per channel
         16 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish on the output
-        17 cuda_stream_handle (int)  -- torch.cuda.current_stream().cuda_stream
+        17 dtype_code (int) — 0=fp16, 1=bf16, 2=fp32
+        18 cuda_stream_handle (int)  -- torch.cuda.current_stream().cuda_stream
+        19 has_seq_idx (int, 0 or 1) — 1 ⇒ mask reads on seq_idx
+        20 seq_idx_data_ptr (int, int32) — pass 0 if `has_seq_idx=0`
+        21 seq_idx_batch_stride (int)
+        22 seq_idx_l_stride (int)
     """
 
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
     var b_addr: Int = Int(py=args[2])
     var o_addr: Int = Int(py=args[3])
-
-    var x_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=x_addr
-    )
-    var w_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=w_addr
-    )
-    var b_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=b_addr
-    )
-    var o_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=o_addr
-    )
 
     var batch_int: Int = Int(py=args[4])
     var dim_int: Int = Int(py=args[5])
@@ -968,7 +1018,12 @@ def causal_conv1d_fwd_fp16_w4_bias(
     var o_l_stride: Int = Int(py=args[14])
     var has_bias_rt: Bool = Int(py=args[15]) != 0
     var apply_silu_rt: Bool = Int(py=args[16]) != 0
-    var stream_handle_addr: Int = Int(py=args[17])
+    var dtype_code: Int = Int(py=args[17])
+    var stream_handle_addr: Int = Int(py=args[18])
+    var has_seq_idx_rt: Bool = Int(py=args[19]) != 0
+    var seq_idx_addr: Int = Int(py=args[20])
+    var seq_idx_b_stride: Int = Int(py=args[21])
+    var seq_idx_l_stride: Int = Int(py=args[22])
 
     # Zero-sized tensor: nothing to compute. `enqueue_function` rejects
     # any grid_dim == 0, so early-out before touching DeviceContext.
@@ -990,72 +1045,110 @@ def causal_conv1d_fwd_fp16_w4_bias(
         x_l_stride == 1 and w_w_stride == 1 and o_l_stride == 1
     )
 
-    # 8 specialisations: (has_bias × apply_silu × contig_inner). Mojo
-    # expands one specialised body per (h, s, c) triple, with no runtime
-    # branch inside the kernel body.
+    # `run[dtype]` materialises the dtype-typed pointers and the comptime
+    # dispatch tree below it. One specialised copy is generated per dtype
+    # the user actually invokes (Mojo's `compile_function` is JIT, so
+    # unused dtypes don't pay any compile cost).
     @parameter
-    fn enqueue_fwd[
-        has_bias: Bool, apply_silu: Bool, contig_inner: Bool
-    ]() raises:
-        var compiled = ctx.compile_function[
-            fwd_kernel[
-                DType.float16, 4, has_bias, apply_silu, contig_inner
-            ],
-            fwd_kernel[
-                DType.float16, 4, has_bias, apply_silu, contig_inner
-            ],
-        ]()
-        stream.enqueue_function(
-            compiled,
-            seqlen_int,
-            x_ptr,
-            w_ptr,
-            b_ptr,
-            o_ptr,
-            x_b_stride,
-            x_c_stride,
-            x_l_stride,
-            w_c_stride,
-            w_w_stride,
-            o_b_stride,
-            o_c_stride,
-            o_l_stride,
-            grid_dim=grid,
-            block_dim=(kNThreads,),
+    fn run[dtype: DType]() raises:
+        var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=x_addr
+        )
+        var w_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=w_addr
+        )
+        var b_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=b_addr
+        )
+        var seq_idx_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=seq_idx_addr
+        )
+        var o_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=o_addr
         )
 
-    if has_bias_rt:
-        if apply_silu_rt and contig_inner_rt:
-            enqueue_fwd[True, True, True]()
-        elif apply_silu_rt:
-            enqueue_fwd[True, True, False]()
-        elif contig_inner_rt:
-            enqueue_fwd[True, False, True]()
+        # 16 specialisations per dtype: (has_bias × has_seq_idx × apply_silu
+        # × contig_inner). The has_seq_idx=False path emits no seq_idx
+        # loads — the compiler dead-code-eliminates them via the
+        # comptime branch in `fwd_kernel`.
+        @parameter
+        fn enqueue_fwd[
+            has_bias: Bool,
+            has_seq_idx: Bool,
+            apply_silu: Bool,
+            contig_inner: Bool,
+        ]() raises:
+            var compiled = ctx.compile_function[
+                fwd_kernel[
+                    dtype, 4, has_bias, has_seq_idx, apply_silu, contig_inner
+                ],
+                fwd_kernel[
+                    dtype, 4, has_bias, has_seq_idx, apply_silu, contig_inner
+                ],
+            ]()
+            stream.enqueue_function(
+                compiled,
+                seqlen_int,
+                x_ptr,
+                w_ptr,
+                b_ptr,
+                seq_idx_ptr,
+                o_ptr,
+                x_b_stride,
+                x_c_stride,
+                x_l_stride,
+                w_c_stride,
+                w_w_stride,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
+                o_b_stride,
+                o_c_stride,
+                o_l_stride,
+                grid_dim=grid,
+                block_dim=(kNThreads,),
+            )
+
+        @parameter
+        fn dispatch_3[has_bias: Bool, has_seq_idx: Bool]() raises:
+            if apply_silu_rt and contig_inner_rt:
+                enqueue_fwd[has_bias, has_seq_idx, True, True]()
+            elif apply_silu_rt:
+                enqueue_fwd[has_bias, has_seq_idx, True, False]()
+            elif contig_inner_rt:
+                enqueue_fwd[has_bias, has_seq_idx, False, True]()
+            else:
+                enqueue_fwd[has_bias, has_seq_idx, False, False]()
+
+        if has_bias_rt and has_seq_idx_rt:
+            dispatch_3[True, True]()
+        elif has_bias_rt:
+            dispatch_3[True, False]()
+        elif has_seq_idx_rt:
+            dispatch_3[False, True]()
         else:
-            enqueue_fwd[True, False, False]()
+            dispatch_3[False, False]()
+
+    if dtype_code == 0:
+        run[DType.float16]()
+    elif dtype_code == 1:
+        run[DType.bfloat16]()
     else:
-        if apply_silu_rt and contig_inner_rt:
-            enqueue_fwd[False, True, True]()
-        elif apply_silu_rt:
-            enqueue_fwd[False, True, False]()
-        elif contig_inner_rt:
-            enqueue_fwd[False, False, True]()
-        else:
-            enqueue_fwd[False, False, False]()
+        run[DType.float32]()
 
     return PythonObject(None)
 
 
-def causal_conv1d_bwd_full_fp16_w4_bias(
+def causal_conv1d_bwd_full_w4_bias(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    """GPU fused backward: fp16 / width=4.
+    """GPU fused backward: width=4. dtype is dispatched via `dtype_code`.
 
     Caller must zero `dweight_acc` (and `dbias_acc` if `has_bias=1`)
-    before this call.
+    before this call. `dweight_acc` / `dbias_acc` are always fp32
+    accumulators regardless of the input dtype (precision-preserving).
 
-    Python tuple positional args (24):
+    Python tuple positional args (25):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int) — pass 0 if `has_bias=0`
@@ -1079,7 +1172,8 @@ def causal_conv1d_bwd_full_fp16_w4_bias(
         20 dx_l_stride      (int)
         21 has_bias (int, 0 or 1)
         22 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish was applied on fwd
-        23 cuda_stream_handle (int)
+        23 dtype_code (int) — 0=fp16, 1=bf16, 2=fp32
+        24 cuda_stream_handle (int)
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -1088,28 +1182,6 @@ def causal_conv1d_bwd_full_fp16_w4_bias(
     var dx_addr: Int = Int(py=args[4])
     var dweight_acc_addr: Int = Int(py=args[5])
     var dbias_acc_addr: Int = Int(py=args[6])
-
-    var x_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=x_addr
-    )
-    var w_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=w_addr
-    )
-    var b_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=b_addr
-    )
-    var dout_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=dout_addr
-    )
-    var dx_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=dx_addr
-    )
-    var dweight_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
-        unsafe_from_address=dweight_acc_addr
-    )
-    var dbias_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
-        unsafe_from_address=dbias_acc_addr
-    )
 
     var batch_int: Int = Int(py=args[7])
     var dim_int: Int = Int(py=args[8])
@@ -1128,7 +1200,8 @@ def causal_conv1d_bwd_full_fp16_w4_bias(
     var dx_l_stride: Int = Int(py=args[20])
     var has_bias_rt: Bool = Int(py=args[21]) != 0
     var apply_silu_rt: Bool = Int(py=args[22]) != 0
-    var stream_handle_addr: Int = Int(py=args[23])
+    var dtype_code: Int = Int(py=args[23])
+    var stream_handle_addr: Int = Int(py=args[24])
 
     # Zero-sized tensor: nothing to compute and no atomic updates to
     # dweight_acc / dbias_acc needed (the autograd `backward` already
@@ -1154,94 +1227,118 @@ def causal_conv1d_bwd_full_fp16_w4_bias(
     )
     var aligned_seq_rt: Bool = seqlen_int % (kNThreads * kNEltsBwd) == 0
 
+    # `run[dtype]` materialises dtype-typed pointers and the comptime
+    # has_bias/apply_silu/contig/aligned dispatch tree below it. The
+    # dweight_acc / dbias_acc accumulators stay fp32 regardless of dtype.
     @parameter
-    fn enqueue_bwd[
-        has_bias: Bool,
-        apply_silu: Bool,
-        contig_inner: Bool,
-        aligned_seq: Bool,
-    ]() raises:
-        var compiled = ctx.compile_function[
-            bwd_full_kernel[
-                DType.float16,
-                4,
-                has_bias,
-                apply_silu,
-                contig_inner,
-                aligned_seq,
-            ],
-            bwd_full_kernel[
-                DType.float16,
-                4,
-                has_bias,
-                apply_silu,
-                contig_inner,
-                aligned_seq,
-            ],
-        ]()
-        stream.enqueue_function(
-            compiled,
-            seqlen_int,
-            x_ptr,
-            w_ptr,
-            b_ptr,
-            dout_ptr,
-            dx_ptr,
-            dweight_acc_ptr,
-            dbias_acc_ptr,
-            x_b_stride,
-            x_c_stride,
-            x_l_stride,
-            w_c_stride,
-            w_w_stride,
-            dout_b_stride,
-            dout_c_stride,
-            dout_l_stride,
-            dx_b_stride,
-            dx_c_stride,
-            dx_l_stride,
-            grid_dim=grid,
-            block_dim=(kNThreads,),
+    fn run[dtype: DType]() raises:
+        var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=x_addr
+        )
+        var w_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=w_addr
+        )
+        var b_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=b_addr
+        )
+        var dout_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=dout_addr
+        )
+        var dx_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=dx_addr
+        )
+        var dweight_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
+            unsafe_from_address=dweight_acc_addr
+        )
+        var dbias_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
+            unsafe_from_address=dbias_acc_addr
         )
 
-    # 12 specialisations: has_bias × {6 existing apply_silu × contig × aligned}.
-    if has_bias_rt:
-        if apply_silu_rt and contig_inner_rt and aligned_seq_rt:
-            enqueue_bwd[True, True, True, True]()
-        elif apply_silu_rt and contig_inner_rt:
-            enqueue_bwd[True, True, True, False]()
-        elif apply_silu_rt:
-            enqueue_bwd[True, True, False, False]()
-        elif contig_inner_rt and aligned_seq_rt:
-            enqueue_bwd[True, False, True, True]()
-        elif contig_inner_rt:
-            enqueue_bwd[True, False, True, False]()
+        @parameter
+        fn enqueue_bwd[
+            has_bias: Bool,
+            apply_silu: Bool,
+            contig_inner: Bool,
+            aligned_seq: Bool,
+        ]() raises:
+            var compiled = ctx.compile_function[
+                bwd_full_kernel[
+                    dtype, 4, has_bias, apply_silu, contig_inner, aligned_seq
+                ],
+                bwd_full_kernel[
+                    dtype, 4, has_bias, apply_silu, contig_inner, aligned_seq
+                ],
+            ]()
+            stream.enqueue_function(
+                compiled,
+                seqlen_int,
+                x_ptr,
+                w_ptr,
+                b_ptr,
+                dout_ptr,
+                dx_ptr,
+                dweight_acc_ptr,
+                dbias_acc_ptr,
+                x_b_stride,
+                x_c_stride,
+                x_l_stride,
+                w_c_stride,
+                w_w_stride,
+                dout_b_stride,
+                dout_c_stride,
+                dout_l_stride,
+                dx_b_stride,
+                dx_c_stride,
+                dx_l_stride,
+                grid_dim=grid,
+                block_dim=(kNThreads,),
+            )
+
+        # 12 specialisations per dtype: has_bias × {6 apply_silu/contig/aligned}.
+        if has_bias_rt:
+            if apply_silu_rt and contig_inner_rt and aligned_seq_rt:
+                enqueue_bwd[True, True, True, True]()
+            elif apply_silu_rt and contig_inner_rt:
+                enqueue_bwd[True, True, True, False]()
+            elif apply_silu_rt:
+                enqueue_bwd[True, True, False, False]()
+            elif contig_inner_rt and aligned_seq_rt:
+                enqueue_bwd[True, False, True, True]()
+            elif contig_inner_rt:
+                enqueue_bwd[True, False, True, False]()
+            else:
+                enqueue_bwd[True, False, False, False]()
         else:
-            enqueue_bwd[True, False, False, False]()
+            if apply_silu_rt and contig_inner_rt and aligned_seq_rt:
+                enqueue_bwd[False, True, True, True]()
+            elif apply_silu_rt and contig_inner_rt:
+                enqueue_bwd[False, True, True, False]()
+            elif apply_silu_rt:
+                enqueue_bwd[False, True, False, False]()
+            elif contig_inner_rt and aligned_seq_rt:
+                enqueue_bwd[False, False, True, True]()
+            elif contig_inner_rt:
+                enqueue_bwd[False, False, True, False]()
+            else:
+                enqueue_bwd[False, False, False, False]()
+
+    if dtype_code == 0:
+        run[DType.float16]()
+    elif dtype_code == 1:
+        run[DType.bfloat16]()
     else:
-        if apply_silu_rt and contig_inner_rt and aligned_seq_rt:
-            enqueue_bwd[False, True, True, True]()
-        elif apply_silu_rt and contig_inner_rt:
-            enqueue_bwd[False, True, True, False]()
-        elif apply_silu_rt:
-            enqueue_bwd[False, True, False, False]()
-        elif contig_inner_rt and aligned_seq_rt:
-            enqueue_bwd[False, False, True, True]()
-        elif contig_inner_rt:
-            enqueue_bwd[False, False, True, False]()
-        else:
-            enqueue_bwd[False, False, False, False]()
+        run[DType.float32]()
 
     return PythonObject(None)
 
 
-def causal_conv1d_fwd_cpu_fp16_w4_bias(
+def causal_conv1d_fwd_cpu_w4_bias(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    """CPU forward: fp16 / width=4.
+    """CPU forward: width=4. dtype is dispatched via `dtype_code`.
 
-    Python tuple positional args (17):
+    Python tuple positional args (22):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int) — pass 0 if `has_bias=0`
@@ -1259,24 +1356,16 @@ def causal_conv1d_fwd_cpu_fp16_w4_bias(
         14 out_l_stride      (int)
         15 has_bias (int, 0 or 1)
         16 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish on the output
+        17 dtype_code (int) — 0=fp16, 1=bf16, 2=fp32
+        18 has_seq_idx (int, 0 or 1)
+        19 seq_idx_data_ptr (int, int32) — pass 0 if `has_seq_idx=0`
+        20 seq_idx_batch_stride (int)
+        21 seq_idx_l_stride (int)
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
     var b_addr: Int = Int(py=args[2])
     var o_addr: Int = Int(py=args[3])
-
-    var x_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=x_addr
-    )
-    var w_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=w_addr
-    )
-    var b_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=b_addr
-    )
-    var o_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=o_addr
-    )
 
     var batch_int: Int = Int(py=args[4])
     var dim_int: Int = Int(py=args[5])
@@ -1291,50 +1380,93 @@ def causal_conv1d_fwd_cpu_fp16_w4_bias(
     var o_l_stride: Int = Int(py=args[14])
     var has_bias_rt: Bool = Int(py=args[15]) != 0
     var apply_silu_rt: Bool = Int(py=args[16]) != 0
+    var dtype_code: Int = Int(py=args[17])
+    var has_seq_idx_rt: Bool = Int(py=args[18]) != 0
+    var seq_idx_addr: Int = Int(py=args[19])
+    var seq_idx_b_stride: Int = Int(py=args[20])
+    var seq_idx_l_stride: Int = Int(py=args[21])
 
     @parameter
-    fn run[has_bias: Bool, apply_silu: Bool]() raises:
-        fwd_kernel_cpu[DType.float16, 4, has_bias, apply_silu](
-            batch_int,
-            dim_int,
-            seqlen_int,
-            x_ptr,
-            w_ptr,
-            b_ptr,
-            o_ptr,
-            x_b_stride,
-            x_c_stride,
-            x_l_stride,
-            w_c_stride,
-            w_w_stride,
-            o_b_stride,
-            o_c_stride,
-            o_l_stride,
+    fn run[dtype: DType]() raises:
+        var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=x_addr
+        )
+        var w_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=w_addr
+        )
+        var b_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=b_addr
+        )
+        var seq_idx_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=seq_idx_addr
+        )
+        var o_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=o_addr
         )
 
-    if has_bias_rt and apply_silu_rt:
-        run[True, True]()
-    elif has_bias_rt:
-        run[True, False]()
-    elif apply_silu_rt:
-        run[False, True]()
+        @parameter
+        fn dispatch[
+            has_bias: Bool, has_seq_idx: Bool, apply_silu: Bool
+        ]() raises:
+            fwd_kernel_cpu[dtype, 4, has_bias, has_seq_idx, apply_silu](
+                batch_int,
+                dim_int,
+                seqlen_int,
+                x_ptr,
+                w_ptr,
+                b_ptr,
+                seq_idx_ptr,
+                o_ptr,
+                x_b_stride,
+                x_c_stride,
+                x_l_stride,
+                w_c_stride,
+                w_w_stride,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
+                o_b_stride,
+                o_c_stride,
+                o_l_stride,
+            )
+
+        if has_bias_rt and has_seq_idx_rt and apply_silu_rt:
+            dispatch[True, True, True]()
+        elif has_bias_rt and has_seq_idx_rt:
+            dispatch[True, True, False]()
+        elif has_bias_rt and apply_silu_rt:
+            dispatch[True, False, True]()
+        elif has_bias_rt:
+            dispatch[True, False, False]()
+        elif has_seq_idx_rt and apply_silu_rt:
+            dispatch[False, True, True]()
+        elif has_seq_idx_rt:
+            dispatch[False, True, False]()
+        elif apply_silu_rt:
+            dispatch[False, False, True]()
+        else:
+            dispatch[False, False, False]()
+
+    if dtype_code == 0:
+        run[DType.float16]()
+    elif dtype_code == 1:
+        run[DType.bfloat16]()
     else:
-        run[False, False]()
+        run[DType.float32]()
 
     return PythonObject(None)
 
 
-def causal_conv1d_bwd_full_cpu_fp16_w4_bias(
+def causal_conv1d_bwd_full_cpu_w4_bias(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    """CPU backward: fp16 / width=4.
+    """CPU fused backward: width=4. dtype is dispatched via `dtype_code`.
 
     Caller must zero `dweight_acc` (and `dbias_acc` if `has_bias=1`)
     before this call. Same arg layout as the GPU launcher minus the
     `cuda_stream_handle`.
 
-    Python tuple positional args (23):
+    Python tuple positional args (24):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int) — pass 0 if `has_bias=0`
@@ -1358,6 +1490,7 @@ def causal_conv1d_bwd_full_cpu_fp16_w4_bias(
         20 dx_l_stride      (int)
         21 has_bias (int, 0 or 1)
         22 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish was applied on fwd
+        23 dtype_code (int) — 0=fp16, 1=bf16, 2=fp32
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -1366,28 +1499,6 @@ def causal_conv1d_bwd_full_cpu_fp16_w4_bias(
     var dx_addr: Int = Int(py=args[4])
     var dweight_acc_addr: Int = Int(py=args[5])
     var dbias_acc_addr: Int = Int(py=args[6])
-
-    var x_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=x_addr
-    )
-    var w_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=w_addr
-    )
-    var b_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=b_addr
-    )
-    var dout_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=dout_addr
-    )
-    var dx_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=dx_addr
-    )
-    var dweight_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
-        unsafe_from_address=dweight_acc_addr
-    )
-    var dbias_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
-        unsafe_from_address=dbias_acc_addr
-    )
 
     var batch_int: Int = Int(py=args[7])
     var dim_int: Int = Int(py=args[8])
@@ -1405,41 +1516,74 @@ def causal_conv1d_bwd_full_cpu_fp16_w4_bias(
     var dx_l_stride: Int = Int(py=args[20])
     var has_bias_rt: Bool = Int(py=args[21]) != 0
     var apply_silu_rt: Bool = Int(py=args[22]) != 0
+    var dtype_code: Int = Int(py=args[23])
+
+    var dweight_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
+        unsafe_from_address=dweight_acc_addr
+    )
+    var dbias_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
+        unsafe_from_address=dbias_acc_addr
+    )
 
     @parameter
-    fn run[has_bias: Bool, apply_silu: Bool]() raises:
-        bwd_kernel_cpu[DType.float16, 4, has_bias, apply_silu](
-            batch_int,
-            dim_int,
-            seqlen_int,
-            x_ptr,
-            w_ptr,
-            b_ptr,
-            dout_ptr,
-            dx_ptr,
-            dweight_acc_ptr,
-            dbias_acc_ptr,
-            x_b_stride,
-            x_c_stride,
-            x_l_stride,
-            w_c_stride,
-            w_w_stride,
-            dout_b_stride,
-            dout_c_stride,
-            dout_l_stride,
-            dx_b_stride,
-            dx_c_stride,
-            dx_l_stride,
+    fn run[dtype: DType]() raises:
+        var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=x_addr
+        )
+        var w_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=w_addr
+        )
+        var b_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=b_addr
+        )
+        var dout_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=dout_addr
+        )
+        var dx_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=dx_addr
         )
 
-    if has_bias_rt and apply_silu_rt:
-        run[True, True]()
-    elif has_bias_rt:
-        run[True, False]()
-    elif apply_silu_rt:
-        run[False, True]()
+        @parameter
+        fn dispatch[has_bias: Bool, apply_silu: Bool]() raises:
+            bwd_kernel_cpu[dtype, 4, has_bias, apply_silu](
+                batch_int,
+                dim_int,
+                seqlen_int,
+                x_ptr,
+                w_ptr,
+                b_ptr,
+                dout_ptr,
+                dx_ptr,
+                dweight_acc_ptr,
+                dbias_acc_ptr,
+                x_b_stride,
+                x_c_stride,
+                x_l_stride,
+                w_c_stride,
+                w_w_stride,
+                dout_b_stride,
+                dout_c_stride,
+                dout_l_stride,
+                dx_b_stride,
+                dx_c_stride,
+                dx_l_stride,
+            )
+
+        if has_bias_rt and apply_silu_rt:
+            dispatch[True, True]()
+        elif has_bias_rt:
+            dispatch[True, False]()
+        elif apply_silu_rt:
+            dispatch[False, True]()
+        else:
+            dispatch[False, False]()
+
+    if dtype_code == 0:
+        run[DType.float16]()
+    elif dtype_code == 1:
+        run[DType.bfloat16]()
     else:
-        run[False, False]()
+        run[DType.float32]()
 
     return PythonObject(None)
 
@@ -1448,17 +1592,17 @@ def causal_conv1d_bwd_full_cpu_fp16_w4_bias(
 def PyInit_causal_conv1d_native() -> PythonObject:
     try:
         var m = PythonModuleBuilder("causal_conv1d_native")
-        m.def_py_function[causal_conv1d_fwd_fp16_w4_bias](
-            "causal_conv1d_fwd_fp16_w4_bias"
+        m.def_py_function[causal_conv1d_fwd_w4_bias](
+            "causal_conv1d_fwd_w4_bias"
         )
-        m.def_py_function[causal_conv1d_bwd_full_fp16_w4_bias](
-            "causal_conv1d_bwd_full_fp16_w4_bias"
+        m.def_py_function[causal_conv1d_bwd_full_w4_bias](
+            "causal_conv1d_bwd_full_w4_bias"
         )
-        m.def_py_function[causal_conv1d_fwd_cpu_fp16_w4_bias](
-            "causal_conv1d_fwd_cpu_fp16_w4_bias"
+        m.def_py_function[causal_conv1d_fwd_cpu_w4_bias](
+            "causal_conv1d_fwd_cpu_w4_bias"
         )
-        m.def_py_function[causal_conv1d_bwd_full_cpu_fp16_w4_bias](
-            "causal_conv1d_bwd_full_cpu_fp16_w4_bias"
+        m.def_py_function[causal_conv1d_bwd_full_cpu_w4_bias](
+            "causal_conv1d_bwd_full_cpu_w4_bias"
         )
         return m.finalize()
     except e:

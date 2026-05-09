@@ -33,8 +33,16 @@ def _ptr(t):
     return 0 if t is None else t.data_ptr()
 
 
-def _native_fwd(x, weight, bias, out, apply_silu):
-    _native_mod.causal_conv1d_fwd_fp16_w4_bias(
+# Must match the dispatch in the Mojo entry points.
+_DTYPE_CODE = {
+    torch.float16: 0,
+    torch.bfloat16: 1,
+    torch.float32: 2,
+}
+
+
+def _native_fwd(x, weight, bias, seq_idx, out, apply_silu):
+    _native_mod.causal_conv1d_fwd_w4_bias(
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -52,12 +60,17 @@ def _native_fwd(x, weight, bias, out, apply_silu):
         out.stride(2),
         int(bias is not None),
         int(apply_silu),
+        _DTYPE_CODE[x.dtype],
         torch.cuda.current_stream().cuda_stream,
+        int(seq_idx is not None),
+        _ptr(seq_idx),
+        seq_idx.stride(0) if seq_idx is not None else 0,
+        seq_idx.stride(1) if seq_idx is not None else 0,
     )
 
 
 def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu):
-    _native_mod.causal_conv1d_bwd_full_fp16_w4_bias(
+    _native_mod.causal_conv1d_bwd_full_w4_bias(
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -81,12 +94,13 @@ def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_si
         dx.stride(2),
         int(bias is not None),
         int(apply_silu),
+        _DTYPE_CODE[x.dtype],
         torch.cuda.current_stream().cuda_stream,
     )
 
 
-def _native_fwd_cpu(x, weight, bias, out, apply_silu):
-    _native_mod.causal_conv1d_fwd_cpu_fp16_w4_bias(
+def _native_fwd_cpu(x, weight, bias, seq_idx, out, apply_silu):
+    _native_mod.causal_conv1d_fwd_cpu_w4_bias(
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -104,11 +118,16 @@ def _native_fwd_cpu(x, weight, bias, out, apply_silu):
         out.stride(2),
         int(bias is not None),
         int(apply_silu),
+        _DTYPE_CODE[x.dtype],
+        int(seq_idx is not None),
+        _ptr(seq_idx),
+        seq_idx.stride(0) if seq_idx is not None else 0,
+        seq_idx.stride(1) if seq_idx is not None else 0,
     )
 
 
 def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu):
-    _native_mod.causal_conv1d_bwd_full_cpu_fp16_w4_bias(
+    _native_mod.causal_conv1d_bwd_full_cpu_w4_bias(
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -132,38 +151,86 @@ def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc, appl
         dx.stride(2),
         int(bias is not None),
         int(apply_silu),
+        _DTYPE_CODE[x.dtype],
     )
 
 
+def _write_final_states(x, final_states_out, width):
+    """`final_states_out[b, c, i]` is the value of `x[b, c, t]` at the
+    `width-1` most-recent positions, left zero-padded if `seqlen <
+    width-1`. Used by the chunked / stateful execution path: feed
+    `final_states_out` of chunk `i` as `initial_states` of chunk `i+1`.
+
+    Mirrors upstream's `F.pad(x, (W-1-seqlen, 0))[..., -W+1:]` slice in
+    `causal_conv1d_ref`.
+    """
+    seqlen = x.shape[-1]
+    pad_left = (width - 1) - seqlen
+    if pad_left > 0:
+        # x is shorter than W-1: copy all of x into the right portion
+        # and zero the left.
+        final_states_out[..., :pad_left].zero_()
+        final_states_out[..., pad_left:].copy_(x)
+    else:
+        final_states_out.copy_(x[..., -(width - 1) :])
+
+
 class _CausalConv1dFn(torch.autograd.Function):
-    """fp16 / width=4 autograd op (CUDA + CPU).
+    """fp16/bf16/fp32, width=4 autograd op (CUDA + CPU).
 
     Dispatches to the GPU launcher when `x.is_cuda`, otherwise to the
     pure-mojo CPU launcher (parallelized over (B, D) via
     `sync_parallelize`). `apply_silu` and the bias-presence flag are
     plumbed through both paths; `bias` may be None.
+
+    `final_states_out`, if provided, is written to in-place with the
+    last `W-1` cols of `x` (left zero-padded if seqlen < W-1). The
+    backward adds `dfinal_states` into the corresponding slice of
+    `dx`.
     """
 
     @staticmethod
-    def forward(ctx, x, weight, bias, apply_silu):
+    def forward(ctx, x, weight, bias, seq_idx, apply_silu, final_states_out):
         out = torch.empty_like(x)
         if x.is_cuda:
-            _native_fwd(x, weight, bias, out, apply_silu)
+            _native_fwd(x, weight, bias, seq_idx, out, apply_silu)
         else:
-            _native_fwd_cpu(x, weight, bias, out, apply_silu)
+            _native_fwd_cpu(x, weight, bias, seq_idx, out, apply_silu)
+        if final_states_out is not None:
+            _write_final_states(x, final_states_out, weight.shape[1])
         # `save_for_backward` accepts None — the slot just won't have a
         # tensor on retrieval.
         ctx.save_for_backward(x, weight, bias)
         ctx.apply_silu = apply_silu
         ctx.has_bias = bias is not None
+        ctx.has_seq_idx = seq_idx is not None
+        ctx.return_final_states = final_states_out is not None
+        if final_states_out is not None:
+            return out, final_states_out
         return out
 
     @staticmethod
-    def backward(ctx, dout):
+    def backward(ctx, *grad_outputs):
+        # `grad_outputs` is `(dout,)` or `(dout, dfinal_states)` depending
+        # on whether forward returned a tuple. dfinal_states is None when
+        # the user never read .grad on final_states (no consumer).
+        if ctx.has_seq_idx:
+            # Forward seq_idx is implemented in the kernels; the chunked
+            # bwd kernel's smem-halo dance hasn't been extended yet.
+            # Inference (no .backward()) works fine; this only fires when
+            # the user actually backprops through a seq_idx forward.
+            raise NotImplementedError(
+                "backward through seq_idx is not implemented yet — only the "
+                "forward path supports seq_idx. Call the op under "
+                "`torch.no_grad()` for inference."
+            )
+        dout = grad_outputs[0]
+        dfinal_states = grad_outputs[1] if ctx.return_final_states else None
         x, weight, bias = ctx.saved_tensors
         apply_silu = ctx.apply_silu
         has_bias = ctx.has_bias
         D, W = weight.shape
+        seqlen = x.shape[-1]
 
         if dout.stride(-1) != 1:
             dout = dout.contiguous()
@@ -186,10 +253,20 @@ class _CausalConv1dFn(torch.autograd.Function):
                 x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu
             )
 
+        if dfinal_states is not None:
+            # final_states[b, c, i] = x[b, c, seqlen - (W-1) + i] for
+            # i s.t. that index is in-range; the rest is zero-padded
+            # and contributes no gradient. So dx gets the matching
+            # tail incremented.
+            tail = min(W - 1, seqlen)
+            if tail > 0:
+                dx[..., -tail:] += dfinal_states[..., -tail:].to(dx.dtype)
+
         dbias = dbias_acc.to(bias.dtype) if has_bias else None
-        # `apply_silu` is a non-tensor input — autograd expects one return per
-        # forward input, with `None` for non-differentiable inputs.
-        return dx, dweight_acc.to(weight.dtype), dbias, None
+        # `seq_idx`, `apply_silu`, and `final_states_out` are non-tensor
+        # / non-diff inputs — autograd expects one return per forward
+        # input, with `None` for non-differentiable inputs.
+        return dx, dweight_acc.to(weight.dtype), dbias, None, None, None
 
 
 def causal_conv1d_fn(
@@ -213,20 +290,24 @@ def causal_conv1d_fn(
 
     out: (batch, dim, seqlen)
     """
-    if seq_idx is not None:
-        raise NotImplementedError("seq_idx is not supported")
     if initial_states is not None:
         raise NotImplementedError("initial_states is not supported")
-    if return_final_states or final_states_out is not None:
-        raise NotImplementedError("return_final_states is not supported")
     if activation not in (None, "silu", "swish"):
         raise NotImplementedError(
             "only activation in {None, 'silu', 'swish'} is supported"
         )
-    if x.dtype != torch.float16 or weight.dtype != torch.float16:
-        raise NotImplementedError("only fp16 is supported")
-    if bias is not None and bias.dtype != torch.float16:
-        raise NotImplementedError("only fp16 is supported")
+    if x.dtype not in _DTYPE_CODE:
+        raise NotImplementedError(
+            f"unsupported dtype {x.dtype}; only fp16/bf16/fp32 are supported"
+        )
+    if weight.dtype != x.dtype:
+        raise NotImplementedError(
+            f"weight.dtype ({weight.dtype}) must match x.dtype ({x.dtype})"
+        )
+    if bias is not None and bias.dtype != x.dtype:
+        raise NotImplementedError(
+            f"bias.dtype ({bias.dtype}) must match x.dtype ({x.dtype})"
+        )
     if weight.shape[1] != 4:
         raise NotImplementedError(f"only width=4 is supported (got {weight.shape[1]})")
     if x.device != weight.device or (bias is not None and x.device != bias.device):
@@ -236,7 +317,66 @@ def causal_conv1d_fn(
             f"bias={'None' if bias is None else bias.device})"
         )
 
+    if final_states_out is not None and not return_final_states:
+        raise ValueError(
+            "final_states_out is only meaningful when return_final_states=True"
+        )
+
+    batch, dim, seqlen = x.shape
+    width = weight.shape[1]
+
+    # seq_idx + return_final_states are mutually exclusive (matches
+    # upstream): with packed sequences in one batch row, "the last W-1
+    # cols" doesn't have a single owning sequence.
+    if seq_idx is not None:
+        if return_final_states:
+            raise ValueError(
+                "seq_idx and return_final_states are mutually exclusive "
+                "(packed sequences have no single 'last W-1 cols')"
+            )
+        if seq_idx.shape != (batch, seqlen):
+            raise ValueError(
+                f"seq_idx shape {tuple(seq_idx.shape)} != expected {(batch, seqlen)}"
+            )
+        if seq_idx.dtype != torch.int32:
+            raise ValueError(f"seq_idx.dtype must be int32 (got {seq_idx.dtype})")
+        if seq_idx.device != x.device:
+            raise ValueError(
+                f"seq_idx.device ({seq_idx.device}) must match x.device ({x.device})"
+            )
+        if not seq_idx.is_contiguous():
+            seq_idx = seq_idx.contiguous()
+
+    if return_final_states:
+        if final_states_out is None:
+            final_states_out = torch.empty(
+                batch, dim, width - 1, dtype=x.dtype, device=x.device
+            )
+        else:
+            if final_states_out.shape != (batch, dim, width - 1):
+                raise ValueError(
+                    f"final_states_out shape {tuple(final_states_out.shape)} "
+                    f"!= expected {(batch, dim, width - 1)}"
+                )
+            if final_states_out.dtype != x.dtype:
+                raise ValueError(
+                    f"final_states_out.dtype ({final_states_out.dtype}) "
+                    f"must match x.dtype ({x.dtype})"
+                )
+            if final_states_out.device != x.device:
+                raise ValueError(
+                    f"final_states_out.device ({final_states_out.device}) "
+                    f"must match x.device ({x.device})"
+                )
+
     # silu and swish are the same function (x * sigmoid(x)); activation=None
     # is the bias-only path.
     apply_silu = activation in ("silu", "swish")
-    return _CausalConv1dFn.apply(x, weight, bias, apply_silu)
+    result = _CausalConv1dFn.apply(
+        x, weight, bias, seq_idx, apply_silu, final_states_out
+    )
+    if return_final_states:
+        # _CausalConv1dFn returns (out, final_states) when final_states_out
+        # is non-None.
+        return result
+    return result
