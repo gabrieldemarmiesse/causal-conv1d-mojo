@@ -435,3 +435,159 @@ def causal_conv1d_fn(
         # is non-None.
         return result
     return result
+
+
+# ===---------- causal_conv1d_update (single-step / KV-cache decode) ----------=== #
+
+
+def _native_update(x, weight, bias, conv_state, out, apply_silu):
+    _native_mod.causal_conv1d_update(
+        x.data_ptr(),
+        weight.data_ptr(),
+        _ptr(bias),
+        conv_state.data_ptr(),
+        out.data_ptr(),
+        x.shape[0],
+        x.shape[1],
+        x.shape[2],
+        conv_state.shape[2],
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        conv_state.stride(0),
+        conv_state.stride(1),
+        conv_state.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        int(bias is not None),
+        int(apply_silu),
+        _DTYPE_CODE[x.dtype],
+        torch.cuda.current_stream().cuda_stream,
+        weight.shape[1],
+    )
+
+
+def _native_update_cpu(x, weight, bias, conv_state, out, apply_silu):
+    _native_mod.causal_conv1d_update_cpu(
+        x.data_ptr(),
+        weight.data_ptr(),
+        _ptr(bias),
+        conv_state.data_ptr(),
+        out.data_ptr(),
+        x.shape[0],
+        x.shape[1],
+        x.shape[2],
+        conv_state.shape[2],
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        conv_state.stride(0),
+        conv_state.stride(1),
+        conv_state.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        int(bias is not None),
+        int(apply_silu),
+        _DTYPE_CODE[x.dtype],
+        weight.shape[1],
+    )
+
+
+def causal_conv1d_update(
+    x,
+    conv_state,
+    weight,
+    bias=None,
+    activation=None,
+    cache_seqlens=None,
+    conv_state_indices=None,
+):
+    """Single-step (or short-burst) causal conv1d update for autoregressive
+    decoding.
+
+    x: (batch, dim) or (batch, dim, seqlen)  -- the new tokens
+    conv_state: (batch, dim, state_len), state_len >= width - 1
+        Mutated in place: oldest `seqlen` values are dropped, new x
+        values are appended on the right.
+    weight: (dim, width)
+    bias: (dim,) or None
+    activation: None | "silu" | "swish"
+    cache_seqlens, conv_state_indices: not supported (raise).
+
+    Returns: out tensor with the same shape as `x`.
+    """
+    if cache_seqlens is not None:
+        raise NotImplementedError("cache_seqlens (circular buffer) is not supported")
+    if conv_state_indices is not None:
+        raise NotImplementedError("conv_state_indices is not supported")
+    if activation not in (None, "silu", "swish"):
+        raise NotImplementedError(
+            "only activation in {None, 'silu', 'swish'} is supported"
+        )
+    if x.dtype not in _DTYPE_CODE:
+        raise NotImplementedError(
+            f"unsupported dtype {x.dtype}; only fp16/bf16/fp32 are supported"
+        )
+    if weight.dtype != x.dtype:
+        raise NotImplementedError(
+            f"weight.dtype ({weight.dtype}) must match x.dtype ({x.dtype})"
+        )
+    if bias is not None and bias.dtype != x.dtype:
+        raise NotImplementedError(
+            f"bias.dtype ({bias.dtype}) must match x.dtype ({x.dtype})"
+        )
+    if conv_state.dtype != x.dtype:
+        raise NotImplementedError(
+            f"conv_state.dtype ({conv_state.dtype}) must match x.dtype ({x.dtype})"
+        )
+    if weight.shape[1] not in (2, 3, 4):
+        raise NotImplementedError(
+            f"only width in {{2, 3, 4}} is supported (got {weight.shape[1]})"
+        )
+
+    # Match upstream's calling convention: x can be 2-D (no seqlen
+    # dimension) for the common single-token-per-call decode path. We
+    # unsqueeze internally and squeeze at the end.
+    unsqueeze = x.dim() == 2
+    if unsqueeze:
+        x = x.unsqueeze(-1)
+
+    batch, dim, seqlen = x.shape
+    width = weight.shape[1]
+    state_len = conv_state.shape[-1]
+
+    if conv_state.shape != (batch, dim, state_len):
+        raise ValueError(
+            f"conv_state shape {tuple(conv_state.shape)} != expected "
+            f"{(batch, dim, state_len)}"
+        )
+    if state_len < width - 1:
+        raise ValueError(
+            f"conv_state.shape[-1]={state_len} must be >= width-1={width - 1}"
+        )
+    if (
+        x.device != weight.device
+        or x.device != conv_state.device
+        or (bias is not None and x.device != bias.device)
+    ):
+        raise NotImplementedError(
+            "x, weight, bias, conv_state must all be on the same device"
+        )
+
+    out = torch.empty_like(x)
+    apply_silu = activation in ("silu", "swish")
+
+    if x.is_cuda:
+        _native_update(x, weight, bias, conv_state, out, apply_silu)
+    else:
+        _native_update_cpu(x, weight, bias, conv_state, out, apply_silu)
+
+    if unsqueeze:
+        out = out.squeeze(-1)
+    return out

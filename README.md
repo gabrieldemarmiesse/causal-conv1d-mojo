@@ -84,9 +84,12 @@ and `benchmarks/bench_forward_extensive.py`.
       (mirrors `causal_conv1d_fwd.cu`).
     * `causal_conv1d_bwd.mojo` — GPU fused backward kernel + warp/block
       reductions (mirrors `causal_conv1d_bwd.cu`).
-    * `causal_conv1d_cpu.mojo` — pure-mojo CPU forward + backward
-      (no upstream analogue).
-    * `causal_conv1d_native.mojo` — dispatcher: 4 launchers (parses
+    * `causal_conv1d_update.mojo` — GPU single-step / KV-cache decode
+      kernel (mirrors `causal_conv1d_update.cu`).
+    * `causal_conv1d_fwd_cpu.mojo` / `causal_conv1d_bwd_cpu.mojo` /
+      `causal_conv1d_update_cpu.mojo` — pure-mojo CPU paths (no
+      upstream analogue; let the package run on a GPU-less machine).
+    * `causal_conv1d_native.mojo` — dispatcher: 6 launchers (parses
       Python args, builds the `(dtype × width × flags)` comptime tree)
       + `PyInit_*` (mirrors `causal_conv1d.cpp`).
 * `src/causal_conv1d_mojo/__init__.py` — Python wrapper. Wraps forward
@@ -114,6 +117,13 @@ raises `NotImplementedError` (inference under `no_grad` works fine).
 `return_final_states` / `final_states_out` is full forward + backward.
 Both forward and backward go through native Mojo kernels (GPU + CPU);
 the autograd `Function` plumbs all flags through.
+
+`causal_conv1d_update(x, conv_state, weight, ...)` provides the
+single-step / KV-cache decode op: takes 1 (or a few) new tokens,
+mutates `conv_state` in place, returns the conv output. Used in
+autoregressive Mamba inference. `cache_seqlens` (circular buffer
+mode) and `conv_state_indices` (per-batch state indirection) raise
+`NotImplementedError`.
 
 ## Run it
 
