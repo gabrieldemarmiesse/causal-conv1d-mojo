@@ -77,23 +77,11 @@ def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_si
 
 
 def _native_fwd_cpu(x, weight, bias, out, apply_silu):
+    # Tensors are passed through; the Mojo entry point unpacks
+    # `data_ptr` / `shape` / `stride` itself via PythonObject method
+    # dispatch.
     _native_mod.causal_conv1d_fwd_cpu_fp16_w4_bias(
-        x.data_ptr(),
-        weight.data_ptr(),
-        bias.data_ptr(),
-        out.data_ptr(),
-        x.shape[0],
-        x.shape[1],
-        x.shape[2],
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        int(apply_silu),
+        x, weight, bias, out, int(apply_silu)
     )
 
 

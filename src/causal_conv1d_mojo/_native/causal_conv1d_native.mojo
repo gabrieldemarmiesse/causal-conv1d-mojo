@@ -1155,57 +1155,43 @@ def causal_conv1d_fwd_cpu_fp16_w4_bias(
 ) raises -> PythonObject:
     """CPU forward: fp16 / width=4 / has_bias.
 
-    Python tuple positional args (16, in order):
-        0  x_data_ptr  (int)
-        1  weight_data_ptr  (int)
-        2  bias_data_ptr  (int)
-        3  output_data_ptr  (int)
-        4  batch  (int)
-        5  dim    (int)
-        6  seqlen (int)
-        7  x_batch_stride  (int)
-        8  x_c_stride      (int)
-        9  x_l_stride      (int)
-        10 weight_c_stride (int)
-        11 weight_w_stride (int)
-        12 out_batch_stride  (int)
-        13 out_c_stride      (int)
-        14 out_l_stride      (int)
-        15 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish on the output
+    Python tuple positional args (5):
+        0  x       — torch.Tensor (B, D, L) fp16
+        1  weight  — torch.Tensor (D, W) fp16
+        2  bias    — torch.Tensor (D,) fp16
+        3  output  — torch.Tensor (B, D, L) fp16 (writeable)
+        4  apply_silu (int, 0 or 1) — 1 ⇒ silu/swish on the output
+
+    Pointers / shapes / strides are extracted from the tensors via the
+    PythonObject method dispatch (data_ptr/shape/stride). The Python
+    wrapper just forwards tensors directly — no `data_ptr()` boilerplate
+    on the Python side.
     """
-    var x_addr: Int = Int(py=args[0])
-    var w_addr: Int = Int(py=args[1])
-    var b_addr: Int = Int(py=args[2])
-    var o_addr: Int = Int(py=args[3])
+    var x = args[0]
+    var w = args[1]
+    var b = args[2]
+    var o = args[3]
+    var apply_silu_rt: Bool = Int(py=args[4]) != 0
 
     var x_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=x_addr
+        unsafe_from_address=Int(py=x.data_ptr())
     )
     var w_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=w_addr
+        unsafe_from_address=Int(py=w.data_ptr())
     )
     var b_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=b_addr
+        unsafe_from_address=Int(py=b.data_ptr())
     )
     var o_ptr = UnsafePointer[Scalar[DType.float16], MutAnyOrigin](
-        unsafe_from_address=o_addr
+        unsafe_from_address=Int(py=o.data_ptr())
     )
 
-    var batch_int: Int = Int(py=args[4])
-    var dim_int: Int = Int(py=args[5])
-    var seqlen_int: Int = Int(py=args[6])
-    var x_b_stride: Int = Int(py=args[7])
-    var x_c_stride: Int = Int(py=args[8])
-    var x_l_stride: Int = Int(py=args[9])
-    var w_c_stride: Int = Int(py=args[10])
-    var w_w_stride: Int = Int(py=args[11])
-    var o_b_stride: Int = Int(py=args[12])
-    var o_c_stride: Int = Int(py=args[13])
-    var o_l_stride: Int = Int(py=args[14])
-    var apply_silu_rt: Bool = Int(py=args[15]) != 0
+    var batch_int: Int = Int(py=x.shape[0])
+    var dim_int: Int = Int(py=x.shape[1])
+    var seqlen_int: Int = Int(py=x.shape[2])
 
     @parameter
-    def run[apply_silu: Bool]():
+    fn run[apply_silu: Bool]() raises:
         fwd_kernel_cpu[DType.float16, 4, apply_silu](
             batch_int,
             dim_int,
@@ -1214,14 +1200,14 @@ def causal_conv1d_fwd_cpu_fp16_w4_bias(
             w_ptr,
             b_ptr,
             o_ptr,
-            x_b_stride,
-            x_c_stride,
-            x_l_stride,
-            w_c_stride,
-            w_w_stride,
-            o_b_stride,
-            o_c_stride,
-            o_l_stride,
+            Int(py=x.stride(0)),
+            Int(py=x.stride(1)),
+            Int(py=x.stride(2)),
+            Int(py=w.stride(0)),
+            Int(py=w.stride(1)),
+            Int(py=o.stride(0)),
+            Int(py=o.stride(1)),
+            Int(py=o.stride(2)),
         )
 
     if apply_silu_rt:
