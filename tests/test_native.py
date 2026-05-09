@@ -183,3 +183,47 @@ def test_backward_shapes_and_dtypes(device, activation):
     assert x.grad.shape == x.shape and x.grad.dtype == x.dtype
     assert weight.grad.shape == weight.shape and weight.grad.dtype == weight.dtype
     assert bias.grad.shape == bias.shape and bias.grad.dtype == bias.dtype
+
+
+# ===---------- zero-sized tensors ----------=== #
+# Each (B, D, L) configuration with at least one zero dimension. A
+# well-behaved op should accept these and return correctly-shaped
+# (empty) outputs / gradients without raising. On the GPU side
+# `enqueue_function` rejects any `grid_dim == 0`, so the launchers
+# need an explicit early-out.
+
+
+@pytest.mark.parametrize("shape", [(0, 64, 128), (2, 0, 128), (2, 64, 0), (0, 0, 0)])
+def test_zero_sized_forward(device, shape, activation):
+    B, D, L = shape
+    W = 4
+    x = torch.randn(B, D, L, dtype=torch.float16, device=device)
+    weight = torch.randn(D, W, dtype=torch.float16, device=device)
+    bias = torch.randn(D, dtype=torch.float16, device=device)
+
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight, bias=bias, activation=activation
+    )
+
+    assert out.shape == x.shape
+    assert out.dtype == x.dtype
+    assert out.numel() == 0
+
+
+@pytest.mark.parametrize("shape", [(0, 64, 128), (2, 0, 128), (2, 64, 0), (0, 0, 0)])
+def test_zero_sized_backward(device, shape, activation):
+    B, D, L = shape
+    W = 4
+    x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
+    weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
+    bias = torch.randn(D, dtype=torch.float16, device=device, requires_grad=True)
+    dout = torch.randn_like(x)
+
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x, weight, bias=bias, activation=activation
+    )
+    out.backward(dout)
+
+    assert x.grad.shape == x.shape and x.grad.dtype == x.dtype
+    assert weight.grad.shape == weight.shape and weight.grad.dtype == weight.dtype
+    assert bias.grad.shape == bias.shape and bias.grad.dtype == bias.dtype

@@ -940,6 +940,11 @@ def causal_conv1d_fwd_fp16_w4_bias(
     var apply_silu_rt: Bool = Int(py=args[15]) != 0
     var stream_handle_addr: Int = Int(py=args[16])
 
+    # Zero-sized tensor: nothing to compute. `enqueue_function` rejects
+    # any grid_dim == 0, so early-out before touching DeviceContext.
+    if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
+        return PythonObject(None)
+
     var ctx = DeviceContext()
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
@@ -1076,6 +1081,13 @@ def causal_conv1d_bwd_full_fp16_w4_bias(
     var dx_l_stride: Int = Int(py=args[20])
     var apply_silu_rt: Bool = Int(py=args[21]) != 0
     var stream_handle_addr: Int = Int(py=args[22])
+
+    # Zero-sized tensor: nothing to compute and no atomic updates to
+    # dweight_acc / dbias_acc needed (the autograd `backward` already
+    # zero-initialised them). Early-out before `enqueue_function`, which
+    # rejects any grid_dim == 0.
+    if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
+        return PythonObject(None)
 
     var ctx = DeviceContext()
     var stream_opaque = OpaquePointer[MutAnyOrigin](
