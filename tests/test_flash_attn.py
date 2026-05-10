@@ -193,6 +193,117 @@ def test_flash_attn_func_causal_q_longer_than_k():
     assert diff < 5e-3
 
 
+# Phase 1.7: backward — gradients vs the fp32 reference.
+
+
+def _grads_from_ref(q, k, v, dout, softmax_scale=None, causal=False):
+    """Run the reference attention with autograd and return (dq, dk, dv)."""
+    qg = q.detach().clone().to(torch.float32).requires_grad_(True)
+    kg = k.detach().clone().to(torch.float32).requires_grad_(True)
+    vg = v.detach().clone().to(torch.float32).requires_grad_(True)
+    out = _ref_attention(
+        qg.to(q.dtype),
+        kg.to(k.dtype),
+        vg.to(v.dtype),
+        softmax_scale=softmax_scale,
+        causal=causal,
+    )
+    out.float().backward(dout.float())
+    return qg.grad, kg.grad, vg.grad
+
+
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("headdim", [64, 96, 128])
+def test_flash_attn_func_backward(causal, headdim):
+    """Backward through flash_attn_func matches the fp32 reference."""
+    batch, seqlen, nheads = 2, 16, 2
+    q = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    k = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    v = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    dout = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=causal)
+    out.backward(dout)
+    dq_ref, dk_ref, dv_ref = _grads_from_ref(q, k, v, dout, causal=causal)
+
+    # fp16 backward accumulates more roundoff than fwd; bump tolerance to
+    # ~1e-2 (matches what upstream's own bwd tests use).
+    for name, got, ref in [
+        ("dq", q.grad, dq_ref),
+        ("dk", k.grad, dk_ref),
+        ("dv", v.grad, dv_ref),
+    ]:
+        diff = (got.float() - ref.float()).abs().max().item()
+        assert diff < 1e-2, f"{name} max_diff={diff}"
+
+
+@pytest.mark.parametrize("nheads_q,nheads_kv", [(8, 1), (8, 2), (4, 2)])
+def test_flash_attn_func_backward_gqa(nheads_q, nheads_kv):
+    """GQA backward — gradients on the kv side sum across the q heads
+    sharing each kv head."""
+    batch, seqlen, headdim = 2, 8, 64
+    q = torch.randn(
+        batch, seqlen, nheads_q, headdim, dtype=torch.float16, requires_grad=True
+    )
+    k = torch.randn(
+        batch, seqlen, nheads_kv, headdim, dtype=torch.float16, requires_grad=True
+    )
+    v = torch.randn(
+        batch, seqlen, nheads_kv, headdim, dtype=torch.float16, requires_grad=True
+    )
+    dout = torch.randn(batch, seqlen, nheads_q, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=True)
+    out.backward(dout)
+
+    # Reference: tile k/v to nheads_q for fwd, then aggregate the per-q-head
+    # k/v gradients back down to nheads_kv groups.
+    repeat = nheads_q // nheads_kv
+    k_full = k.detach().repeat_interleave(repeat, dim=2).requires_grad_(True)
+    v_full = v.detach().repeat_interleave(repeat, dim=2).requires_grad_(True)
+    qg = q.detach().clone().requires_grad_(True)
+    out_ref = _ref_attention(qg, k_full, v_full, causal=True)
+    out_ref.float().backward(dout.float())
+    dk_ref = k_full.grad.view(batch, seqlen, nheads_kv, repeat, headdim).sum(dim=3)
+    dv_ref = v_full.grad.view(batch, seqlen, nheads_kv, repeat, headdim).sum(dim=3)
+
+    for name, got, ref in [
+        ("dq", q.grad, qg.grad),
+        ("dk", k.grad, dk_ref),
+        ("dv", v.grad, dv_ref),
+    ]:
+        diff = (got.float() - ref.float()).abs().max().item()
+        assert diff < 1e-2, f"{name} max_diff={diff}"
+
+
+def test_flash_attn_func_backward_causal_q_longer_than_k():
+    """Backward with seqlen_q > seqlen_k — fully-masked rows produce
+    zero gradients on q (and contribute nothing on k/v)."""
+    seqlen_q, seqlen_k, headdim, nheads, batch = 5, 3, 64, 1, 1
+    q = torch.randn(
+        batch, seqlen_q, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    k = torch.randn(
+        batch, seqlen_k, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    v = torch.randn(
+        batch, seqlen_k, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    dout = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=True)
+    out.backward(dout)
+
+    # Top two q rows are fully masked → dq is exactly zero there.
+    assert torch.equal(q.grad[:, :2], torch.zeros_like(q.grad[:, :2]))
+
+
 # ---- "still raises" tests for features not yet implemented ----
 
 

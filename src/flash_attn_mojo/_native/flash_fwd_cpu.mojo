@@ -17,6 +17,7 @@ Algorithm — standard "FlashAttention" online softmax recurrence:
         o     = alpha * o + p * v_j
         m     = m_new
     out = o / l
+    lse = m + log(l)            # log-sum-exp; needed by backward
 
 `k_max` is `seqlen_k - 1` for non-causal, or
 `(seqlen_k - seqlen_q) + q_idx` for causal — bottom-right alignment,
@@ -29,7 +30,7 @@ m_new = s, alpha = exp(-inf - s) = 0, l = 1, o = v_first, m = s.
 """
 
 from std.algorithm import sync_parallelize
-from std.math import exp, inf
+from std.math import exp, inf, log
 
 
 fn fwd_kernel_cpu[
@@ -47,6 +48,8 @@ fn fwd_kernel_cpu[
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     out_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    # lse_ptr is fp32 of shape (batch, nheads_q, seqlen_q), contiguous.
+    lse_ptr: UnsafePointer[Float32, MutAnyOrigin],
     q_b_stride: Int,
     q_s_stride: Int,
     q_h_stride: Int,
@@ -124,14 +127,19 @@ fn fwd_kernel_cpu[
         # Inclusive upper bound on k positions for this query row.
         var kj_end: Int = seqlen_k
 
+        # lse output index: contiguous (b, h_q, q_idx).
+        var lse_idx = (b * nheads_q + h_q) * seqlen_q + q_idx
+
         @parameter
         if causal:
             var k_max = seq_offset + q_idx
             if k_max < 0:
-                # Row attends to nothing — write zeros and return.
+                # Row attends to nothing — write zeros and lse=-inf
+                # (so the backward sees zero gradient through this row).
                 @parameter
                 for d in range(headdim):
                     out_ptr[out_base + d * out_d_stride] = Scalar[dtype](0)
+                lse_ptr[lse_idx] = neg_inf
                 return
             kj_end = k_max + 1
             if kj_end > seqlen_k:
@@ -170,5 +178,8 @@ fn fwd_kernel_cpu[
         @parameter
         for d in range(headdim):
             out_ptr[out_base + d * out_d_stride] = (o[d] * inv_l).cast[dtype]()
+
+        # lse = m + log(l)  — the log-sum-exp of un-shifted scores.
+        lse_ptr[lse_idx] = m + log(l)
 
     sync_parallelize[process_bhq](batch * nheads_q * seqlen_q)
