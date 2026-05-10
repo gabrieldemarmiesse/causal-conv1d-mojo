@@ -87,6 +87,7 @@ def _native_fwd_cpu(
     alibi,
     dropout_mask,
     cache_seqlens=None,
+    softcap=0.0,
 ):
     alibi_t, alibi_stride = _normalise_alibi(alibi, q.shape[2], q.shape[0])
     alibi_addr = alibi_t.data_ptr() if alibi_t is not None else 0
@@ -117,6 +118,7 @@ def _native_fwd_cpu(
         alibi_stride,
         dropout_addr,
         cache_seqlens_addr,
+        float(softcap),
     )
 
 
@@ -135,6 +137,7 @@ def _native_bwd_cpu(
     window,
     alibi,
     dropout_mask,
+    softcap=0.0,
 ):
     alibi_t, alibi_stride = _normalise_alibi(alibi, q.shape[2], q.shape[0])
     alibi_addr = alibi_t.data_ptr() if alibi_t is not None else 0
@@ -171,6 +174,7 @@ def _native_bwd_cpu(
         alibi_addr,
         alibi_stride,
         dropout_addr,
+        float(softcap),
     )
 
 
@@ -178,7 +182,7 @@ class _FlashAttnFunc(torch.autograd.Function):
     """torch.autograd.Function wrapping the native fwd/bwd calls."""
 
     @staticmethod
-    def forward(ctx, q, k, v, softmax_scale, causal, window, alibi, dropout_p):
+    def forward(ctx, q, k, v, softmax_scale, causal, window, alibi, dropout_p, softcap):
         out = torch.empty_like(q)
         # lse is fp32, shape (batch, nheads_q, seqlen_q), contiguous.
         lse = torch.empty(
@@ -202,7 +206,17 @@ class _FlashAttnFunc(torch.autograd.Function):
                 .div_(keep_prob)
             )
         _native_fwd_cpu(
-            q, k, v, out, lse, softmax_scale, causal, window, alibi, dropout_mask
+            q,
+            k,
+            v,
+            out,
+            lse,
+            softmax_scale,
+            causal,
+            window,
+            alibi,
+            dropout_mask,
+            softcap=softcap,
         )
         ctx.save_for_backward(q, k, v, out, lse)
         ctx.dropout_mask = dropout_mask  # tensor or None — keeps it alive
@@ -210,6 +224,7 @@ class _FlashAttnFunc(torch.autograd.Function):
         ctx.causal = causal
         ctx.window = window
         ctx.alibi = alibi
+        ctx.softcap = softcap
         return out
 
     @staticmethod
@@ -235,10 +250,11 @@ class _FlashAttnFunc(torch.autograd.Function):
             ctx.window,
             ctx.alibi,
             ctx.dropout_mask,
+            softcap=ctx.softcap,
         )
-        # 8 forward inputs (q, k, v, softmax_scale, causal, window, alibi,
-        # dropout_p) — gradients only flow through the first three.
-        return dq, dk, dv, None, None, None, None, None
+        # 9 forward inputs (q, k, v, softmax_scale, causal, window, alibi,
+        # dropout_p, softcap) — gradients only flow through the first three.
+        return dq, dk, dv, None, None, None, None, None, None
 
 
 def flash_attn_func(
@@ -249,6 +265,7 @@ def flash_attn_func(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),
+    softcap=0.0,
     alibi_slopes=None,
     deterministic=False,
 ):
@@ -332,8 +349,18 @@ def flash_attn_func(
             "currently CPU-only; GPU forward lands in a later 1.x step"
         )
 
+    if not isinstance(softcap, (int, float)) or softcap < 0:
+        raise ValueError(f"softcap must be ≥ 0; got {softcap!r}")
     return _FlashAttnFunc.apply(
-        q, k, v, softmax_scale, causal, window_size, alibi_slopes, dropout_p
+        q,
+        k,
+        v,
+        softmax_scale,
+        causal,
+        window_size,
+        alibi_slopes,
+        dropout_p,
+        float(softcap),
     )
 
 
@@ -343,6 +370,7 @@ def flash_attn_qkvpacked_func(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),
+    softcap=0.0,
     alibi_slopes=None,
     deterministic=False,
 ):
@@ -367,6 +395,7 @@ def flash_attn_qkvpacked_func(
         softmax_scale=softmax_scale,
         causal=causal,
         window_size=window_size,
+        softcap=softcap,
         alibi_slopes=alibi_slopes,
         deterministic=deterministic,
     )
@@ -386,6 +415,7 @@ def flash_attn_with_kvcache(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),
+    softcap=0.0,
     rotary_interleaved=True,
     alibi_slopes=None,
 ):
@@ -518,5 +548,6 @@ def flash_attn_with_kvcache(
         alibi_slopes,
         None,  # no dropout in kvcache path
         cs,
+        softcap=float(softcap),
     )
     return out

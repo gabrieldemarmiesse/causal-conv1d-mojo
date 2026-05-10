@@ -77,6 +77,7 @@ def flash_attn_fwd_cpu(
             0 disables dropout. Mask values are pre-scaled by 1/(1-p).
         35 cache_seqlens_addr (int) — int32 ptr (B,); 0 means "no
             kvcache, use seqlen_k for all batches".
+        36 softcap (float) — Gemma2-style logit cap; 0.0 disables.
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -119,6 +120,7 @@ def flash_attn_fwd_cpu(
     var alibi_b_stride: Int = Int(py=args[33])
     var dropout_addr: Int = Int(py=args[34])
     var cache_seqlens_addr: Int = Int(py=args[35])
+    var softcap_rt: Float32 = Float32(py=args[36])
     var has_alibi: Bool = alibi_addr != 0
     var has_dropout: Bool = dropout_addr != 0
     var has_cache_seqlens: Bool = cache_seqlens_addr != 0
@@ -176,6 +178,7 @@ def flash_attn_fwd_cpu(
             dropout_ptr,
             has_cache_seqlens,
             cache_seqlens_ptr,
+            softcap_rt,
             q_ptr,
             k_ptr,
             v_ptr,
@@ -268,6 +271,7 @@ def flash_attn_bwd_cpu(
         52 alibi_addr   (int)
         53 alibi_b_stride (int)
         54 dropout_mask_addr (int)
+        55 softcap (float)
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -327,6 +331,7 @@ def flash_attn_bwd_cpu(
     var alibi_addr: Int = Int(py=args[52])
     var alibi_b_stride: Int = Int(py=args[53])
     var dropout_addr: Int = Int(py=args[54])
+    var softcap_rt: Float32 = Float32(py=args[55])
     var has_alibi: Bool = alibi_addr != 0
     var has_dropout: Bool = dropout_addr != 0
 
@@ -392,6 +397,7 @@ def flash_attn_bwd_cpu(
             dropout_ptr,
             False,
             cache_seqlens_dummy,
+            softcap_rt,
             q_ptr,
             k_ptr,
             v_ptr,

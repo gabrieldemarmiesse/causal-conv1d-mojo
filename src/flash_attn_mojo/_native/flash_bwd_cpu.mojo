@@ -30,7 +30,7 @@ each pass — it's just one D-dim dot product per row, cheap.
 """
 
 from std.algorithm import sync_parallelize
-from std.math import exp, inf
+from std.math import exp, inf, tanh
 
 
 fn bwd_kernel_cpu[
@@ -56,6 +56,8 @@ fn bwd_kernel_cpu[
     # the dispatcher can stay symmetric. Pass `False` and a dummy ptr.
     has_cache_seqlens: Bool,
     cache_seqlens_ptr: UnsafePointer[Int32, MutAnyOrigin],
+    # Logit softcap (Gemma2-style); 0 disables.
+    softcap: Float32,
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -199,6 +201,12 @@ fn bwd_kernel_cpu[
                     q_vec[d] * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
                 )
             s *= softmax_scale
+            # Softcap: chain rule factor for the tanh; 1 when disabled.
+            var cap_grad: Float32 = 1
+            if softcap > 0:
+                var t = tanh(s / softcap)
+                s = softcap * t
+                cap_grad = 1 - t * t
             if has_alibi:
                 var dist = pos - kj
                 if dist < 0:
@@ -222,7 +230,9 @@ fn bwd_kernel_cpu[
                     (b * nheads_q + h_q) * seqlen_q + q_idx
                 ) * seqlen_k + kj
                 mask_weight = dropout_mask_ptr[mask_idx]
-            var ds = p * (dp * mask_weight - D_i)
+            # ds is gradient w.r.t. score-after-cap; chain through cap to
+            # get gradient w.r.t. score-before-cap.
+            var ds = p * (dp * mask_weight - D_i) * cap_grad
 
             @parameter
             for d in range(headdim):
@@ -333,6 +343,11 @@ fn bwd_kernel_cpu[
                         * k_vec[d]
                     )
                 s *= softmax_scale
+                var cap_grad: Float32 = 1
+                if softcap > 0:
+                    var t = tanh(s / softcap)
+                    s = softcap * t
+                    cap_grad = 1 - t * t
                 if has_alibi:
                     var pos = seq_offset + q_idx
                     var dist = pos - k_idx
@@ -364,7 +379,9 @@ fn bwd_kernel_cpu[
                     ) * seqlen_k + k_idx
                     mask_weight = dropout_mask_ptr[mask_idx]
                 var p_dropped = p * mask_weight  # = P̃[i,j]
-                var ds = p * (dp * mask_weight - D_i)
+                # ds is grad w.r.t. score-after-cap; cap_grad chains it back
+                # to score-before-cap (1 when softcap is disabled).
+                var ds = p * (dp * mask_weight - D_i) * cap_grad
 
                 @parameter
                 for d in range(headdim):

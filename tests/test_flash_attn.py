@@ -60,7 +60,14 @@ def dtype(request):
 
 
 def _ref_attention(
-    q, k, v, softmax_scale=None, causal=False, window=(-1, -1), alibi=None
+    q,
+    k,
+    v,
+    softmax_scale=None,
+    causal=False,
+    window=(-1, -1),
+    alibi=None,
+    softcap=0.0,
 ):
     """Reference scaled-dot-product attention computed in fp32.
 
@@ -83,6 +90,8 @@ def _ref_attention(
     k32 = k.transpose(1, 2).to(torch.float32)
     v32 = v.transpose(1, 2).to(torch.float32)
     scores = torch.matmul(q32, k32.transpose(-2, -1)) * softmax_scale
+    if softcap > 0:
+        scores = softcap * torch.tanh(scores / softcap)
     sq, sk = q.shape[1], k.shape[1]
     i = torch.arange(sq).unsqueeze(1)
     j = torch.arange(sk).unsqueeze(0)
@@ -511,6 +520,57 @@ def test_flash_attn_func_dropout_backward_matches_explicit_mask():
     )
     # Output bit-equal under same seed.
     assert torch.equal(out, out_ref)
+
+
+# Phase 1.13: softcap (Gemma-style logit cap).
+@pytest.mark.parametrize("softcap", [5.0, 30.0])
+@pytest.mark.parametrize("causal", [False, True])
+def test_flash_attn_func_softcap(softcap, causal):
+    """Forward + backward correctness with softcap."""
+    batch, seqlen, nheads, headdim = 1, 16, 2, 64
+    q = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    k = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    v = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    dout = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=causal, softcap=softcap)
+    ref = _ref_attention(
+        q.detach(), k.detach(), v.detach(), causal=causal, softcap=softcap
+    )
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < 5e-3, f"fwd max_diff={diff} (softcap={softcap})"
+
+    out.backward(dout)
+    qg = q.detach().clone().to(torch.float32).requires_grad_(True)
+    kg = k.detach().clone().to(torch.float32).requires_grad_(True)
+    vg = v.detach().clone().to(torch.float32).requires_grad_(True)
+    out_ref = _ref_attention(
+        qg.to(q.dtype),
+        kg.to(k.dtype),
+        vg.to(v.dtype),
+        causal=causal,
+        softcap=softcap,
+    )
+    out_ref.float().backward(dout.float())
+    for name, got, ref in [
+        ("dq", q.grad, qg.grad),
+        ("dk", k.grad, kg.grad),
+        ("dv", v.grad, vg.grad),
+    ]:
+        diff = (got.float() - ref.float()).abs().max().item()
+        assert diff < 1e-2, f"{name} max_diff={diff} (softcap={softcap})"
+
+
+def test_softcap_negative_raises():
+    q = torch.randn(1, 4, 1, 64, dtype=torch.float16)
+    with pytest.raises(ValueError, match="softcap"):
+        flash_attn_mojo.flash_attn_func(q, q, q, softcap=-1.0)
 
 
 def test_dropout_p_out_of_range_raises():

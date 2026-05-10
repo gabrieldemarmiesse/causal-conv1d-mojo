@@ -30,7 +30,7 @@ m_new = s, alpha = exp(-inf - s) = 0, l = 1, o = v_first, m = s.
 """
 
 from std.algorithm import sync_parallelize
-from std.math import exp, inf, log
+from std.math import exp, inf, log, tanh
 
 
 fn fwd_kernel_cpu[
@@ -65,6 +65,9 @@ fn fwd_kernel_cpu[
     # [0, cache_seqlens_ptr[b]).
     has_cache_seqlens: Bool,
     cache_seqlens_ptr: UnsafePointer[Int32, MutAnyOrigin],
+    # Logit softcap (Gemma2-style). Zero disables; positive c replaces
+    # `score` with `c * tanh(score / c)` before alibi/mask/softmax.
+    softcap: Float32,
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -206,6 +209,8 @@ fn fwd_kernel_cpu[
                     q_vec[d] * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
                 )
             score *= softmax_scale
+            if softcap > 0:
+                score = softcap * tanh(score / softcap)
             if has_alibi:
                 # bias = -slope * |pos - kj|, distance is non-negative.
                 var dist = pos - kj
