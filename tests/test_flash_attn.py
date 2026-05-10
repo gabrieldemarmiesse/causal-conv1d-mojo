@@ -574,6 +574,93 @@ def test_softcap_negative_raises():
         flash_attn_mojo.flash_attn_func(q, q, q, softcap=-1.0)
 
 
+# return_attn_probs — debug-mode tuple return.
+def test_return_attn_probs_basic():
+    """When return_attn_probs=True, flash_attn_func returns (out, lse, S_dmask)."""
+    batch, seqlen, nheads, headdim = 1, 8, 1, 64
+    q = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    out_only = flash_attn_mojo.flash_attn_func(q, k, v, causal=True)
+    out, lse, s_dmask = flash_attn_mojo.flash_attn_func(
+        q, k, v, causal=True, return_attn_probs=True
+    )
+
+    # out is identical (same kernel, same inputs).
+    assert torch.equal(out, out_only)
+    # lse: (B, H_q, S_q), fp32.
+    assert lse.shape == (batch, nheads, seqlen)
+    assert lse.dtype == torch.float32
+    # S_dmask: (B, H_q, S_q, S_k), fp32, all positive (no dropout).
+    assert s_dmask.shape == (batch, nheads, seqlen, seqlen)
+    # Per-row probs sum to 1 (within fp16 roundoff).
+    row_sums = s_dmask.sum(dim=-1)
+    assert (row_sums - 1.0).abs().max().item() < 5e-3
+    assert (s_dmask >= 0).all()
+
+
+def test_return_attn_probs_with_dropout():
+    """With dropout, S_dmask uses sign to encode kept (+) vs dropped (−)."""
+    torch.manual_seed(11)
+    batch, seqlen, nheads, headdim = 1, 8, 1, 64
+    q = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    _, _, s_dmask = flash_attn_mojo.flash_attn_func(
+        q, k, v, dropout_p=0.5, causal=True, return_attn_probs=True
+    )
+    # With p=0.5, expect roughly half-positive-half-negative entries
+    # in the upper-triangular allowed region.
+    n_pos = (s_dmask > 0).sum().item()
+    n_neg = (s_dmask < 0).sum().item()
+    # At least some of each — exact ratio depends on RNG draws.
+    assert n_pos > 0 and n_neg > 0
+
+
+def test_return_attn_probs_backward_through_out_only():
+    """Backward through `out` works even when return_attn_probs=True;
+    grads flowing back to lse / S_dmask are silently discarded."""
+    batch, seqlen, nheads, headdim = 1, 4, 1, 64
+    q = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    k = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    v = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    dout = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    out, _lse, _s = flash_attn_mojo.flash_attn_func(
+        q, k, v, causal=True, return_attn_probs=True
+    )
+    out.backward(dout)
+    # Same q.grad as if we hadn't requested probs.
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    out2 = flash_attn_mojo.flash_attn_func(q2, k2, v2, causal=True)
+    out2.backward(dout)
+    assert torch.equal(q.grad, q2.grad)
+    assert torch.equal(k.grad, k2.grad)
+    assert torch.equal(v.grad, v2.grad)
+
+
+def test_return_attn_probs_qkvpacked():
+    """Wrappers thread return_attn_probs through."""
+    batch, seqlen, nheads, headdim = 1, 4, 1, 64
+    qkv = torch.randn(batch, seqlen, 3, nheads, headdim, dtype=torch.float16)
+    out, lse, s = flash_attn_mojo.flash_attn_qkvpacked_func(
+        qkv, causal=True, return_attn_probs=True
+    )
+    assert out.shape == (batch, seqlen, nheads, headdim)
+    assert lse.shape == (batch, nheads, seqlen)
+    assert s.shape == (batch, nheads, seqlen, seqlen)
+
+
 def test_dropout_p_out_of_range_raises():
     q = torch.randn(1, 4, 1, 64, dtype=torch.float16)
     with pytest.raises(ValueError, match="dropout_p"):

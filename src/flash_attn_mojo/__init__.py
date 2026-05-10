@@ -256,11 +256,70 @@ def _native_bwd_cpu(
     )
 
 
+def _compute_attn_probs(
+    q, k, lse, softmax_scale, causal, window, alibi, softcap, dropout_mask
+):
+    """Reconstruct softmax(QK^T) from saved (q, k, lse), with dropout
+    encoded by sign (kept = positive, dropped = negative). Used only
+    for ``return_attn_probs=True``.
+
+    Returns a tensor of shape (batch, nheads_q, seqlen_q, seqlen_k).
+    """
+    sq, sk = q.shape[1], k.shape[1]
+    nheads_q = q.shape[2]
+    nheads_kv = k.shape[2]
+    repeat = nheads_q // nheads_kv
+    q32 = q.transpose(1, 2).to(torch.float32)  # (B, H_q, S_q, D)
+    k32 = k.transpose(1, 2).to(torch.float32)  # (B, H_kv, S_k, D)
+    if repeat > 1:
+        k32 = k32.repeat_interleave(repeat, dim=1)
+    scores = torch.matmul(q32, k32.transpose(-2, -1)) * softmax_scale
+    if softcap > 0:
+        scores = softcap * torch.tanh(scores / softcap)
+    i = torch.arange(sq).unsqueeze(1)
+    j = torch.arange(sk).unsqueeze(0)
+    pos = (sk - sq) + i
+    if alibi is not None:
+        slope = alibi.to(torch.float32)
+        if slope.dim() == 1:
+            slope = slope[None, :]  # (1, H)
+        slope = slope[..., None, None]  # (B|1, H, 1, 1)
+        dist = (pos - j).abs().to(torch.float32)
+        scores = scores - slope * dist
+    allowed = torch.ones_like(scores[0, 0], dtype=torch.bool)
+    if causal:
+        allowed = allowed & (j <= pos)
+    if window[0] >= 0:
+        allowed = allowed & (j >= pos - window[0])
+    if window[1] >= 0:
+        allowed = allowed & (j <= pos + window[1])
+    # probs[b, h, i, j] = exp(scores[b, h, i, j] - lse[b, h, i])
+    probs = torch.exp(scores - lse.unsqueeze(-1))
+    probs = torch.where(allowed, probs, torch.zeros_like(probs))
+    if dropout_mask is not None:
+        # dropout_mask is fp32, pre-scaled by 1/(1-p); 0 means dropped.
+        kept = dropout_mask > 0
+        probs = torch.where(kept, probs, -probs)
+    return probs
+
+
 class _FlashAttnFunc(torch.autograd.Function):
     """torch.autograd.Function wrapping the native fwd/bwd calls."""
 
     @staticmethod
-    def forward(ctx, q, k, v, softmax_scale, causal, window, alibi, dropout_p, softcap):
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        softmax_scale,
+        causal,
+        window,
+        alibi,
+        dropout_p,
+        softcap,
+        return_attn_probs,
+    ):
         out = torch.empty_like(q)
         # lse is fp32, shape (batch, nheads_q, seqlen_q), contiguous.
         lse = torch.empty(
@@ -303,10 +362,18 @@ class _FlashAttnFunc(torch.autograd.Function):
         ctx.window = window
         ctx.alibi = alibi
         ctx.softcap = softcap
+        if return_attn_probs:
+            s_dmask = _compute_attn_probs(
+                q, k, lse, softmax_scale, causal, window, alibi, softcap, dropout_mask
+            )
+            return out, lse, s_dmask
         return out
 
     @staticmethod
-    def backward(ctx, dout):
+    def backward(ctx, dout, *_unused):
+        # *_unused absorbs the gradients flowing back from lse / S_dmask
+        # when return_attn_probs=True. Those tensors are non-leaf debug
+        # outputs — gradient through them isn't supported.
         q, k, v, out, lse = ctx.saved_tensors
         # Gradient layout follows q/k/v exactly — same shape and dtype.
         dq = torch.empty_like(q)
@@ -330,9 +397,10 @@ class _FlashAttnFunc(torch.autograd.Function):
             ctx.dropout_mask,
             softcap=ctx.softcap,
         )
-        # 9 forward inputs (q, k, v, softmax_scale, causal, window, alibi,
-        # dropout_p, softcap) — gradients only flow through the first three.
-        return dq, dk, dv, None, None, None, None, None, None
+        # 10 forward inputs (q, k, v, softmax_scale, causal, window, alibi,
+        # dropout_p, softcap, return_attn_probs) — gradients only flow
+        # through the first three.
+        return dq, dk, dv, None, None, None, None, None, None, None
 
 
 def flash_attn_func(
@@ -346,6 +414,7 @@ def flash_attn_func(
     softcap=0.0,
     alibi_slopes=None,
     deterministic=False,
+    return_attn_probs=False,
 ):
     """Multi-head / multi-query / grouped-query attention.
 
@@ -436,6 +505,7 @@ def flash_attn_func(
         alibi_slopes,
         dropout_p,
         float(softcap),
+        return_attn_probs,
     )
 
 
@@ -449,6 +519,7 @@ def flash_attn_kvpacked_func(
     softcap=0.0,
     alibi_slopes=None,
     deterministic=False,
+    return_attn_probs=False,
 ):
     """Q + KV-packed attention.
 
@@ -472,6 +543,7 @@ def flash_attn_kvpacked_func(
         softcap=softcap,
         alibi_slopes=alibi_slopes,
         deterministic=deterministic,
+        return_attn_probs=return_attn_probs,
     )
 
 
@@ -484,6 +556,7 @@ def flash_attn_qkvpacked_func(
     softcap=0.0,
     alibi_slopes=None,
     deterministic=False,
+    return_attn_probs=False,
 ):
     """Same as ``flash_attn_func`` but takes Q/K/V stacked into one
     ``(batch, seqlen, 3, nheads, headdim)`` tensor.
@@ -509,6 +582,7 @@ def flash_attn_qkvpacked_func(
         softcap=softcap,
         alibi_slopes=alibi_slopes,
         deterministic=deterministic,
+        return_attn_probs=return_attn_probs,
     )
 
 
