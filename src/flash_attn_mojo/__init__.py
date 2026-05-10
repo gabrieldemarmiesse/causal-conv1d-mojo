@@ -488,6 +488,168 @@ def flash_attn_qkvpacked_func(
     )
 
 
+def flash_attn_varlen_func(
+    q,
+    k,
+    v,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    softcap=0.0,
+    alibi_slopes=None,
+    deterministic=False,
+):
+    """Variable-length attention over packed sequences.
+
+    Tensor layout (matches upstream `flash_attn_varlen_func`):
+        q: (total_q, nheads_q,  headdim)   — concatenated unpadded
+        k: (total_k, nheads_kv, headdim)
+        v: (total_k, nheads_kv, headdim)
+        cu_seqlens_q: (batch + 1,) int32 — cumulative seqlens (q side)
+        cu_seqlens_k: (batch + 1,) int32 — cumulative seqlens (k side)
+
+    Implementation here is a Python loop calling ``flash_attn_func``
+    once per sequence in the batch. Slow but correct — matches the
+    naive-CPU spirit of the rest of this package.
+    """
+    if q.dim() != 3 or k.dim() != 3 or v.dim() != 3:
+        raise ValueError(
+            "varlen q/k/v must be 3-D (total_seq, nheads, headdim); "
+            f"got {tuple(q.shape)}, {tuple(k.shape)}, {tuple(v.shape)}"
+        )
+    if cu_seqlens_q.dim() != 1 or cu_seqlens_k.dim() != 1:
+        raise ValueError("cu_seqlens_q / cu_seqlens_k must be 1-D")
+    batch = cu_seqlens_q.numel() - 1
+    if cu_seqlens_k.numel() != batch + 1:
+        raise ValueError(
+            f"cu_seqlens_q has {batch + 1} entries but cu_seqlens_k has "
+            f"{cu_seqlens_k.numel()}"
+        )
+
+    cu_q = cu_seqlens_q.to(torch.int64).tolist()
+    cu_k = cu_seqlens_k.to(torch.int64).tolist()
+
+    out_pieces = []
+    for b in range(batch):
+        sq = cu_q[b + 1] - cu_q[b]
+        sk = cu_k[b + 1] - cu_k[b]
+        if sq > max_seqlen_q or sk > max_seqlen_k:
+            raise ValueError(
+                f"batch {b}: seqlen ({sq}, {sk}) exceeds declared max "
+                f"({max_seqlen_q}, {max_seqlen_k})"
+            )
+        if sq == 0:
+            out_pieces.append(
+                torch.empty(0, q.shape[1], q.shape[2], dtype=q.dtype, device=q.device)
+            )
+            continue
+        q_b = q[cu_q[b] : cu_q[b + 1]].unsqueeze(0)  # (1, sq, H_q, D)
+        k_b = k[cu_k[b] : cu_k[b + 1]].unsqueeze(0)  # (1, sk, H_kv, D)
+        v_b = v[cu_k[b] : cu_k[b + 1]].unsqueeze(0)
+        slopes_b = None
+        if alibi_slopes is not None:
+            if alibi_slopes.dim() == 1:
+                slopes_b = alibi_slopes
+            else:
+                slopes_b = alibi_slopes[b : b + 1].contiguous()
+        out_b = flash_attn_func(
+            q_b,
+            k_b,
+            v_b,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            softcap=softcap,
+            alibi_slopes=slopes_b,
+            deterministic=deterministic,
+        )
+        out_pieces.append(out_b.squeeze(0))
+    if not out_pieces:
+        return torch.empty_like(q)
+    return torch.cat(out_pieces, dim=0)
+
+
+def flash_attn_varlen_qkvpacked_func(
+    qkv,
+    cu_seqlens,
+    max_seqlen,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    softcap=0.0,
+    alibi_slopes=None,
+    deterministic=False,
+):
+    """Varlen + qkv-packed: qkv has shape (total_seq, 3, nheads, headdim)."""
+    if qkv.dim() != 4 or qkv.shape[1] != 3:
+        raise ValueError(
+            f"qkv must be (total_seq, 3, nheads, headdim); got {tuple(qkv.shape)}"
+        )
+    q, k, v = qkv.unbind(dim=1)
+    return flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens,
+        cu_seqlens,
+        max_seqlen,
+        max_seqlen,
+        dropout_p=dropout_p,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        softcap=softcap,
+        alibi_slopes=alibi_slopes,
+        deterministic=deterministic,
+    )
+
+
+def flash_attn_varlen_kvpacked_func(
+    q,
+    kv,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    softcap=0.0,
+    alibi_slopes=None,
+    deterministic=False,
+):
+    """Varlen + kv-packed: kv has shape (total_k, 2, nheads_kv, headdim)."""
+    if kv.dim() != 4 or kv.shape[1] != 2:
+        raise ValueError(
+            f"kv must be (total_k, 2, nheads_kv, headdim); got {tuple(kv.shape)}"
+        )
+    k, v = kv.unbind(dim=1)
+    return flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        dropout_p=dropout_p,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        softcap=softcap,
+        alibi_slopes=alibi_slopes,
+        deterministic=deterministic,
+    )
+
+
 def flash_attn_with_kvcache(
     q,
     k_cache,

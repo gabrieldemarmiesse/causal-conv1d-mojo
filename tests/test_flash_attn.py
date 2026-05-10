@@ -829,6 +829,118 @@ def test_flash_attn_kvpacked_func(causal):
     assert torch.equal(out_packed, out_unpacked)
 
 
+# flash_attn_varlen_func — packed variable-length sequences.
+def test_flash_attn_varlen_func_correctness():
+    """Pack 3 sequences of different lengths, run varlen, compare to
+    per-sequence flash_attn_func calls."""
+    nheads, headdim = 2, 64
+    seqlens_q = [5, 12, 8]
+    seqlens_k = [5, 12, 8]
+    cu_q = torch.tensor(
+        [0] + list(torch.tensor(seqlens_q).cumsum(0).tolist()), dtype=torch.int32
+    )
+    cu_k = torch.tensor(
+        [0] + list(torch.tensor(seqlens_k).cumsum(0).tolist()), dtype=torch.int32
+    )
+    total_q = int(cu_q[-1].item())
+    total_k = int(cu_k[-1].item())
+
+    q = torch.randn(total_q, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(total_k, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(total_k, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_varlen_func(
+        q, k, v, cu_q, cu_k, max(seqlens_q), max(seqlens_k), causal=True
+    )
+    assert out.shape == q.shape
+
+    # Reference: per-sequence flash_attn_func.
+    for b in range(len(seqlens_q)):
+        q_b = q[cu_q[b] : cu_q[b + 1]].unsqueeze(0)
+        k_b = k[cu_k[b] : cu_k[b + 1]].unsqueeze(0)
+        v_b = v[cu_k[b] : cu_k[b + 1]].unsqueeze(0)
+        ref_b = flash_attn_mojo.flash_attn_func(q_b, k_b, v_b, causal=True)
+        assert torch.equal(out[cu_q[b] : cu_q[b + 1]], ref_b.squeeze(0))
+
+
+def test_flash_attn_varlen_func_backward():
+    """Backward through varlen produces gradients matching per-sequence
+    fp32 reference."""
+    seqlens = [4, 8, 6]
+    cu = torch.tensor([0, 4, 12, 18], dtype=torch.int32)
+    total = 18
+    nheads, headdim = 2, 64
+
+    q = torch.randn(total, nheads, headdim, dtype=torch.float16, requires_grad=True)
+    k = torch.randn(total, nheads, headdim, dtype=torch.float16, requires_grad=True)
+    v = torch.randn(total, nheads, headdim, dtype=torch.float16, requires_grad=True)
+    dout = torch.randn(total, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_varlen_func(
+        q, k, v, cu, cu, max(seqlens), max(seqlens), causal=True
+    )
+    out.backward(dout)
+
+    # Per-sequence reference grads.
+    for b in range(len(seqlens)):
+        qg = (
+            q.detach()[cu[b] : cu[b + 1]].clone().to(torch.float32).requires_grad_(True)
+        )
+        kg = (
+            k.detach()[cu[b] : cu[b + 1]].clone().to(torch.float32).requires_grad_(True)
+        )
+        vg = (
+            v.detach()[cu[b] : cu[b + 1]].clone().to(torch.float32).requires_grad_(True)
+        )
+        out_ref = _ref_attention(
+            qg.unsqueeze(0).to(q.dtype),
+            kg.unsqueeze(0).to(k.dtype),
+            vg.unsqueeze(0).to(v.dtype),
+            causal=True,
+        ).squeeze(0)
+        out_ref.float().backward(dout[cu[b] : cu[b + 1]].float())
+        for name, got, ref in [
+            ("dq", q.grad[cu[b] : cu[b + 1]], qg.grad),
+            ("dk", k.grad[cu[b] : cu[b + 1]], kg.grad),
+            ("dv", v.grad[cu[b] : cu[b + 1]], vg.grad),
+        ]:
+            diff = (got.float() - ref.float()).abs().max().item()
+            assert diff < 1e-2, f"batch {b} {name} max_diff={diff}"
+
+
+def test_flash_attn_varlen_qkvpacked_func():
+    """Varlen + qkv-packed wrapper matches the unpacked one."""
+    seqlens = [3, 7]
+    cu = torch.tensor([0, 3, 10], dtype=torch.int32)
+    total, nheads, headdim = 10, 2, 64
+    qkv = torch.randn(total, 3, nheads, headdim, dtype=torch.float16)
+    q, k, v = qkv.unbind(dim=1)
+    out_packed = flash_attn_mojo.flash_attn_varlen_qkvpacked_func(
+        qkv, cu, max(seqlens), causal=True
+    )
+    out_unpacked = flash_attn_mojo.flash_attn_varlen_func(
+        q, k, v, cu, cu, max(seqlens), max(seqlens), causal=True
+    )
+    assert torch.equal(out_packed, out_unpacked)
+
+
+def test_flash_attn_varlen_kvpacked_func():
+    """Varlen + kv-packed wrapper matches the unpacked one."""
+    seqlens = [4, 6]
+    cu = torch.tensor([0, 4, 10], dtype=torch.int32)
+    total, nheads_q, nheads_kv, headdim = 10, 4, 2, 64
+    q = torch.randn(total, nheads_q, headdim, dtype=torch.float16)
+    kv = torch.randn(total, 2, nheads_kv, headdim, dtype=torch.float16)
+    k, v = kv.unbind(dim=1)
+    out_packed = flash_attn_mojo.flash_attn_varlen_kvpacked_func(
+        q, kv, cu, cu, max(seqlens), max(seqlens), causal=True
+    )
+    out_unpacked = flash_attn_mojo.flash_attn_varlen_func(
+        q, k, v, cu, cu, max(seqlens), max(seqlens), causal=True
+    )
+    assert torch.equal(out_packed, out_unpacked)
+
+
 def test_flash_attn_kvpacked_func_bad_shape_raises():
     q = torch.randn(1, 4, 2, 64, dtype=torch.float16)
     bad = torch.randn(1, 4, 3, 2, 64, dtype=torch.float16)  # dim-2 must be 2
