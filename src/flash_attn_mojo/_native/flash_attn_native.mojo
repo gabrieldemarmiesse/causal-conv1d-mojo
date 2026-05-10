@@ -622,7 +622,7 @@ def flash_attn_fwd_gpu(
             o_h_stride,
             o_d_stride,
             grid_dim=(seqlen_q_int, nheads_q_int, batch_int),
-            block_dim=(1, 1, 1),
+            block_dim=(64, 1, 1),  # cooperate on D axis; see flash_fwd_gpu
         )
 
     alias N_DTYPES = len(_DTYPES)

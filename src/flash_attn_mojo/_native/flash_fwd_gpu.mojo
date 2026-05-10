@@ -1,28 +1,111 @@
-"""GPU forward kernel for flash_attn_func — naive online-softmax port.
+"""GPU forward kernel for flash_attn_func — block-cooperative on D axis.
 
-Phase 2.1: this is the *correctness* version of the GPU forward. One
-thread per (batch, head, q_idx) output row, walking the K dimension
-sequentially. No tile loading, no shared memory, no tensor cores — just
-the same online-softmax recurrence as `flash_fwd_cpu.mojo`, with global
-loads from K and V on every iteration. Slow, but correct, and a place
-to start.
+Phase 2.2: same grid as 2.1 (one block per (B, H_q, S_q) output row),
+but the block is 64 threads cooperating on the headdim axis. The big
+wins over phase 2.1:
 
-Optimisation passes will follow:
-  - phase 2.2: q-tile + k-tile blocking with shared-memory K/V cache.
-  - phase 2.3: warp-level reduction across headdim for the dot products.
-  - phase 2.4: tensor-core MMAs for the QK^T and PV matmuls.
-  - phase 2.5: async copy / TMA + pipelined K/V loads.
+- Coalesced global loads. Each kj iteration reads the K row across
+  64 threads issuing consecutive d-offsets in parallel — one (or
+  few) DRAM transactions instead of `headdim` sequential ones.
+- Parallel dot products. The `score = sum_d q[d] * k[d]` sum is a
+  butterfly reduction across threads (5-step warp shuffle, plus a
+  smem hop for the second warp).
+- Parallel V accumulation. `o[d] = alpha*o[d] + p*v[d]` is split
+  across threads — each thread owns its d-chunk in registers.
 
-The kernel signature mirrors `fwd_kernel_cpu` exactly so the launcher
-can share argument-parsing code.
+What still happens serially (per-block):
+- The K dimension. Threads in a block iterate kj together; each
+  iteration does one block-reduce + one mask-broadcast. The serial
+  dependence on (m, l) over kj prevents parallelising kj here.
+
+Phase 2.3 will add Q_TILE > 1 to amortize K/V loads across multiple
+q rows in the same block. Phase 2.4 will switch to tensor-core MMAs.
+
+The block-level fp32 sum + warp shuffle helpers are copied from
+`causal_conv1d_bwd.mojo` (same butterfly pattern, broadcast-True so
+all threads hold the result).
 """
 
-from std.gpu import block_dim, block_idx_int as block_idx, thread_idx_int as thread_idx
-from std.math import exp, inf, log, tanh
+from std.gpu import (
+    block_idx_int as block_idx,
+    thread_idx_int as thread_idx,
+    barrier,
+)
+from std.gpu.memory import AddressSpace
+from std.math import ceildiv, exp, inf, log, tanh
 from std.memory import stack_allocation
+from std.sys import llvm_intrinsic
 
 
 alias MAX_HEADDIM = 256
+alias BLOCK_DIM = 64
+alias D_PER_THREAD = ceildiv(MAX_HEADDIM, BLOCK_DIM)  # = 4
+
+
+@always_inline
+fn _shfl_xor_f32(val: Float32, offset: UInt32) -> Float32:
+    return llvm_intrinsic["llvm.nvvm.shfl.sync.bfly.f32", Float32](
+        Int32(-1), val, offset, Int32(31)
+    )
+
+
+@always_inline
+fn _warp_sum_f32(val: Float32) -> Float32:
+    """5-step butterfly warp reduction, fp32; all lanes hold the sum."""
+    var v = val
+    v += _shfl_xor_f32(v, UInt32(16))
+    v += _shfl_xor_f32(v, UInt32(8))
+    v += _shfl_xor_f32(v, UInt32(4))
+    v += _shfl_xor_f32(v, UInt32(2))
+    v += _shfl_xor_f32(v, UInt32(1))
+    return v
+
+
+@always_inline
+fn _block_sum_f32_broadcast[block_size: Int](val: Float32) -> Float32:
+    """Block-level fp32 sum; *every* thread receives the result.
+
+    Two-warp version (block_size=64): each warp reduces to its lane-0;
+    the two partials go to a 2-element smem; warp 0 reads both,
+    butterfly-reduces, writes the broadcast value back to smem[0];
+    barrier; everyone reads smem[0].
+    """
+    constrained[
+        block_size >= 32 and block_size % 32 == 0,
+        "block_size must be a multiple of 32",
+    ]()
+    alias n_warps: Int = block_size // 32
+
+    var warp_result = _warp_sum_f32(val)
+
+    @parameter
+    if n_warps == 1:
+        return warp_result
+
+    var tid: Int = thread_idx.x
+    var lane: Int = tid & 31
+    var warp: Int = tid >> 5
+
+    # Use n_warps + 1 slots: n_warps for per-warp partials, 1 for the
+    # final broadcast value (separates write/read, simplifies the
+    # broadcast step).
+    var smem = stack_allocation[
+        n_warps + 1, DType.float32, address_space=AddressSpace.SHARED
+    ]()
+    if lane == 0:
+        smem[warp] = warp_result
+    barrier()
+
+    if warp == 0:
+        var v: Float32 = 0
+        if lane < n_warps:
+            v = smem[lane]
+        v = _warp_sum_f32(v)
+        if lane == 0:
+            smem[n_warps] = v
+    barrier()
+
+    return smem[n_warps]
 
 
 fn fwd_kernel_gpu[
@@ -34,9 +117,6 @@ fn fwd_kernel_gpu[
     nheads_q: Int,
     nheads_kv: Int,
     headdim: Int,
-    # Booleans are passed as Int to keep the kernel `DevicePassable`-friendly
-    # (DeviceContext.enqueue_function rejects raw Bool args). 0 = False,
-    # nonzero = True.
     causal_i: Int,
     softmax_scale: Float32,
     window_left: Int,
@@ -73,15 +153,10 @@ fn fwd_kernel_gpu[
     out_h_stride: Int,
     out_d_stride: Int,
 ):
-    """flash-attn forward, GPU.
-
-    Grid: (seqlen_q, nheads_q, batch). One thread per row, blockDim = 1.
-    Each thread computes the online-softmax output for its (b, h_q, q_idx).
-    """
+    """flash-attn forward, GPU. Grid (S_q, H_q, B) × block BLOCK_DIM."""
     alias accum_t = DType.float32
     var neg_inf: Float32 = -inf[accum_t]()
 
-    # Unpack Int → Bool flags up-front for readability.
     var causal: Bool = causal_i != 0
     var has_alibi: Bool = has_alibi_i != 0
     var has_dropout: Bool = has_dropout_i != 0
@@ -91,6 +166,7 @@ fn fwd_kernel_gpu[
     var q_idx: Int = block_idx.x
     var h_q: Int = block_idx.y
     var b: Int = block_idx.z
+    var t: Int = thread_idx.x
 
     if q_idx >= seqlen_q or h_q >= nheads_q or b >= batch:
         return
@@ -98,7 +174,6 @@ fn fwd_kernel_gpu[
     var heads_per_kv = nheads_q // nheads_kv
     var h_kv = h_q // heads_per_kv
 
-    # KV batch index — same as q's `b` unless cache_batch_idx redirects.
     var b_kv: Int = b
     if has_cache_batch_idx:
         b_kv = Int(cache_batch_idx_ptr[b])
@@ -108,19 +183,25 @@ fn fwd_kernel_gpu[
     var k_b_h_base = b_kv * k_b_stride + h_kv * k_h_stride
     var v_b_h_base = b_kv * v_b_stride + h_kv * v_h_stride
 
-    # Per-thread scratch in registers (mojo lifts these into the local
-    # frame; for headdim ≤ 256 that's 1 KB / buffer).
-    var q_buf = stack_allocation[MAX_HEADDIM, accum_t]()
-    var o_buf = stack_allocation[MAX_HEADDIM, accum_t]()
+    # Per-thread d-range: contiguous chunk [t*D_PER_THREAD, ...).
+    var d_start: Int = t * D_PER_THREAD
 
-    for d in range(headdim):
-        q_buf[d] = q_ptr[q_base + d * q_d_stride].cast[accum_t]()
-        o_buf[d] = 0
+    # Load this thread's q chunk + init o chunk (both fp32, in registers).
+    var q_local = SIMD[accum_t, D_PER_THREAD](0)
+    var o_local = SIMD[accum_t, D_PER_THREAD](0)
 
+    @parameter
+    for di in range(D_PER_THREAD):
+        var d = d_start + di
+        if d < headdim:
+            q_local[di] = q_ptr[q_base + d * q_d_stride].cast[accum_t]()
+
+    # ALiBi slope (every thread loads — same address, L1 hit after first).
     var alibi_slope: Float32 = 0
     if has_alibi:
         alibi_slope = alibi_ptr[b * alibi_b_stride + h_q]
 
+    # Online softmax state — every thread keeps the same value.
     var m: Float32 = neg_inf
     var l: Float32 = 0
 
@@ -155,20 +236,36 @@ fn fwd_kernel_gpu[
     var lse_idx = (b * nheads_q + h_q) * seqlen_q + q_idx
 
     if kj_start >= kj_end:
-        for d in range(headdim):
-            out_ptr[out_base + d * out_d_stride] = Scalar[dtype](0)
-        lse_ptr[lse_idx] = neg_inf
+        # Row attends to nothing — write zeros for this thread's chunk;
+        # thread 0 writes lse=-inf.
+        @parameter
+        for di in range(D_PER_THREAD):
+            var d = d_start + di
+            if d < headdim:
+                out_ptr[out_base + d * out_d_stride] = Scalar[dtype](0)
+        if t == 0:
+            lse_ptr[lse_idx] = neg_inf
         return
 
     for kj in range(kj_start, kj_end):
         var k_base = k_b_h_base + kj * k_s_stride
         var v_base = v_b_h_base + kj * v_s_stride
 
-        var score: Float32 = 0
-        for d in range(headdim):
-            score += (
-                q_buf[d] * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
-            )
+        # Each thread computes its partial dot product. Threads with
+        # `d_start + di >= headdim` contribute 0.
+        var partial: Float32 = 0
+
+        @parameter
+        for di in range(D_PER_THREAD):
+            var d = d_start + di
+            if d < headdim:
+                partial += (
+                    q_local[di]
+                    * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
+                )
+
+        # Block reduction with broadcast — all threads receive `score`.
+        var score = _block_sum_f32_broadcast[BLOCK_DIM](partial)
         score *= softmax_scale
         if softcap > 0:
             score = softcap * tanh(score / softcap)
@@ -189,16 +286,25 @@ fn fwd_kernel_gpu[
                 (b * nheads_q + h_q) * seqlen_q + q_idx
             ) * seqlen_k + kj
             mask_weight = dropout_mask_ptr[mask_idx]
-
         var p_eff = p * mask_weight
-        for d in range(headdim):
-            var v_d = v_ptr[v_base + d * v_d_stride].cast[accum_t]()
-            o_buf[d] = alpha * o_buf[d] + p_eff * v_d
+
+        @parameter
+        for di in range(D_PER_THREAD):
+            var d = d_start + di
+            if d < headdim:
+                var v_d = v_ptr[v_base + d * v_d_stride].cast[accum_t]()
+                o_local[di] = alpha * o_local[di] + p_eff * v_d
         m = m_new
 
     var inv_l: Float32 = 1.0 / l
-    for d in range(headdim):
-        out_ptr[out_base + d * out_d_stride] = (
-            o_buf[d] * inv_l
-        ).cast[dtype]()
-    lse_ptr[lse_idx] = m + log(l)
+
+    @parameter
+    for di in range(D_PER_THREAD):
+        var d = d_start + di
+        if d < headdim:
+            out_ptr[out_base + d * out_d_stride] = (
+                o_local[di] * inv_l
+            ).cast[dtype]()
+
+    if t == 0:
+        lse_ptr[lse_idx] = m + log(l)
