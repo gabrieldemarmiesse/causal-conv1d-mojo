@@ -815,6 +815,27 @@ def test_flash_attn_qkvpacked_func(causal):
     assert torch.equal(out_packed, out_unpacked)
 
 
+# flash_attn_kvpacked_func — q + kv-packed wrapper.
+@pytest.mark.parametrize("causal", [False, True])
+def test_flash_attn_kvpacked_func(causal):
+    """kvpacked path matches the unpacked one."""
+    batch, seqlen, nheads_q, nheads_kv, headdim = 2, 16, 4, 2, 64
+    q = torch.randn(batch, seqlen, nheads_q, headdim, dtype=torch.float16)
+    kv = torch.randn(batch, seqlen, 2, nheads_kv, headdim, dtype=torch.float16)
+    k, v = kv.unbind(dim=2)
+
+    out_packed = flash_attn_mojo.flash_attn_kvpacked_func(q, kv, causal=causal)
+    out_unpacked = flash_attn_mojo.flash_attn_func(q, k, v, causal=causal)
+    assert torch.equal(out_packed, out_unpacked)
+
+
+def test_flash_attn_kvpacked_func_bad_shape_raises():
+    q = torch.randn(1, 4, 2, 64, dtype=torch.float16)
+    bad = torch.randn(1, 4, 3, 2, 64, dtype=torch.float16)  # dim-2 must be 2
+    with pytest.raises(ValueError, match="seqlen, 2, nheads"):
+        flash_attn_mojo.flash_attn_kvpacked_func(q, bad)
+
+
 def test_flash_attn_qkvpacked_func_bad_shape_raises():
     """qkv must have a size-3 dim-2."""
     bad = torch.randn(1, 4, 4, 2, 64, dtype=torch.float16)  # dim-2 = 4, not 3

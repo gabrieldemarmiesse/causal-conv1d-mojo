@@ -415,6 +415,42 @@ def flash_attn_func(
     )
 
 
+def flash_attn_kvpacked_func(
+    q,
+    kv,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    softcap=0.0,
+    alibi_slopes=None,
+    deterministic=False,
+):
+    """Q + KV-packed attention.
+
+    ``kv`` has shape ``(batch, seqlen, 2, nheads_kv, headdim)``. Forward
+    is a thin wrapper around ``flash_attn_func``.
+    """
+    if kv.dim() != 5 or kv.shape[2] != 2:
+        raise ValueError(
+            f"kv must be (batch, seqlen, 2, nheads_kv, headdim); "
+            f"got shape {tuple(kv.shape)}"
+        )
+    k, v = kv.unbind(dim=2)
+    return flash_attn_func(
+        q,
+        k,
+        v,
+        dropout_p=dropout_p,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        softcap=softcap,
+        alibi_slopes=alibi_slopes,
+        deterministic=deterministic,
+    )
+
+
 def flash_attn_qkvpacked_func(
     qkv,
     dropout_p=0.0,
