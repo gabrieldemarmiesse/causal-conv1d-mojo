@@ -6,21 +6,31 @@ decode op: for each batch element, take a tiny slice of new tokens
 decoding), update the rolling `conv_state[b, :, 0..state_len)` buffer,
 and emit the conv output.
 
-State semantics (non-circular):
+State semantics (linear / non-circular):
 - `conv_state[b, c, :]` holds the most recent `state_len` x values for
   channel `c` of batch `b`, with the oldest at index 0 and the most
   recent at index `state_len-1`. After this call: state's oldest
   `seqlen` values are dropped, the new `seqlen` x values are appended
   on the right.
-- Only the last `width-1` values of state matter for the conv math
-  (they form the historical context for the new x).
+
+State semantics (circular / `is_circular=True`):
+- `conv_state[b, c, :]` is a circular buffer; `cache_seqlens[b]` is
+  the per-batch write head (modulo `state_len`). The kernel reads
+  the W-1 historical values from positions `[cache_seqlen-(W-1),
+  cache_seqlen)` (mod state_len) and writes new x values starting at
+  `cache_seqlen` (advancing mod state_len). State is mutated in place
+  but `cache_seqlens` is NOT updated by the kernel — caller advances
+  by `seqlen` between calls.
+
+`has_state_indices=True` redirects the state row: the conv state for
+batch element `b` is read/written at `state_indices[b]` instead of
+`b`. If `state_indices[b] < 0`, the output for that batch element is
+forced to zero and state is not touched (padding token in vLLM-style
+serving). cache_seqlens is still indexed by `b`, not the redirected
+coord — matching upstream.
 
 Each thread handles one (batch, channel). One block covers
 `kNThreadsUpdate=64` channels for a given batch.
-
-The circular-buffer mode (`cache_seqlens != None`) and per-batch state
-indirection (`conv_state_indices != None`) are out of scope here — the
-public API raises `NotImplementedError` for those.
 """
 
 from std.gpu import (
@@ -42,6 +52,8 @@ fn update_kernel[
     width: Int,
     has_bias: Bool,
     apply_silu: Bool,
+    has_state_indices: Bool,
+    is_circular: Bool,
 ](
     batch: Int,
     dim: Int,
@@ -51,6 +63,8 @@ fn update_kernel[
     weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     conv_state_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    state_indices_ptr: UnsafePointer[Int32, MutAnyOrigin],
+    cache_seqlens_ptr: UnsafePointer[Int32, MutAnyOrigin],
     output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     x_batch_stride: Int,
     x_c_stride: Int,
@@ -67,9 +81,12 @@ fn update_kernel[
     """Causal conv1d single-step update, GPU.
 
     Comptime params:
-        has_bias: load `bias_ptr[d]` per channel, or skip and use 0.
-        apply_silu: apply silu (= swish) to each output, or skip.
-    Both pointers are never dereferenced when their gate is False.
+        has_bias / apply_silu: standard.
+        has_state_indices: redirect the state row via state_indices[b].
+            `state_indices[b] < 0` → output zeros for that batch element.
+        is_circular: treat conv_state as a circular buffer; cache_seqlens
+            holds the per-batch write head.
+    Pointers gated False by comptime are never dereferenced.
     """
     alias accum_t = DType.float32
 
@@ -80,8 +97,25 @@ fn update_kernel[
 
     var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
     var out_base = batch_id * out_batch_stride + channel_id * out_c_stride
-    var state_base = batch_id * state_batch_stride + channel_id * state_c_stride
     var weight_base = channel_id * weight_c_stride
+
+    # Resolve the state-row coordinate. With has_state_indices=False this
+    # is just batch_id; otherwise we look it up. A negative index marks
+    # a padding token: zero the output and skip state mutation entirely.
+    var state_batch_coord: Int = batch_id
+
+    @parameter
+    if has_state_indices:
+        var idx_val: Int = Int(state_indices_ptr[batch_id])
+        if idx_val < 0:
+            for i in range(seqlen):
+                output_ptr[out_base + i * out_l_stride] = Scalar[dtype](0)
+            return
+        state_batch_coord = idx_val
+
+    var state_base = (
+        state_batch_coord * state_batch_stride + channel_id * state_c_stride
+    )
 
     var weights = SIMD[accum_t, width](0)
 
@@ -97,37 +131,72 @@ fn update_kernel[
     if has_bias:
         bias_v = bias_ptr[channel_id].cast[accum_t]()
 
-    # Phase 1: shift state left by `seqlen` (drop the oldest `seqlen`
-    # values). Only positions [0, state_len - seqlen - (W-1)) actually
-    # need to be re-written here — the rest is overwritten by the
-    # subsequent read+writeback loop. Mirrors upstream's first loop.
-    var advance_len = seqlen
-    for i in range(state_len - advance_len - (width - 1)):
-        conv_state_ptr[state_base + i * state_l_stride] = conv_state_ptr[
-            state_base + (i + advance_len) * state_l_stride
-        ]
+    # Circular-mode: cache_seqlens is the per-batch write head. Reads
+    # start `(width-1)` slots to its left (with wrap); writes happen
+    # AT the head and advance.
+    var update_idx: Int = 0
 
-    # Phase 2: read the trailing W-1 historical values into x_vals[0..W-2].
-    # These are the conv's history before the new x. While reading, also
-    # write each value back into the post-shift slot when the destination
-    # exists (small state_len edge case from upstream).
+    @parameter
+    if is_circular:
+        var cs: Int = Int(cache_seqlens_ptr[batch_id]) % state_len
+        update_idx = cs - (width - 1)
+        if update_idx < 0:
+            update_idx += state_len
+
+    var advance_len = seqlen
     var x_vals = SIMD[accum_t, width](0)
 
     @parameter
-    for i in range(width - 1):
-        var read_idx: Int = state_len - (width - 1) + i
-        var state_val = conv_state_ptr[state_base + read_idx * state_l_stride]
-        var write_idx: Int = state_len - advance_len - (width - 1) + i
-        if i < advance_len + (width - 1) and write_idx >= 0:
-            conv_state_ptr[state_base + write_idx * state_l_stride] = state_val
-        x_vals[i] = state_val.cast[accum_t]()
+    if not is_circular:
+        # Phase 1 (linear): shift state left by `seqlen`.
+        for i in range(state_len - advance_len - (width - 1)):
+            conv_state_ptr[state_base + i * state_l_stride] = conv_state_ptr[
+                state_base + (i + advance_len) * state_l_stride
+            ]
 
-    # Phase 3: walk new x, write into state's tail, accumulate output.
+        # Phase 2 (linear): read trailing W-1 history into x_vals (with
+        # writeback for the small-state_len edge case).
+        @parameter
+        for i in range(width - 1):
+            var read_idx: Int = state_len - (width - 1) + i
+            var state_val = conv_state_ptr[
+                state_base + read_idx * state_l_stride
+            ]
+            var write_idx: Int = state_len - advance_len - (width - 1) + i
+            if i < advance_len + (width - 1) and write_idx >= 0:
+                conv_state_ptr[
+                    state_base + write_idx * state_l_stride
+                ] = state_val
+            x_vals[i] = state_val.cast[accum_t]()
+    else:
+        # Phase 1+2 (circular): read W-1 history starting at update_idx,
+        # advancing with wrap. After this, update_idx = cache_seqlen %
+        # state_len — the position where the new x[0] will be written.
+        @parameter
+        for i in range(width - 1):
+            var state_val = conv_state_ptr[
+                state_base + update_idx * state_l_stride
+            ]
+            x_vals[i] = state_val.cast[accum_t]()
+            update_idx += 1
+            if update_idx >= state_len:
+                update_idx -= state_len
+
+    # Phase 3: walk new x, write into state, emit output.
     for i in range(seqlen):
         var x_val = x_ptr[x_base + i * x_l_stride]
-        var write_idx: Int = state_len - advance_len + i
-        if i < advance_len and write_idx >= 0:
-            conv_state_ptr[state_base + write_idx * state_l_stride] = x_val
+
+        @parameter
+        if not is_circular:
+            var write_idx: Int = state_len - advance_len + i
+            if i < advance_len and write_idx >= 0:
+                conv_state_ptr[state_base + write_idx * state_l_stride] = x_val
+        else:
+            conv_state_ptr[state_base + update_idx * state_l_stride] = x_val
+            update_idx += 1
+            if update_idx >= state_len:
+                update_idx -= state_len
+
         x_vals[width - 1] = x_val.cast[accum_t]()
 
         var out_val: Scalar[accum_t] = bias_v

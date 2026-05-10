@@ -440,7 +440,9 @@ def causal_conv1d_fn(
 # ===---------- causal_conv1d_update (single-step / KV-cache decode) ----------=== #
 
 
-def _native_update(x, weight, bias, conv_state, out, apply_silu):
+def _native_update(
+    x, weight, bias, conv_state, state_indices, cache_seqlens, out, apply_silu
+):
     _native_mod.causal_conv1d_update(
         x.data_ptr(),
         weight.data_ptr(),
@@ -467,10 +469,16 @@ def _native_update(x, weight, bias, conv_state, out, apply_silu):
         _DTYPE_CODE[x.dtype],
         torch.cuda.current_stream().cuda_stream,
         weight.shape[1],
+        int(state_indices is not None),
+        _ptr(state_indices),
+        int(cache_seqlens is not None),
+        _ptr(cache_seqlens),
     )
 
 
-def _native_update_cpu(x, weight, bias, conv_state, out, apply_silu):
+def _native_update_cpu(
+    x, weight, bias, conv_state, state_indices, cache_seqlens, out, apply_silu
+):
     _native_mod.causal_conv1d_update_cpu(
         x.data_ptr(),
         weight.data_ptr(),
@@ -496,6 +504,10 @@ def _native_update_cpu(x, weight, bias, conv_state, out, apply_silu):
         int(apply_silu),
         _DTYPE_CODE[x.dtype],
         weight.shape[1],
+        int(state_indices is not None),
+        _ptr(state_indices),
+        int(cache_seqlens is not None),
+        _ptr(cache_seqlens),
     )
 
 
@@ -512,20 +524,28 @@ def causal_conv1d_update(
     decoding.
 
     x: (batch, dim) or (batch, dim, seqlen)  -- the new tokens
-    conv_state: (batch, dim, state_len), state_len >= width - 1
-        Mutated in place: oldest `seqlen` values are dropped, new x
-        values are appended on the right.
+    conv_state: (batch_or_pool_size, dim, state_len), state_len >= width - 1
+        Mutated in place. Default mode: oldest `seqlen` values are
+        dropped, new x values are appended on the right. Circular mode
+        (cache_seqlens != None): writes happen at `cache_seqlens[b]`
+        with wrap-around modulo `state_len`.
     weight: (dim, width)
     bias: (dim,) or None
     activation: None | "silu" | "swish"
-    cache_seqlens, conv_state_indices: not supported (raise).
+    cache_seqlens: (batch,) int32 or None. When set, conv_state is
+        treated as a circular buffer; cache_seqlens[b] is the per-batch
+        write head (only its value mod state_len matters). The kernel
+        does NOT advance cache_seqlens; the caller does.
+    conv_state_indices: (batch,) int32 or None. When set, the conv state
+        for batch element `b` lives at row `conv_state_indices[b]` of
+        `conv_state` (decoupling input batch from cache slot — used by
+        paged-cache servers). A negative index marks a padding token:
+        the output for that batch is zeroed and the state row is left
+        untouched. cache_seqlens is still indexed by `b`, not the
+        redirected coord (matching upstream).
 
     Returns: out tensor with the same shape as `x`.
     """
-    if cache_seqlens is not None:
-        raise NotImplementedError("cache_seqlens (circular buffer) is not supported")
-    if conv_state_indices is not None:
-        raise NotImplementedError("conv_state_indices is not supported")
     if activation not in (None, "silu", "swish"):
         raise NotImplementedError(
             "only activation in {None, 'silu', 'swish'} is supported"
@@ -562,11 +582,20 @@ def causal_conv1d_update(
     width = weight.shape[1]
     state_len = conv_state.shape[-1]
 
-    if conv_state.shape != (batch, dim, state_len):
-        raise ValueError(
-            f"conv_state shape {tuple(conv_state.shape)} != expected "
-            f"{(batch, dim, state_len)}"
-        )
+    # With conv_state_indices, conv_state.shape[0] is a *pool size*, not
+    # `batch`. Without it, the two must match.
+    if conv_state_indices is None:
+        if conv_state.shape != (batch, dim, state_len):
+            raise ValueError(
+                f"conv_state shape {tuple(conv_state.shape)} != expected "
+                f"{(batch, dim, state_len)}"
+            )
+    else:
+        if conv_state.shape[1] != dim or conv_state.shape[2] != state_len:
+            raise ValueError(
+                f"conv_state shape {tuple(conv_state.shape)}: expected "
+                f"(*, {dim}, {state_len})"
+            )
     if state_len < width - 1:
         raise ValueError(
             f"conv_state.shape[-1]={state_len} must be >= width-1={width - 1}"
@@ -580,13 +609,68 @@ def causal_conv1d_update(
             "x, weight, bias, conv_state must all be on the same device"
         )
 
+    if cache_seqlens is not None:
+        if cache_seqlens.shape != (batch,):
+            raise ValueError(
+                f"cache_seqlens shape {tuple(cache_seqlens.shape)} != "
+                f"expected {(batch,)}"
+            )
+        if cache_seqlens.dtype != torch.int32:
+            raise ValueError(
+                f"cache_seqlens.dtype must be int32 (got {cache_seqlens.dtype})"
+            )
+        if cache_seqlens.device != x.device:
+            raise ValueError(
+                f"cache_seqlens.device ({cache_seqlens.device}) must match "
+                f"x.device ({x.device})"
+            )
+        if not cache_seqlens.is_contiguous():
+            cache_seqlens = cache_seqlens.contiguous()
+
+    if conv_state_indices is not None:
+        if conv_state_indices.shape != (batch,):
+            raise ValueError(
+                f"conv_state_indices shape {tuple(conv_state_indices.shape)} "
+                f"!= expected {(batch,)}"
+            )
+        if conv_state_indices.dtype != torch.int32:
+            raise ValueError(
+                f"conv_state_indices.dtype must be int32 "
+                f"(got {conv_state_indices.dtype})"
+            )
+        if conv_state_indices.device != x.device:
+            raise ValueError(
+                f"conv_state_indices.device ({conv_state_indices.device}) "
+                f"must match x.device ({x.device})"
+            )
+        if not conv_state_indices.is_contiguous():
+            conv_state_indices = conv_state_indices.contiguous()
+
     out = torch.empty_like(x)
     apply_silu = activation in ("silu", "swish")
 
     if x.is_cuda:
-        _native_update(x, weight, bias, conv_state, out, apply_silu)
+        _native_update(
+            x,
+            weight,
+            bias,
+            conv_state,
+            conv_state_indices,
+            cache_seqlens,
+            out,
+            apply_silu,
+        )
     else:
-        _native_update_cpu(x, weight, bias, conv_state, out, apply_silu)
+        _native_update_cpu(
+            x,
+            weight,
+            bias,
+            conv_state,
+            conv_state_indices,
+            cache_seqlens,
+            out,
+            apply_silu,
+        )
 
     if unsqueeze:
         out = out.squeeze(-1)

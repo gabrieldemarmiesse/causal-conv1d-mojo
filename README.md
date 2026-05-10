@@ -121,9 +121,11 @@ the autograd `Function` plumbs all flags through.
 `causal_conv1d_update(x, conv_state, weight, ...)` provides the
 single-step / KV-cache decode op: takes 1 (or a few) new tokens,
 mutates `conv_state` in place, returns the conv output. Used in
-autoregressive Mamba inference. `cache_seqlens` (circular buffer
-mode) and `conv_state_indices` (per-batch state indirection) raise
-`NotImplementedError`.
+autoregressive Mamba inference. Supports `cache_seqlens` (circular
+buffer mode — per-batch write head, `state` becomes a ring) and
+`conv_state_indices` (per-batch state-row indirection: decouple input
+batch from cache slot for paged-cache servers; negative indices
+denote padding tokens whose output is zeroed). Both can be combined.
 
 ## Run it
 

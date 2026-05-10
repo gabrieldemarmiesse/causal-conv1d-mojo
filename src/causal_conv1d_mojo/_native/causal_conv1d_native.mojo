@@ -763,10 +763,11 @@ def causal_conv1d_update(
 ) raises -> PythonObject:
     """GPU single-step update. dtype + width are dispatched at runtime.
 
-    Updates `conv_state` in place (shifts left by `seqlen`, writes the
-    new x values into the tail) and emits the conv output.
+    Updates `conv_state` in place (shifts left by `seqlen` and writes the
+    new x values at the tail; or, in circular mode, writes at the
+    `cache_seqlens[b]` head with wrap) and emits the conv output.
 
-    Python tuple positional args (24):
+    Python tuple positional args (29):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int) — pass 0 if `has_bias=0`
@@ -792,6 +793,10 @@ def causal_conv1d_update(
         22 dtype_code (int) — 0=fp16, 1=bf16, 2=fp32
         23 cuda_stream_handle (int)
         24 width (int) — supported: 2, 3, 4
+        25 has_state_indices (int, 0 or 1)
+        26 state_indices_data_ptr (int, int32) — pass 0 if `has_state_indices=0`
+        27 is_circular (int, 0 or 1)
+        28 cache_seqlens_data_ptr (int, int32) — pass 0 if `is_circular=0`
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -820,6 +825,10 @@ def causal_conv1d_update(
     var dtype_code: Int = Int(py=args[22])
     var stream_handle_addr: Int = Int(py=args[23])
     var width_rt: Int = Int(py=args[24])
+    var has_state_indices_rt: Bool = Int(py=args[25]) != 0
+    var state_indices_addr: Int = Int(py=args[26])
+    var is_circular_rt: Bool = Int(py=args[27]) != 0
+    var cache_seqlens_addr: Int = Int(py=args[28])
 
     if batch_int == 0 or dim_int == 0:
         return PythonObject(None)
@@ -850,17 +859,41 @@ def causal_conv1d_update(
         var state_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=state_addr
         )
+        var state_indices_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=state_indices_addr
+        )
+        var cache_seqlens_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=cache_seqlens_addr
+        )
         var o_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=o_addr
         )
 
         @parameter
         fn enqueue_update[
-            width: Int, has_bias: Bool, apply_silu: Bool
+            width: Int,
+            has_bias: Bool,
+            apply_silu: Bool,
+            has_state_indices: Bool,
+            is_circular: Bool,
         ]() raises:
             var compiled = ctx.compile_function[
-                update_kernel[dtype, width, has_bias, apply_silu],
-                update_kernel[dtype, width, has_bias, apply_silu],
+                update_kernel[
+                    dtype,
+                    width,
+                    has_bias,
+                    apply_silu,
+                    has_state_indices,
+                    is_circular,
+                ],
+                update_kernel[
+                    dtype,
+                    width,
+                    has_bias,
+                    apply_silu,
+                    has_state_indices,
+                    is_circular,
+                ],
             ]()
             stream.enqueue_function(
                 compiled,
@@ -872,6 +905,8 @@ def causal_conv1d_update(
                 w_ptr,
                 b_ptr,
                 state_ptr,
+                state_indices_ptr,
+                cache_seqlens_ptr,
                 o_ptr,
                 x_b_stride,
                 x_c_stride,
@@ -890,9 +925,16 @@ def causal_conv1d_update(
 
         @parameter
         fn dispatch_w[width: Int]() raises:
-            comptime for hb, silu in product(_BOOLS, _BOOLS):
-                if hb == has_bias_rt and silu == apply_silu_rt:
-                    enqueue_update[width, hb, silu]()
+            comptime for hb, silu, hi, circ in product(
+                _BOOLS, _BOOLS, _BOOLS, _BOOLS
+            ):
+                if (
+                    hb == has_bias_rt
+                    and silu == apply_silu_rt
+                    and hi == has_state_indices_rt
+                    and circ == is_circular_rt
+                ):
+                    enqueue_update[width, hb, silu, hi, circ]()
 
         comptime for w in _WIDTHS:
             if width_rt == w:
@@ -917,7 +959,7 @@ def causal_conv1d_update_cpu(
     """CPU single-step update. dtype + width are dispatched at runtime.
 
     Same arg layout as the GPU launcher minus the `cuda_stream_handle`
-    (23 args instead of 24).
+    (28 args instead of 29).
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -945,6 +987,10 @@ def causal_conv1d_update_cpu(
     var apply_silu_rt: Bool = Int(py=args[21]) != 0
     var dtype_code: Int = Int(py=args[22])
     var width_rt: Int = Int(py=args[23])
+    var has_state_indices_rt: Bool = Int(py=args[24]) != 0
+    var state_indices_addr: Int = Int(py=args[25])
+    var is_circular_rt: Bool = Int(py=args[26]) != 0
+    var cache_seqlens_addr: Int = Int(py=args[27])
 
     if batch_int == 0 or dim_int == 0:
         return PythonObject(None)
@@ -963,13 +1009,32 @@ def causal_conv1d_update_cpu(
         var state_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=state_addr
         )
+        var state_indices_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=state_indices_addr
+        )
+        var cache_seqlens_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=cache_seqlens_addr
+        )
         var o_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=o_addr
         )
 
         @parameter
-        fn dispatch[width: Int, has_bias: Bool, apply_silu: Bool]() raises:
-            update_kernel_cpu[dtype, width, has_bias, apply_silu](
+        fn dispatch[
+            width: Int,
+            has_bias: Bool,
+            apply_silu: Bool,
+            has_state_indices: Bool,
+            is_circular: Bool,
+        ]() raises:
+            update_kernel_cpu[
+                dtype,
+                width,
+                has_bias,
+                apply_silu,
+                has_state_indices,
+                is_circular,
+            ](
                 batch_int,
                 dim_int,
                 seqlen_int,
@@ -978,6 +1043,8 @@ def causal_conv1d_update_cpu(
                 w_ptr,
                 b_ptr,
                 state_ptr,
+                state_indices_ptr,
+                cache_seqlens_ptr,
                 o_ptr,
                 x_b_stride,
                 x_c_stride,
@@ -994,9 +1061,16 @@ def causal_conv1d_update_cpu(
 
         @parameter
         fn dispatch_w[width: Int]() raises:
-            comptime for hb, silu in product(_BOOLS, _BOOLS):
-                if hb == has_bias_rt and silu == apply_silu_rt:
-                    dispatch[width, hb, silu]()
+            comptime for hb, silu, hi, circ in product(
+                _BOOLS, _BOOLS, _BOOLS, _BOOLS
+            ):
+                if (
+                    hb == has_bias_rt
+                    and silu == apply_silu_rt
+                    and hi == has_state_indices_rt
+                    and circ == is_circular_rt
+                ):
+                    dispatch[width, hb, silu, hi, circ]()
 
         comptime for w in _WIDTHS:
             if width_rt == w:

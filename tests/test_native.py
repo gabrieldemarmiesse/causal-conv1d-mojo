@@ -816,15 +816,145 @@ def test_update_decode_sequence_matches_full_forward(device, dtype, bias_present
     assert _max_diff(full_out, decoded_out) < _FWD_TOL[dtype]
 
 
-def test_update_cache_seqlens_raises():
-    x = torch.randn(1, 8, 1, dtype=torch.float16)
-    state = torch.zeros(1, 8, 3, dtype=torch.float16)
-    weight = torch.randn(8, 4, dtype=torch.float16)
-    cache_seqlens = torch.zeros(1, dtype=torch.int32)
-    with pytest.raises(NotImplementedError, match="cache_seqlens"):
-        causal_conv1d_mojo.causal_conv1d_update(
-            x, state, weight, cache_seqlens=cache_seqlens
+def test_update_circular_buffer_matches_ref(
+    device, dtype, width, activation, bias_present
+):
+    """cache_seqlens != None: state is a circular buffer with the per-batch
+    write head at cache_seqlens[b] mod state_len. Compare against
+    upstream's ref impl which exercises the same semantics."""
+    B, D, state_len = 2, 16, width + 5  # state larger than W-1 to exercise wrap
+    x = torch.randn(B, D, dtype=dtype, device=device)
+    weight = torch.randn(D, width, dtype=dtype, device=device)
+    bias = _make_bias(D, dtype=dtype, device=device, present=bias_present)
+    state = torch.randn(B, D, state_len, dtype=dtype, device=device)
+    # Mix of write heads: b=0 starts mid-buffer, b=1 starts past state_len
+    # to exercise the modulo. cache_seqlens[b] >= state_len is intentional.
+    cache_seqlens = torch.tensor(
+        [state_len // 2, state_len + 3], dtype=torch.int32, device=device
+    )
+
+    state_ours = state.clone()
+    state_ref = state.clone()
+
+    out_ours = causal_conv1d_mojo.causal_conv1d_update(
+        x,
+        state_ours,
+        weight,
+        bias=bias,
+        activation=activation,
+        cache_seqlens=cache_seqlens,
+    )
+    out_ref = causal_conv1d_update_ref(
+        x,
+        state_ref,
+        weight,
+        bias=bias,
+        activation=activation,
+        cache_seqlens=cache_seqlens,
+    )
+
+    assert _max_diff(out_ours, out_ref) < _FWD_TOL[dtype], (
+        f"out diff={_max_diff(out_ours, out_ref)}"
+    )
+    assert _max_diff(state_ours, state_ref) < _FWD_TOL[dtype], (
+        f"state mutation differs: diff={_max_diff(state_ours, state_ref)}"
+    )
+
+
+def test_update_circular_decode_loop(device, dtype):
+    """Repeated circular-buffer decode must match a one-shot causal_conv1d_fn
+    over the same input — the cache_seqlens write head advances with each
+    call and the conv reads the right history each time."""
+    B, D, L, W = 1, 8, 16, 4
+    x = torch.randn(B, D, L, dtype=dtype, device=device)
+    weight = torch.randn(D, W, dtype=dtype, device=device)
+
+    full_out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, activation="silu")
+
+    # Circular buffer with state_len exactly W-1 -- write head wraps every
+    # call. Start at 0; advance by 1 each call.
+    state_len = W - 1
+    state = torch.zeros(B, D, state_len, dtype=dtype, device=device)
+    decoded = []
+    for t in range(L):
+        cs = torch.tensor([t], dtype=torch.int32, device=device)
+        out_t = causal_conv1d_mojo.causal_conv1d_update(
+            x[:, :, t : t + 1],
+            state,
+            weight,
+            activation="silu",
+            cache_seqlens=cs,
         )
+        decoded.append(out_t)
+    decoded_out = torch.cat(decoded, dim=-1)
+
+    assert _max_diff(full_out, decoded_out) < _FWD_TOL[dtype]
+
+
+def test_update_conv_state_indices(device, dtype):
+    """Per-batch state-row indirection: conv_state.shape[0] is a pool, and
+    conv_state_indices[b] picks which slot serves batch element b."""
+    pool_size = 5
+    B, D, W = 3, 16, 4
+    state_len = W - 1
+    x = torch.randn(B, D, dtype=dtype, device=device)
+    weight = torch.randn(D, W, dtype=dtype, device=device)
+
+    pool = torch.randn(pool_size, D, state_len, dtype=dtype, device=device)
+    # Map batch -> pool slot, in arbitrary (non-identity) order.
+    indices = torch.tensor([3, 0, 4], dtype=torch.int32, device=device)
+
+    pool_ours = pool.clone()
+
+    out_ours = causal_conv1d_mojo.causal_conv1d_update(
+        x,
+        pool_ours,
+        weight,
+        activation="silu",
+        conv_state_indices=indices,
+    )
+
+    # Reference: gather the per-batch state rows, run the standard
+    # update, scatter back.
+    pool_ref = pool.clone()
+    state_gathered = pool_ref[indices.to(torch.int64)]  # (B, D, state_len)
+    out_ref = causal_conv1d_update_ref(x, state_gathered, weight, activation="silu")
+    pool_ref[indices.to(torch.int64)] = state_gathered
+
+    assert _max_diff(out_ours, out_ref) < _FWD_TOL[dtype]
+    # Pool slots not addressed by `indices` must be untouched.
+    untouched_mask = torch.ones(pool_size, dtype=torch.bool, device=device)
+    untouched_mask[indices.to(torch.int64)] = False
+    assert _max_diff(pool_ours[untouched_mask], pool[untouched_mask]) == 0.0, (
+        "untouched pool slots were modified"
+    )
+    # Touched slots match the reference.
+    assert _max_diff(pool_ours, pool_ref) < _FWD_TOL[dtype]
+
+
+def test_update_padding_token(device, dtype):
+    """conv_state_indices[b] < 0 marks a padding token: output zeros, state
+    untouched."""
+    pool_size = 4
+    B, D, W = 3, 8, 4
+    state_len = W - 1
+    x = torch.randn(B, D, dtype=dtype, device=device)
+    weight = torch.randn(D, W, dtype=dtype, device=device)
+    pool = torch.randn(pool_size, D, state_len, dtype=dtype, device=device)
+    # b=1 is a padding token; b=0 and b=2 are real (slots 0 and 2).
+    indices = torch.tensor([0, -1, 2], dtype=torch.int32, device=device)
+
+    pool_before = pool.clone()
+    out = causal_conv1d_mojo.causal_conv1d_update(
+        x, pool, weight, conv_state_indices=indices
+    )
+
+    # b=1 row of the output must be all zeros.
+    assert torch.all(out[1] == 0), "padding token row not zeroed"
+    # Pool: only slots 0 and 2 should have changed.
+    untouched = (pool_before != pool).any(dim=(1, 2))
+    assert untouched[0].item() and untouched[2].item()
+    assert not untouched[1].item() and not untouched[3].item()
 
 
 def test_update_state_too_small_raises():
