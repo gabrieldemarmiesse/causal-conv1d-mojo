@@ -1,18 +1,42 @@
-"""Flash-Attention, Mojo port (WIP — Phase 1).
+"""Flash-Attention, Mojo port (Phase 1 — naive CPU correctness).
 
-Companion package to `causal_conv1d_mojo` in this repo, mirroring the
-Tri Dao `flash-attn` 2.x public API. Three entry points planned:
+Companion package to ``causal_conv1d_mojo``, mirroring the Tri Dao
+``flash-attn`` 2.x public API. The kernel is a naive online-softmax
+implementation in Mojo (``_native/flash_fwd_cpu.mojo`` /
+``flash_bwd_cpu.mojo``), parallelised across (B, H, S_q) / (B, H_kv,
+S_k) workers via ``sync_parallelize``. Phase 2 (deferred) will add the
+real GPU kernel; this CPU path stays as a correctness reference.
 
-- ``flash_attn_func(q, k, v, ...)``                       — standard MHA / MQA / GQA attention.
-- ``flash_attn_qkvpacked_func(qkv, ...)``                 — Q/K/V packed into one tensor.
-- ``flash_attn_with_kvcache(q, k_cache, v_cache, ...)``   — autoregressive decode with KV-cache.
+Public API (matches upstream — see flash_attn 2.x):
 
-Phase 1.x (current): minimal CPU forward for ``flash_attn_func`` —
-fp16, headdim ∈ {64, 96, 128}, MHA / MQA / GQA, optional causal mask.
-Everything else still raises.
+  Dense:
+  - flash_attn_func(q, k, v, ...)
+  - flash_attn_qkvpacked_func(qkv, ...)
+  - flash_attn_kvpacked_func(q, kv, ...)
 
-Tests compare correctness against the upstream ``flash_attn`` PyPI
-package (pinned to a prebuilt wheel via pyproject.toml).
+  Variable-length (packed):
+  - flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, ...)
+  - flash_attn_varlen_qkvpacked_func(qkv, cu_seqlens, ...)
+  - flash_attn_varlen_kvpacked_func(q, kv, cu_seqlens_q, cu_seqlens_k, ...)
+
+  Decode:
+  - flash_attn_with_kvcache(q, k_cache, v_cache, k=, v=, ...)
+
+Supported features (all together):
+  fp16 / bf16 / fp32; headdim ∈ {64, 96, 128}; MHA / MQA / GQA;
+  causal (bottom-right alignment); window_size = (left, right);
+  alibi_slopes (1-D or 2-D); softcap (Gemma-style logit cap);
+  dropout_p; deterministic backward (always — no atomics);
+  flash_attn_with_kvcache adds: cache_seqlens, cache_batch_idx,
+  rotary embedding (interleaved + split).
+
+Not yet implemented:
+  - GPU forward / backward (phase 2).
+  - block_table (paged kv-cache).
+
+Tests compare correctness against an in-test fp32 reference. The
+upstream ``flash_attn`` PyPI package is pinned via pyproject.toml so
+that tests can reference it on machines that have the right GPU.
 """
 
 from __future__ import annotations
