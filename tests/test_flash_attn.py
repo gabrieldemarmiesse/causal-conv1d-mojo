@@ -378,10 +378,10 @@ def test_flash_attn_func_headdim(headdim, causal):
 
 
 def test_unsupported_headdim_raises():
-    """headdim=48 (and other non-listed sizes) aren't dispatched."""
-    q = torch.randn(1, 4, 1, 48, dtype=torch.float16)
-    k = torch.randn(1, 4, 1, 48, dtype=torch.float16)
-    v = torch.randn(1, 4, 1, 48, dtype=torch.float16)
+    """headdim above the kernel's stack-scratch size (256) is rejected."""
+    q = torch.randn(1, 4, 1, 512, dtype=torch.float16)
+    k = torch.randn(1, 4, 1, 512, dtype=torch.float16)
+    v = torch.randn(1, 4, 1, 512, dtype=torch.float16)
     with pytest.raises(NotImplementedError, match="headdim"):
         flash_attn_mojo.flash_attn_func(q, k, v)
 

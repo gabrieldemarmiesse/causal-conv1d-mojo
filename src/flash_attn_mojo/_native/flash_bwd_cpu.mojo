@@ -27,22 +27,30 @@ attention matrix.
 The two passes write to disjoint output tensors (dQ in A, dK/dV in B),
 so they can run sequentially with no atomics. D[i] is recomputed in
 each pass — it's just one D-dim dot product per row, cheap.
+
+Headdim and causal are runtime args (not comptime), matching the fwd
+kernel — see the fwd module docstring for the build-time argument.
+Per-row scratch is stack-allocated up to MAX_HEADDIM = 256.
 """
 
 from std.algorithm import sync_parallelize
 from std.math import exp, inf, tanh
+from std.memory import stack_allocation
+
+
+alias MAX_HEADDIM = 256
 
 
 fn bwd_kernel_cpu[
     dtype: DType,
-    headdim: Int,
-    causal: Bool,
 ](
     batch: Int,
     seqlen_q: Int,
     seqlen_k: Int,
     nheads_q: Int,
     nheads_kv: Int,
+    headdim: Int,
+    causal: Bool,
     softmax_scale: Float32,
     window_left: Int,
     window_right: Int,
@@ -141,7 +149,6 @@ fn bwd_kernel_cpu[
         var kj_end: Int = seqlen_k
         var pos: Int = seq_offset + q_idx
 
-        @parameter
         if causal:
             if pos + 1 < kj_end:
                 kj_end = pos + 1
@@ -160,47 +167,37 @@ fn bwd_kernel_cpu[
 
         if kj_start >= kj_end:
             # Row attends to nothing — dQ stays zero.
-            @parameter
             for d in range(headdim):
                 dq_ptr[dq_base + d * dq_d_stride] = Scalar[dtype](0)
             return
 
-        # Load q, dO, O into fp32 registers once.
-        var q_vec = SIMD[accum_t, headdim](0)
-        var do_vec = SIMD[accum_t, headdim](0)
-        var o_vec = SIMD[accum_t, headdim](0)
+        # Per-row scratch, fp32. Stack-allocated, fixed at MAX_HEADDIM.
+        var q_buf = stack_allocation[MAX_HEADDIM, accum_t]()
+        var do_buf = stack_allocation[MAX_HEADDIM, accum_t]()
+        var o_buf = stack_allocation[MAX_HEADDIM, accum_t]()
+        var dq_acc = stack_allocation[MAX_HEADDIM, accum_t]()
 
-        @parameter
-        for d in range(headdim):
-            q_vec[d] = q_ptr[q_base + d * q_d_stride].cast[accum_t]()
-            do_vec[d] = dout_ptr[do_base + d * dout_d_stride].cast[accum_t]()
-            o_vec[d] = out_ptr[o_base + d * out_d_stride].cast[accum_t]()
-
-        # D[i] = dO[i] · O[i]
         var D_i: Float32 = 0
-
-        @parameter
         for d in range(headdim):
-            D_i += do_vec[d] * o_vec[d]
+            q_buf[d] = q_ptr[q_base + d * q_d_stride].cast[accum_t]()
+            do_buf[d] = dout_ptr[do_base + d * dout_d_stride].cast[accum_t]()
+            o_buf[d] = out_ptr[o_base + d * out_d_stride].cast[accum_t]()
+            D_i += do_buf[d] * o_buf[d]
+            dq_acc[d] = 0
 
         # ALiBi slope for this (b, h_q) row (zero when not active).
         var alibi_slope_a: Float32 = 0
         if has_alibi:
             alibi_slope_a = alibi_ptr[b * alibi_b_stride + h_q]
 
-        # Accumulate dQ row.
-        var dq_acc = SIMD[accum_t, headdim](0)
-
         for kj in range(kj_start, kj_end):
             var k_base = k_b_h_base + kj * k_s_stride
             var v_base = v_b_h_base + kj * v_s_stride
 
             var s: Float32 = 0
-
-            @parameter
             for d in range(headdim):
                 s += (
-                    q_vec[d] * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
+                    q_buf[d] * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
                 )
             s *= softmax_scale
             # Softcap: chain rule factor for the tanh; 1 when disabled.
@@ -218,11 +215,9 @@ fn bwd_kernel_cpu[
 
             # dP̃_j = dO · V_j  (gradient w.r.t. dropped-and-scaled prob)
             var dp: Float32 = 0
-
-            @parameter
             for d in range(headdim):
                 dp += (
-                    do_vec[d] * v_ptr[v_base + d * v_d_stride].cast[accum_t]()
+                    do_buf[d] * v_ptr[v_base + d * v_d_stride].cast[accum_t]()
                 )
 
             # dS = P_softmax * (dP̃ * mask/(1-p) - D_i)
@@ -236,7 +231,6 @@ fn bwd_kernel_cpu[
             # get gradient w.r.t. score-before-cap.
             var ds = p * (dp * mask_weight - D_i) * cap_grad
 
-            @parameter
             for d in range(headdim):
                 dq_acc[d] += (
                     ds
@@ -244,7 +238,6 @@ fn bwd_kernel_cpu[
                     * softmax_scale
                 )
 
-        @parameter
         for d in range(headdim):
             dq_ptr[dq_base + d * dq_d_stride] = dq_acc[d].cast[dtype]()
 
@@ -267,18 +260,6 @@ fn bwd_kernel_cpu[
             b * dv_b_stride + k_idx * dv_s_stride + h_kv * dv_h_stride
         )
 
-        # Load k_j and v_j once.
-        var k_vec = SIMD[accum_t, headdim](0)
-        var v_vec = SIMD[accum_t, headdim](0)
-
-        @parameter
-        for d in range(headdim):
-            k_vec[d] = k_ptr[k_base + d * k_d_stride].cast[accum_t]()
-            v_vec[d] = v_ptr[v_base + d * v_d_stride].cast[accum_t]()
-
-        var dk_acc = SIMD[accum_t, headdim](0)
-        var dv_acc = SIMD[accum_t, headdim](0)
-
         # Range of q rows that include this k_idx in their allowed window.
         # Inverting the per-row bounds:
         #   causal:        q >= k_idx - seq_offset
@@ -287,7 +268,6 @@ fn bwd_kernel_cpu[
         var q_lo: Int = 0
         var q_hi: Int = seqlen_q  # exclusive
 
-        @parameter
         if causal:
             var lo_c = k_idx - seq_offset
             if lo_c > q_lo:
@@ -304,6 +284,18 @@ fn bwd_kernel_cpu[
             q_lo = 0
         if q_hi > seqlen_q:
             q_hi = seqlen_q
+
+        # Per-row scratch.
+        var k_buf = stack_allocation[MAX_HEADDIM, accum_t]()
+        var v_buf = stack_allocation[MAX_HEADDIM, accum_t]()
+        var dk_acc = stack_allocation[MAX_HEADDIM, accum_t]()
+        var dv_acc = stack_allocation[MAX_HEADDIM, accum_t]()
+
+        for d in range(headdim):
+            k_buf[d] = k_ptr[k_base + d * k_d_stride].cast[accum_t]()
+            v_buf[d] = v_ptr[v_base + d * v_d_stride].cast[accum_t]()
+            dk_acc[d] = 0
+            dv_acc[d] = 0
 
         # Sweep over all q heads sharing this kv head, then valid q positions.
         for h_off in range(heads_per_kv):
@@ -337,12 +329,10 @@ fn bwd_kernel_cpu[
 
                 # s = q · k * scale + (-alibi * |pos - k_idx|), P = exp(s - lse)
                 var s: Float32 = 0
-
-                @parameter
                 for d in range(headdim):
                     s += (
                         q_ptr[q_base + d * q_d_stride].cast[accum_t]()
-                        * k_vec[d]
+                        * k_buf[d]
                     )
                 s *= softmax_scale
                 var cap_grad: Float32 = 1
@@ -362,13 +352,11 @@ fn bwd_kernel_cpu[
                 # by dropout — see flash_bwd_cpu module docstring).
                 var dp: Float32 = 0
                 var D_i: Float32 = 0
-
-                @parameter
                 for d in range(headdim):
                     var do_d = dout_ptr[
                         do_base + d * dout_d_stride
                     ].cast[accum_t]()
-                    dp += do_d * v_vec[d]
+                    dp += do_d * v_buf[d]
                     D_i += (
                         do_d
                         * out_ptr[o_base + d * out_d_stride].cast[accum_t]()
@@ -385,7 +373,6 @@ fn bwd_kernel_cpu[
                 # to score-before-cap (1 when softcap is disabled).
                 var ds = p * (dp * mask_weight - D_i) * cap_grad
 
-                @parameter
                 for d in range(headdim):
                     var do_d = dout_ptr[
                         do_base + d * dout_d_stride
@@ -394,7 +381,6 @@ fn bwd_kernel_cpu[
                     dv_acc[d] += p_dropped * do_d
                     dk_acc[d] += ds * q_d * softmax_scale
 
-        @parameter
         for d in range(headdim):
             dk_ptr[dk_base + d * dk_d_stride] = dk_acc[d].cast[dtype]()
             dv_ptr[dv_base + d * dv_d_stride] = dv_acc[d].cast[dtype]()

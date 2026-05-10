@@ -27,22 +27,33 @@ and the output is zero.
 
 The first valid iteration (m = -inf) handles cleanly:
 m_new = s, alpha = exp(-inf - s) = 0, l = 1, o = v_first, m = s.
+
+Compile-time dispatch is on dtype only. headdim and causal are
+runtime args so we don't pay for instantiating the comptime tree
+across (8 headdims × 2 causal × 3 dtypes × {fwd, bwd}) = 96 leaves
+— that build was 17 minutes. The current 6-leaf dispatch (3 dtypes
+× {fwd, bwd}) is ~1 minute. Per-row scratch is stack-allocated up
+to MAX_HEADDIM = 256 (the largest upstream-supported headdim).
 """
 
 from std.algorithm import sync_parallelize
 from std.math import exp, inf, log, tanh
+from std.memory import stack_allocation
+
+
+alias MAX_HEADDIM = 256
 
 
 fn fwd_kernel_cpu[
     dtype: DType,
-    headdim: Int,
-    causal: Bool,
 ](
     batch: Int,
     seqlen_q: Int,
     seqlen_k: Int,
     nheads_q: Int,
     nheads_kv: Int,
+    headdim: Int,
+    causal: Bool,
     softmax_scale: Float32,
     # Sliding-window bounds (raw upstream values: -1 means "infinite"
     # on that side, 0+ means a finite window of that many tokens).
@@ -99,8 +110,10 @@ fn fwd_kernel_cpu[
     """flash-attn forward, CPU path.
 
     Comptime params:
-        dtype:   element type (currently only fp16)
-        headdim: per-head dimension (currently 64, 96, or 128)
+        dtype: element type (fp16 / bf16 / fp32)
+
+    Runtime args:
+        headdim: per-head dimension; must be ≤ MAX_HEADDIM (= 256)
         causal:  apply causal mask with bottom-right alignment
 
     Tensor layout (matches upstream `flash_attn_func`):
@@ -143,12 +156,14 @@ fn fwd_kernel_cpu[
         var k_b_h_base = b_kv * k_b_stride + h_kv * k_h_stride
         var v_b_h_base = b_kv * v_b_stride + h_kv * v_h_stride
 
-        # Load q vector into fp32 registers once.
-        var q_vec = SIMD[accum_t, headdim](0)
+        # Per-row scratch — stack-allocated, fixed at MAX_HEADDIM (256).
+        # We use only the first `headdim` slots; the rest is dead.
+        var q_buf = stack_allocation[MAX_HEADDIM, accum_t]()
+        var o_buf = stack_allocation[MAX_HEADDIM, accum_t]()
 
-        @parameter
         for d in range(headdim):
-            q_vec[d] = q_ptr[q_base + d * q_d_stride].cast[accum_t]()
+            q_buf[d] = q_ptr[q_base + d * q_d_stride].cast[accum_t]()
+            o_buf[d] = 0
 
         # ALiBi slope for this (b, h_q) row.
         var alibi_slope: Float32 = 0
@@ -158,7 +173,6 @@ fn fwd_kernel_cpu[
         # Online softmax state.
         var m: Float32 = neg_inf
         var l: Float32 = 0
-        var o = SIMD[accum_t, headdim](0)
 
         # Per-batch effective k length: full seqlen_k by default, or
         # cache_seqlens[b] in the kvcache path.
@@ -172,7 +186,6 @@ fn fwd_kernel_cpu[
         var kj_end: Int = seqlen_k_eff
         var pos: Int = local_seq_offset + q_idx  # bottom-right query position
 
-        @parameter
         if causal:
             var k_max = pos
             if k_max < 0:
@@ -200,7 +213,6 @@ fn fwd_kernel_cpu[
         if kj_start >= kj_end:
             # Row attends to nothing — write zeros and lse=-inf so the
             # backward sees zero gradient through this row.
-            @parameter
             for d in range(headdim):
                 out_ptr[out_base + d * out_d_stride] = Scalar[dtype](0)
             lse_ptr[lse_idx] = neg_inf
@@ -211,12 +223,11 @@ fn fwd_kernel_cpu[
             var v_base = v_b_h_base + kj * v_s_stride
 
             # score = (q . k_j) * scale
-            var score: Scalar[accum_t] = 0
-
-            @parameter
+            var score: Float32 = 0
             for d in range(headdim):
                 score += (
-                    q_vec[d] * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
+                    q_buf[d]
+                    * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
                 )
             score *= softmax_scale
             if softcap > 0:
@@ -241,22 +252,20 @@ fn fwd_kernel_cpu[
                 ) * seqlen_k + kj
                 mask_weight = dropout_mask_ptr[mask_idx]
 
-            # o = alpha * o + (mask * p) * v_j  (vectorised over D)
+            # o = alpha * o + (mask * p) * v_j
             var p_eff = p * mask_weight
-
-            @parameter
             for d in range(headdim):
                 var v_d = v_ptr[v_base + d * v_d_stride].cast[accum_t]()
-                o[d] = alpha * o[d] + p_eff * v_d
+                o_buf[d] = alpha * o_buf[d] + p_eff * v_d
             m = m_new
 
         # Final normalise + writeback. l is guaranteed > 0 because
         # exp(0) = 1 was added on at least one iteration (seqlen_k >= 1).
         var inv_l: Float32 = 1.0 / l
-
-        @parameter
         for d in range(headdim):
-            out_ptr[out_base + d * out_d_stride] = (o[d] * inv_l).cast[dtype]()
+            out_ptr[out_base + d * out_d_stride] = (
+                o_buf[d] * inv_l
+            ).cast[dtype]()
 
         # lse = m + log(l)  — the log-sum-exp of un-shifted scores.
         lse_ptr[lse_idx] = m + log(l)

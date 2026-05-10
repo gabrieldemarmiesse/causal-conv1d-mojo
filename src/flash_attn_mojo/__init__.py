@@ -75,9 +75,10 @@ _DTYPE_CODE = {
     torch.float32: 2,
 }
 
-# Headdim values the comptime dispatch tree specialises on. Keep in
-# sync with `_HEADDIMS` in _native/flash_attn_native.mojo.
-_SUPPORTED_HEADDIMS = (32, 64, 96, 128, 160, 192, 224, 256)
+# Max headdim — must match `MAX_HEADDIM` in flash_fwd_cpu.mojo /
+# flash_bwd_cpu.mojo (size of the per-row stack scratch). Bumping it
+# only requires a one-line change there + a recompile.
+_MAX_HEADDIM = 256
 
 
 def _strides_4d(t):
@@ -487,9 +488,9 @@ def flash_attn_func(
         raise ValueError(
             f"q, k, v must share dtype (got {q.dtype}, {k.dtype}, {v.dtype})"
         )
-    if headdim not in _SUPPORTED_HEADDIMS:
+    if not (1 <= headdim <= _MAX_HEADDIM):
         raise NotImplementedError(
-            f"unsupported headdim {headdim}; supported: {_SUPPORTED_HEADDIMS}"
+            f"headdim must be in [1, {_MAX_HEADDIM}]; got {headdim}"
         )
     if q.device != k.device or q.device != v.device:
         raise ValueError(
@@ -874,9 +875,9 @@ def flash_attn_with_kvcache(
             f"q, k_cache, v_cache must share supported dtype; got "
             f"{q.dtype}, {k_cache.dtype}, {v_cache.dtype}"
         )
-    if headdim not in _SUPPORTED_HEADDIMS:
+    if not (1 <= headdim <= _MAX_HEADDIM):
         raise NotImplementedError(
-            f"unsupported headdim {headdim}; supported: {_SUPPORTED_HEADDIMS}"
+            f"headdim must be in [1, {_MAX_HEADDIM}]; got {headdim}"
         )
     if q.is_cuda:
         raise NotImplementedError("flash_attn_with_kvcache is CPU-only for now")
