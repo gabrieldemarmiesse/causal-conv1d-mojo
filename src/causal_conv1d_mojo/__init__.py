@@ -75,7 +75,9 @@ def _native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu):
     )
 
 
-def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu):
+def _native_bwd_full(
+    x, weight, bias, dout, seq_idx, dx, dweight_acc, dbias_acc, apply_silu
+):
     _native_mod.causal_conv1d_bwd_full(
         x.data_ptr(),
         weight.data_ptr(),
@@ -103,6 +105,10 @@ def _native_bwd_full(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_si
         _DTYPE_CODE[x.dtype],
         torch.cuda.current_stream().cuda_stream,
         weight.shape[1],
+        int(seq_idx is not None),
+        _ptr(seq_idx),
+        seq_idx.stride(0) if seq_idx is not None else 0,
+        seq_idx.stride(1) if seq_idx is not None else 0,
     )
 
 
@@ -139,7 +145,9 @@ def _native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu):
     )
 
 
-def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu):
+def _native_bwd_full_cpu(
+    x, weight, bias, dout, seq_idx, dx, dweight_acc, dbias_acc, apply_silu
+):
     _native_mod.causal_conv1d_bwd_full_cpu(
         x.data_ptr(),
         weight.data_ptr(),
@@ -166,6 +174,10 @@ def _native_bwd_full_cpu(x, weight, bias, dout, dx, dweight_acc, dbias_acc, appl
         int(apply_silu),
         _DTYPE_CODE[x.dtype],
         weight.shape[1],
+        int(seq_idx is not None),
+        _ptr(seq_idx),
+        seq_idx.stride(0) if seq_idx is not None else 0,
+        seq_idx.stride(1) if seq_idx is not None else 0,
     )
 
 
@@ -215,11 +227,11 @@ class _CausalConv1dFn(torch.autograd.Function):
         if final_states_out is not None:
             _write_final_states(x, final_states_out, weight.shape[1])
         # `save_for_backward` accepts None — the slot just won't have a
-        # tensor on retrieval.
-        ctx.save_for_backward(x, weight, bias)
+        # tensor on retrieval. seq_idx is non-differentiable but we save
+        # it so backward can reapply the same gating it used in forward.
+        ctx.save_for_backward(x, weight, bias, seq_idx)
         ctx.apply_silu = apply_silu
         ctx.has_bias = bias is not None
-        ctx.has_seq_idx = seq_idx is not None
         ctx.has_initial_states = initial_states is not None
         ctx.return_final_states = final_states_out is not None
         if final_states_out is not None:
@@ -231,16 +243,6 @@ class _CausalConv1dFn(torch.autograd.Function):
         # `grad_outputs` is `(dout,)` or `(dout, dfinal_states)` depending
         # on whether forward returned a tuple. dfinal_states is None when
         # the user never read .grad on final_states (no consumer).
-        if ctx.has_seq_idx:
-            # Forward seq_idx is implemented in the kernels; the chunked
-            # bwd kernel's smem-halo dance hasn't been extended yet.
-            # Inference (no .backward()) works fine; this only fires when
-            # the user actually backprops through a seq_idx forward.
-            raise NotImplementedError(
-                "backward through seq_idx is not implemented yet — only the "
-                "forward path supports seq_idx. Call the op under "
-                "`torch.no_grad()` for inference."
-            )
         if ctx.has_initial_states:
             # Forward initial_states is implemented in the kernels; the
             # bwd kernel doesn't yet read initial_states for the silu'
@@ -254,7 +256,7 @@ class _CausalConv1dFn(torch.autograd.Function):
             )
         dout = grad_outputs[0]
         dfinal_states = grad_outputs[1] if ctx.return_final_states else None
-        x, weight, bias = ctx.saved_tensors
+        x, weight, bias, seq_idx = ctx.saved_tensors
         apply_silu = ctx.apply_silu
         has_bias = ctx.has_bias
         D, W = weight.shape
@@ -274,11 +276,27 @@ class _CausalConv1dFn(torch.autograd.Function):
 
         if x.is_cuda:
             _native_bwd_full(
-                x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu
+                x,
+                weight,
+                bias,
+                dout,
+                seq_idx,
+                dx,
+                dweight_acc,
+                dbias_acc,
+                apply_silu,
             )
         else:
             _native_bwd_full_cpu(
-                x, weight, bias, dout, dx, dweight_acc, dbias_acc, apply_silu
+                x,
+                weight,
+                bias,
+                dout,
+                seq_idx,
+                dx,
+                dweight_acc,
+                dbias_acc,
+                apply_silu,
             )
 
         if dfinal_states is not None:

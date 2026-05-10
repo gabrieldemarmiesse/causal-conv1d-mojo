@@ -641,19 +641,111 @@ def test_seq_idx_forward(device, dtype, seq_idx_pattern, activation, bias_presen
     assert diff < _FWD_TOL[dtype], f"max_diff={diff}, pattern={seq_idx_pattern}"
 
 
-def test_seq_idx_backward_raises(device):
-    """Backward through seq_idx is not implemented yet; the autograd
-    Function raises NotImplementedError if anyone tries to backprop."""
-    B, D, L, W = 1, 8, 32, 4
-    x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
-    weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
-    seq_idx = torch.zeros(B, L, dtype=torch.int32, device=device)
+def _ref_grads_with_seq_idx(x, weight, bias, seq_idx, dout, activation):
+    """Reference gradients for the seq_idx forward: for each contiguous
+    run of equal seq_idx in each batch row, run the standard
+    causal_conv1d_ref on that segment with autograd; then accumulate
+    grads. Padding rows (seq_idx < 0) contribute zero (their forward
+    output was forced to 0 so dpre is 0).
+
+    Returns (dx, dweight, dbias).
+    """
+    B, D, L = x.shape
+    dx_ref = torch.zeros_like(x)
+    dw_ref = torch.zeros_like(weight)
+    db_ref = torch.zeros_like(bias) if bias is not None else None
+
+    x_g = x.detach().clone().requires_grad_()
+    w_g = weight.detach().clone().requires_grad_()
+    b_g = bias.detach().clone().requires_grad_() if bias is not None else None
+
+    for b in range(B):
+        ids = seq_idx[b].cpu().numpy()
+        start = 0
+        while start < L:
+            end = start + 1
+            while end < L and ids[end] == ids[start]:
+                end += 1
+            run_id = int(ids[start])
+            if run_id >= 0:
+                seg_x = x_g[b : b + 1, :, start:end]
+                seg_out = causal_conv1d_ref(seg_x, w_g, bias=b_g, activation=activation)
+                seg_out.backward(dout[b : b + 1, :, start:end])
+            start = end
+
+    dx_ref = x_g.grad if x_g.grad is not None else torch.zeros_like(x)
+    dw_ref = w_g.grad if w_g.grad is not None else torch.zeros_like(weight)
+    db_ref = b_g.grad if (b_g is not None and b_g.grad is not None) else None
+    return dx_ref, dw_ref, db_ref
+
+
+@pytest.mark.parametrize(
+    "seq_idx_pattern", ["single", "two_equal", "varied", "with_padding"]
+)
+def test_seq_idx_backward(device, dtype, seq_idx_pattern, activation, bias_present):
+    """Backward through seq_idx: dx/dw/db match the segmented reference.
+
+    For each seq_idx run, only positions in that run contributed to
+    each other in the forward; padding positions produced zero output
+    so their dpre is zero. The backward must reproduce that segmented
+    flow.
+    """
+    B, D, L, W = 2, 16, 64, 4
+    x = torch.randn(B, D, L, dtype=dtype, device=device, requires_grad=True)
+    weight = torch.randn(D, W, dtype=dtype, device=device, requires_grad=True)
+    bias = _make_bias(
+        D, dtype=dtype, device=device, present=bias_present, requires_grad=True
+    )
+    dout = torch.randn(B, D, L, dtype=dtype, device=device)
+
+    if seq_idx_pattern == "single":
+        seq_idx = torch.zeros(B, L, dtype=torch.int32, device=device)
+    elif seq_idx_pattern == "two_equal":
+        seq_idx = torch.cat(
+            [
+                torch.zeros(B, L // 2, dtype=torch.int32, device=device),
+                torch.ones(B, L - L // 2, dtype=torch.int32, device=device),
+            ],
+            dim=1,
+        )
+    elif seq_idx_pattern == "varied":
+        seq_idx = torch.cat(
+            [
+                torch.zeros(B, 10, dtype=torch.int32, device=device),
+                torch.ones(B, 25, dtype=torch.int32, device=device),
+                torch.full((B, L - 35), 2, dtype=torch.int32, device=device),
+            ],
+            dim=1,
+        )
+    else:  # with_padding
+        seq_idx = torch.cat(
+            [
+                torch.zeros(B, 16, dtype=torch.int32, device=device),
+                torch.full((B, 16), -1, dtype=torch.int32, device=device),
+                torch.ones(B, L - 32, dtype=torch.int32, device=device),
+            ],
+            dim=1,
+        )
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
-        x, weight, seq_idx=seq_idx, activation="silu"
+        x, weight, bias=bias, seq_idx=seq_idx, activation=activation
     )
-    with pytest.raises(NotImplementedError, match="backward through seq_idx"):
-        out.sum().backward()
+    out.backward(dout)
+
+    dx_ref, dw_ref, db_ref = _ref_grads_with_seq_idx(
+        x, weight, bias, seq_idx, dout, activation
+    )
+
+    assert _max_diff(x.grad, dx_ref) < _DX_TOL[dtype], (
+        f"dx max_diff={_max_diff(x.grad, dx_ref)}, pattern={seq_idx_pattern}"
+    )
+    assert _max_diff(weight.grad, dw_ref) < _DW_TOL[dtype], (
+        f"dw max_diff={_max_diff(weight.grad, dw_ref)}, pattern={seq_idx_pattern}"
+    )
+    if bias_present:
+        assert _max_diff(bias.grad, db_ref) < _DW_TOL[dtype], (
+            f"db max_diff={_max_diff(bias.grad, db_ref)}, pattern={seq_idx_pattern}"
+        )
 
 
 def test_seq_idx_inference_no_grad(device, dtype):

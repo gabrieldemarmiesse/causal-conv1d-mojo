@@ -99,6 +99,7 @@ fn bwd_full_kernel[
     dtype: DType,
     width: Int,
     has_bias: Bool,
+    has_seq_idx: Bool,
     apply_silu: Bool,
     contig_inner: Bool,
     aligned_seq: Bool,
@@ -108,6 +109,7 @@ fn bwd_full_kernel[
     weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     dout_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     dx_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     dweight_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
     dbias_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
@@ -119,6 +121,8 @@ fn bwd_full_kernel[
     dout_batch_stride: Int,
     dout_c_stride: Int,
     dout_l_stride: Int,
+    seq_idx_b_stride: Int,
+    seq_idx_l_stride: Int,
     dx_batch_stride: Int,
     dx_c_stride: Int,
     dx_l_stride: Int,
@@ -198,6 +202,7 @@ fn bwd_full_kernel[
     var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
     var dout_base = batch_id * dout_batch_stride + channel_id * dout_c_stride
     var dx_base = batch_id * dx_batch_stride + channel_id * dx_c_stride
+    var seq_idx_base: Int = batch_id * seq_idx_b_stride
 
     # Per-thread accumulators (persist across chunks).
     var local_dweight = SIMD[accum_t, width](0)
@@ -221,6 +226,32 @@ fn bwd_full_kernel[
         var chunk: Int = n_chunks - 1 - chunk_rev
         var chunk_start: Int = chunk * kChunkSize
         var seq_start: Int = chunk_start + tidx * kNElts
+
+        # ---- [P0] seq_idx window for this thread ----
+        # Each thread needs seq_idx at positions
+        #   [seq_start - (W-1) ..  seq_start + kNElts + (W-1) - 1]
+        # = its own kNElts + a `(W-1)` halo on each side. The halos are
+        # what Phase 3's silu' (left) and Phase 5/6's dx + dweight
+        # (right) need to gate the conv with `seq_idx[s] == seq_idx[t]`.
+        # Out-of-range positions get -1 so the gate naturally fails.
+        # seq_idx is small (Int32, B*L), no smem dance needed.
+        alias kSeqIdxWindow: Int = 2 * (width - 1) + kNElts
+        var seq_idx_window = InlineArray[Int32, kSeqIdxWindow](
+            uninitialized=True
+        )
+
+        @parameter
+        if has_seq_idx:
+
+            @parameter
+            for j in range(kSeqIdxWindow):
+                var t_j = seq_start + j - (width - 1)
+                if 0 <= t_j and t_j < seqlen:
+                    seq_idx_window[j] = seq_idx_ptr[
+                        seq_idx_base + t_j * seq_idx_l_stride
+                    ]
+                else:
+                    seq_idx_window[j] = -1
 
         # ---- [P1] load x_curr and dout_curr ----
         # `alignment=16` promises a 16-byte aligned base, letting the
@@ -311,6 +342,10 @@ fn bwd_full_kernel[
         # silu'(pre) requires recomputing pre = bias + sum_k weights[k] *
         # x_window[k]; x_window comes from [x_prev || x_curr] using the same
         # offset arithmetic as the forward.
+        # With has_seq_idx, the same `seq_idx[src_t] == seq_idx[t]` gate
+        # the forward applied is reapplied here on each x lookup, and
+        # `seq_idx[t] < 0` (padding token) forces dpre[i] = 0 since the
+        # forward forced out=0 there.
         var dpre = SIMD[accum_t, kNElts](0)
 
         @parameter
@@ -318,6 +353,12 @@ fn bwd_full_kernel[
 
             @parameter
             for i in range(kNElts):
+                # Cur output position's seq_idx (window index W-1 + i).
+                var cur_id: Int32 = 0
+
+                @parameter
+                if has_seq_idx:
+                    cur_id = seq_idx_window[(width - 1) + i]
 
                 @parameter
                 if aligned_seq:
@@ -326,25 +367,13 @@ fn bwd_full_kernel[
                     @parameter
                     for k in range(width):
                         alias offset_w: Int = k - (width - 1)
+                        var include: Bool = True
 
                         @parameter
-                        if i + offset_w >= 0:
-                            pre += x_curr[i + offset_w] * weights[k]
-                        else:
-                            pre += x_prev[kNElts + i + offset_w] * weights[k]
-
-                    var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
-                    var silu_grad: Scalar[accum_t] = sig * (
-                        1.0 + pre * (1.0 - sig)
-                    )
-                    dpre[i] = dout_curr[i] * silu_grad
-                else:
-                    if seq_start + i < seqlen:
-                        var pre: Scalar[accum_t] = cur_bias
-
-                        @parameter
-                        for k in range(width):
-                            alias offset_w: Int = k - (width - 1)
+                        if has_seq_idx:
+                            # x lookup at window index i + k.
+                            include = seq_idx_window[i + k] == cur_id
+                        if include:
 
                             @parameter
                             if i + offset_w >= 0:
@@ -354,17 +383,66 @@ fn bwd_full_kernel[
                                     x_prev[kNElts + i + offset_w] * weights[k]
                                 )
 
+                    var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+                    var silu_grad: Scalar[accum_t] = sig * (
+                        1.0 + pre * (1.0 - sig)
+                    )
+                    dpre[i] = dout_curr[i] * silu_grad
+
+                    @parameter
+                    if has_seq_idx:
+                        if cur_id < 0:
+                            dpre[i] = 0
+                else:
+                    if seq_start + i < seqlen:
+                        var pre: Scalar[accum_t] = cur_bias
+
+                        @parameter
+                        for k in range(width):
+                            alias offset_w: Int = k - (width - 1)
+                            var include: Bool = True
+
+                            @parameter
+                            if has_seq_idx:
+                                include = seq_idx_window[i + k] == cur_id
+                            if include:
+
+                                @parameter
+                                if i + offset_w >= 0:
+                                    pre += x_curr[i + offset_w] * weights[k]
+                                else:
+                                    pre += (
+                                        x_prev[kNElts + i + offset_w]
+                                        * weights[k]
+                                    )
+
                         var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
                         var silu_grad: Scalar[accum_t] = sig * (
                             1.0 + pre * (1.0 - sig)
                         )
                         dpre[i] = dout_curr[i] * silu_grad
+
+                        @parameter
+                        if has_seq_idx:
+                            if cur_id < 0:
+                                dpre[i] = 0
         else:
             # No silu — dpre is just dout. `dout_curr` already has out-of-
-            # bounds positions zeroed (loaded that way in [P1]).
+            # bounds positions zeroed (loaded that way in [P1]). With
+            # seq_idx, also zero padding-token positions.
             dpre = dout_curr
 
+            @parameter
+            if has_seq_idx:
+
+                @parameter
+                for i in range(kNElts):
+                    if seq_idx_window[(width - 1) + i] < 0:
+                        dpre[i] = 0
+
         # dbias += sum(dpre) — only when there's a bias to accumulate into.
+        # dpre is already 0 at padding positions, so no extra gating
+        # needed.
         @parameter
         if has_bias:
             local_dbias += dpre.reduce_add()
@@ -404,20 +482,37 @@ fn bwd_full_kernel[
         # ---- [P5] dx = anti-causal conv on dpre || dout_halo ----
         # dx[i] = sum_w weights[w] * combined[i + (W-1-w)]
         # combined = [dpre (kNElts) || dout_halo (kNElts)]
+        # With has_seq_idx: gate each w-term on
+        # `seq_idx[seq_start+i] == seq_idx[seq_start+i+(W-1)-w]` —
+        # x[seq_start+i] only contributed to position
+        # seq_start+i+(W-1)-w in the forward when their ids matched.
         var dx_vals = SIMD[accum_t, kNElts](0)
 
         @parameter
         for i in range(kNElts):
+            var cur_id_dx: Int32 = 0
+
+            @parameter
+            if has_seq_idx:
+                cur_id_dx = seq_idx_window[(width - 1) + i]
 
             @parameter
             for k in range(width):
                 alias halo_idx: Int = i + (width - 1) - k
+                var include_dx: Bool = True
 
                 @parameter
-                if halo_idx < kNElts:
-                    dx_vals[i] += weights[k] * dpre[halo_idx]
-                else:
-                    dx_vals[i] += weights[k] * dout_halo[halo_idx - kNElts]
+                if has_seq_idx:
+                    include_dx = (
+                        seq_idx_window[i + 2 * (width - 1) - k] == cur_id_dx
+                    )
+                if include_dx:
+
+                    @parameter
+                    if halo_idx < kNElts:
+                        dx_vals[i] += weights[k] * dpre[halo_idx]
+                    else:
+                        dx_vals[i] += weights[k] * dout_halo[halo_idx - kNElts]
 
         @parameter
         if contig_inner and aligned_seq:
@@ -445,6 +540,10 @@ fn bwd_full_kernel[
                     dx_ptr[dx_base + t * dx_l_stride] = dx_vals[i].cast[dtype]()
 
         # ---- [P6] dweight[w] += sum_i x_curr[i] * combined[i + (W-1-w)] ----
+        # With has_seq_idx: gate each i-term on
+        # `seq_idx[seq_start+i] == seq_idx[seq_start+i+(W-1)-k]`. The
+        # output position whose dpre we use is at i + (W-1) - k; the x
+        # position is i. Same index pattern as Phase 5.
         @parameter
         for k in range(width):
             var acc: Scalar[accum_t] = 0
@@ -452,12 +551,21 @@ fn bwd_full_kernel[
             @parameter
             for i in range(kNElts):
                 alias halo_idx_dw: Int = i + (width - 1) - k
+                var include_dw: Bool = True
 
                 @parameter
-                if halo_idx_dw < kNElts:
-                    acc += x_curr[i] * dpre[halo_idx_dw]
-                else:
-                    acc += x_curr[i] * dout_halo[halo_idx_dw - kNElts]
+                if has_seq_idx:
+                    include_dw = (
+                        seq_idx_window[i + 2 * (width - 1) - k]
+                        == seq_idx_window[(width - 1) + i]
+                    )
+                if include_dw:
+
+                    @parameter
+                    if halo_idx_dw < kNElts:
+                        acc += x_curr[i] * dpre[halo_idx_dw]
+                    else:
+                        acc += x_curr[i] * dout_halo[halo_idx_dw - kNElts]
             local_dweight[k] += acc
 
     # === Phase 4: block-reduce dweight, dbias and atomic-add to global ===

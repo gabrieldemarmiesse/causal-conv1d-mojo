@@ -265,7 +265,7 @@ def causal_conv1d_bwd_full(
     before this call. `dweight_acc` / `dbias_acc` are always fp32
     accumulators regardless of the input dtype (precision-preserving).
 
-    Python tuple positional args (26):
+    Python tuple positional args (29):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int) — pass 0 if `has_bias=0`
@@ -292,6 +292,10 @@ def causal_conv1d_bwd_full(
         23 dtype_code (int) — 0=fp16, 1=bf16, 2=fp32
         24 cuda_stream_handle (int)
         25 width (int) — supported: 2, 3, 4
+        26 has_seq_idx (int, 0 or 1)
+        27 seq_idx_data_ptr (int, int32) — pass 0 if `has_seq_idx=0`
+        28 seq_idx_batch_stride (int)
+        29 seq_idx_l_stride (int)
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -321,6 +325,10 @@ def causal_conv1d_bwd_full(
     var dtype_code: Int = Int(py=args[23])
     var stream_handle_addr: Int = Int(py=args[24])
     var width_rt: Int = Int(py=args[25])
+    var has_seq_idx_rt: Bool = Int(py=args[26]) != 0
+    var seq_idx_addr: Int = Int(py=args[27])
+    var seq_idx_b_stride: Int = Int(py=args[28])
+    var seq_idx_l_stride: Int = Int(py=args[29])
 
     # Zero-sized tensor: nothing to compute and no atomic updates to
     # dweight_acc / dbias_acc needed (the autograd `backward` already
@@ -363,6 +371,9 @@ def causal_conv1d_bwd_full(
         var dout_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=dout_addr
         )
+        var seq_idx_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=seq_idx_addr
+        )
         var dx_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=dx_addr
         )
@@ -377,6 +388,7 @@ def causal_conv1d_bwd_full(
         fn enqueue_bwd[
             width: Int,
             has_bias: Bool,
+            has_seq_idx: Bool,
             apply_silu: Bool,
             contig_inner: Bool,
             aligned_seq: Bool,
@@ -386,6 +398,7 @@ def causal_conv1d_bwd_full(
                     dtype,
                     width,
                     has_bias,
+                    has_seq_idx,
                     apply_silu,
                     contig_inner,
                     aligned_seq,
@@ -394,6 +407,7 @@ def causal_conv1d_bwd_full(
                     dtype,
                     width,
                     has_bias,
+                    has_seq_idx,
                     apply_silu,
                     contig_inner,
                     aligned_seq,
@@ -406,6 +420,7 @@ def causal_conv1d_bwd_full(
                 w_ptr,
                 b_ptr,
                 dout_ptr,
+                seq_idx_ptr,
                 dx_ptr,
                 dweight_acc_ptr,
                 dbias_acc_ptr,
@@ -417,6 +432,8 @@ def causal_conv1d_bwd_full(
                 dout_b_stride,
                 dout_c_stride,
                 dout_l_stride,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
                 dx_b_stride,
                 dx_c_stride,
                 dx_l_stride,
@@ -424,25 +441,27 @@ def causal_conv1d_bwd_full(
                 block_dim=(kNThreads,),
             )
 
-        # 4-way comptime sweep across (has_bias, apply_silu, contig_inner,
-        # aligned_seq). `aligned_seq=True` only makes sense with
-        # `contig_inner=True` (you can't promise vector alignment without
-        # contiguous strides), so the `comptime if` drops that 1 dead
-        # combination per (has_bias, apply_silu) — saves 4 cubins per
-        # (dtype, width).
+        # 5-flag comptime sweep across (has_bias, has_seq_idx, apply_silu,
+        # contig_inner, aligned_seq). std.itertools.product caps at 4
+        # iterables, so has_seq_idx is the outer loop and the remaining
+        # 4 form the inner product. `aligned_seq=True` only makes sense
+        # with `contig_inner=True`, so the `comptime if` drops that
+        # dead combination.
         @parameter
         fn dispatch_w[width: Int]() raises:
-            comptime for hb, silu, contig, aligned in product(
-                _BOOLS, _BOOLS, _BOOLS, _BOOLS
-            ):
-                comptime if not (aligned and not contig):
-                    if (
-                        hb == has_bias_rt
-                        and silu == apply_silu_rt
-                        and contig == contig_inner_rt
-                        and aligned == aligned_seq_rt
-                    ):
-                        enqueue_bwd[width, hb, silu, contig, aligned]()
+            comptime for hs in _BOOLS:
+                comptime for hb, silu, contig, aligned in product(
+                    _BOOLS, _BOOLS, _BOOLS, _BOOLS
+                ):
+                    comptime if not (aligned and not contig):
+                        if (
+                            hb == has_bias_rt
+                            and hs == has_seq_idx_rt
+                            and silu == apply_silu_rt
+                            and contig == contig_inner_rt
+                            and aligned == aligned_seq_rt
+                        ):
+                            enqueue_bwd[width, hb, hs, silu, contig, aligned]()
 
         comptime for w in _WIDTHS:
             if width_rt == w:
@@ -630,7 +649,7 @@ def causal_conv1d_bwd_full_cpu(
     before this call. Same arg layout as the GPU launcher minus the
     `cuda_stream_handle`.
 
-    Python tuple positional args (25):
+    Python tuple positional args (29):
         0  x_data_ptr  (int)
         1  weight_data_ptr  (int)
         2  bias_data_ptr  (int) — pass 0 if `has_bias=0`
@@ -656,6 +675,10 @@ def causal_conv1d_bwd_full_cpu(
         22 apply_silu (int, 0 or 1) — 1 ⇒ silu/swish was applied on fwd
         23 dtype_code (int) — 0=fp16, 1=bf16, 2=fp32
         24 width (int) — supported: 2, 3, 4
+        25 has_seq_idx (int, 0 or 1)
+        26 seq_idx_data_ptr (int, int32) — pass 0 if `has_seq_idx=0`
+        27 seq_idx_batch_stride (int)
+        28 seq_idx_l_stride (int)
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -683,6 +706,10 @@ def causal_conv1d_bwd_full_cpu(
     var apply_silu_rt: Bool = Int(py=args[22]) != 0
     var dtype_code: Int = Int(py=args[23])
     var width_rt: Int = Int(py=args[24])
+    var has_seq_idx_rt: Bool = Int(py=args[25]) != 0
+    var seq_idx_addr: Int = Int(py=args[26])
+    var seq_idx_b_stride: Int = Int(py=args[27])
+    var seq_idx_l_stride: Int = Int(py=args[28])
 
     var dweight_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
         unsafe_from_address=dweight_acc_addr
@@ -705,13 +732,21 @@ def causal_conv1d_bwd_full_cpu(
         var dout_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=dout_addr
         )
+        var seq_idx_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=seq_idx_addr
+        )
         var dx_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=dx_addr
         )
 
         @parameter
-        fn dispatch[width: Int, has_bias: Bool, apply_silu: Bool]() raises:
-            bwd_kernel_cpu[dtype, width, has_bias, apply_silu](
+        fn dispatch[
+            width: Int,
+            has_bias: Bool,
+            has_seq_idx: Bool,
+            apply_silu: Bool,
+        ]() raises:
+            bwd_kernel_cpu[dtype, width, has_bias, has_seq_idx, apply_silu](
                 batch_int,
                 dim_int,
                 seqlen_int,
@@ -719,6 +754,7 @@ def causal_conv1d_bwd_full_cpu(
                 w_ptr,
                 b_ptr,
                 dout_ptr,
+                seq_idx_ptr,
                 dx_ptr,
                 dweight_acc_ptr,
                 dbias_acc_ptr,
@@ -730,6 +766,8 @@ def causal_conv1d_bwd_full_cpu(
                 dout_b_stride,
                 dout_c_stride,
                 dout_l_stride,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
                 dx_b_stride,
                 dx_c_stride,
                 dx_l_stride,
@@ -737,9 +775,13 @@ def causal_conv1d_bwd_full_cpu(
 
         @parameter
         fn dispatch_w[width: Int]() raises:
-            comptime for hb, silu in product(_BOOLS, _BOOLS):
-                if hb == has_bias_rt and silu == apply_silu_rt:
-                    dispatch[width, hb, silu]()
+            comptime for hb, hs, silu in product(_BOOLS, _BOOLS, _BOOLS):
+                if (
+                    hb == has_bias_rt
+                    and hs == has_seq_idx_rt
+                    and silu == apply_silu_rt
+                ):
+                    dispatch[width, hb, hs, silu]()
 
         comptime for w in _WIDTHS:
             if width_rt == w:
