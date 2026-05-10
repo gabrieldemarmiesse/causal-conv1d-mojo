@@ -163,10 +163,11 @@ def flash_attn_func(
         )
     if alibi_slopes is not None:
         raise NotImplementedError("alibi_slopes is not implemented yet — phase 1.10")
-    if deterministic:
-        raise NotImplementedError(
-            "deterministic backward is not implemented yet — phase 1.11"
-        )
+    # `deterministic` is a no-op: the CPU backward already writes dQ/dK/dV
+    # from disjoint workers (pass A over q rows, pass B over k rows), so
+    # there's no nondeterminism source to suppress. Accept the kwarg for
+    # API compat with upstream and ignore it.
+    del deterministic
 
     # ---- shape / dtype validation ----
     if q.dim() != 4 or k.dim() != 4 or v.dim() != 4:

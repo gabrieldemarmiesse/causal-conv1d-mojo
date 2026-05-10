@@ -304,6 +304,29 @@ def test_flash_attn_func_backward_causal_q_longer_than_k():
     assert torch.equal(q.grad[:, :2], torch.zeros_like(q.grad[:, :2]))
 
 
+# Phase 1.11: deterministic backward.
+def test_flash_attn_func_deterministic_kwarg_accepted():
+    """`deterministic=True` is accepted (CPU bwd is already deterministic
+    — pass A and pass B write disjoint outputs)."""
+    q = torch.randn(1, 8, 1, 64, dtype=torch.float16, requires_grad=True)
+    k = torch.randn(1, 8, 1, 64, dtype=torch.float16, requires_grad=True)
+    v = torch.randn(1, 8, 1, 64, dtype=torch.float16, requires_grad=True)
+    dout = torch.randn(1, 8, 1, 64, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, deterministic=True)
+    out.backward(dout)
+
+    # Re-run with the same inputs and check bit-exact equality.
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    out2 = flash_attn_mojo.flash_attn_func(q2, k2, v2, deterministic=True)
+    out2.backward(dout)
+    assert torch.equal(q.grad, q2.grad)
+    assert torch.equal(k.grad, k2.grad)
+    assert torch.equal(v.grad, v2.grad)
+
+
 # ---- "still raises" tests for features not yet implemented ----
 
 
