@@ -28,11 +28,10 @@ Supported features (all together):
   alibi_slopes (1-D or 2-D); softcap (Gemma-style logit cap);
   dropout_p; deterministic backward (always — no atomics);
   flash_attn_with_kvcache adds: cache_seqlens, cache_batch_idx,
-  rotary embedding (interleaved + split).
+  rotary embedding (interleaved + split), block_table (paged cache).
 
 Not yet implemented:
   - GPU forward / backward (phase 2).
-  - block_table (paged kv-cache).
 
 Tests compare correctness against an in-test fp32 reference. The
 upstream ``flash_attn`` PyPI package is pinned via pyproject.toml so
