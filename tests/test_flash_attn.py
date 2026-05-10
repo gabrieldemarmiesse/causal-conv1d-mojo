@@ -1188,13 +1188,135 @@ def test_flash_attn_with_kvcache_cache_batch_idx():
         assert diff < 5e-3, f"q row {b} (slot {slot}): max_diff={diff}"
 
 
-def test_flash_attn_with_kvcache_paged_raises():
+# Phase 1.16: paged kv-cache (block_table).
+def test_flash_attn_with_kvcache_paged_no_append():
+    """Read from a pre-populated paged cache: k_cache shape is
+    (num_blocks, page_size, H_kv, D) and block_table[b, j] points into it."""
+    batch, seqlen_q, nheads, headdim = 2, 1, 1, 64
+    page_size = 4
+    num_blocks = 8
+    max_blocks_per_seq = 4
+
+    # Allocate paged storage and a "linear" copy we'll use as the reference.
+    k_cache = torch.randn(num_blocks, page_size, nheads, headdim, dtype=torch.float16)
+    v_cache = torch.randn(num_blocks, page_size, nheads, headdim, dtype=torch.float16)
+
+    # Block table: batch 0 → blocks [3, 5, _, _], batch 1 → [1, 7, 2, _].
+    block_table = torch.tensor([[3, 5, 0, 0], [1, 7, 2, 0]], dtype=torch.int32)
+    cache_seqlens = torch.tensor(
+        [6, 9], dtype=torch.int32
+    )  # b0 uses 6 tokens (1.5 blocks), b1 uses 9 (2.25 blocks)
+
+    q = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_with_kvcache(
+        q,
+        k_cache,
+        v_cache,
+        cache_seqlens=cache_seqlens,
+        block_table=block_table,
+        causal=True,
+    )
+
+    # Reference: gather the logical cache view manually, then run the
+    # plain (un-paged) kvcache path.
+    bt_long = block_table.long()
+    k_logical = (
+        k_cache[bt_long]
+        .reshape(batch, max_blocks_per_seq * page_size, nheads, headdim)
+        .contiguous()
+    )
+    v_logical = (
+        v_cache[bt_long]
+        .reshape(batch, max_blocks_per_seq * page_size, nheads, headdim)
+        .contiguous()
+    )
+    ref = flash_attn_mojo.flash_attn_with_kvcache(
+        q,
+        k_logical,
+        v_logical,
+        cache_seqlens=cache_seqlens,
+        causal=True,
+    )
+    assert torch.equal(out, ref)
+
+
+def test_flash_attn_with_kvcache_paged_append():
+    """Append new k, v tokens into the paged cache at the addresses
+    given by block_table, then attend over the updated valid range."""
+    batch, seqlen_q, nheads, headdim = 1, 3, 1, 64
+    page_size = 4
+    num_blocks = 6
+    max_blocks_per_seq = 3
+
+    k_cache = torch.randn(num_blocks, page_size, nheads, headdim, dtype=torch.float16)
+    v_cache = torch.randn(num_blocks, page_size, nheads, headdim, dtype=torch.float16)
+    k_cache_before = k_cache.clone()
+
+    # batch 0: logical blocks 0..2 → physical [4, 0, 2].
+    block_table = torch.tensor([[4, 0, 2]], dtype=torch.int32)
+    cache_seqlens = torch.tensor(
+        [2], dtype=torch.int32
+    )  # next 3 tokens land at logical [2, 3, 4]
+    q = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    k_new = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    v_new = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_with_kvcache(
+        q,
+        k_cache,
+        v_cache,
+        k=k_new,
+        v=v_new,
+        cache_seqlens=cache_seqlens,
+        block_table=block_table,
+        causal=True,
+    )
+
+    # Logical positions [2, 3, 4]:
+    #   logical 2 = block 0 (physical 4), offset 2
+    #   logical 3 = block 0 (physical 4), offset 3
+    #   logical 4 = block 1 (physical 0), offset 0
+    assert torch.equal(k_cache[4, 2], k_new[0, 0])
+    assert torch.equal(k_cache[4, 3], k_new[0, 1])
+    assert torch.equal(k_cache[0, 0], k_new[0, 2])
+    assert torch.equal(v_cache[0, 0], v_new[0, 2])
+    # Physical block 2 (logical block 2) untouched by the append.
+    assert torch.equal(k_cache[2], k_cache_before[2])
+
+    # Reference: gather + un-paged kvcache call (after append).
+    bt_long = block_table.long()
+    k_logical = (
+        k_cache[bt_long]
+        .reshape(batch, max_blocks_per_seq * page_size, nheads, headdim)
+        .contiguous()
+    )
+    v_logical = (
+        v_cache[bt_long]
+        .reshape(batch, max_blocks_per_seq * page_size, nheads, headdim)
+        .contiguous()
+    )
+    ref = flash_attn_mojo.flash_attn_with_kvcache(
+        q,
+        k_logical,
+        v_logical,
+        cache_seqlens=cache_seqlens + seqlen_q,  # post-append valid length
+        causal=True,
+    )
+    assert torch.equal(out, ref)
+
+
+def test_flash_attn_with_kvcache_paged_with_cache_batch_idx_raises():
+    """Paged + cache_batch_idx isn't supported."""
     q = torch.randn(1, 1, 1, 64, dtype=torch.float16)
-    kc = torch.zeros(1, 4, 1, 64, dtype=torch.float16)
-    vc = torch.zeros(1, 4, 1, 64, dtype=torch.float16)
+    kc = torch.zeros(2, 4, 1, 64, dtype=torch.float16)
+    vc = torch.zeros(2, 4, 1, 64, dtype=torch.float16)
     bt = torch.zeros(1, 4, dtype=torch.int32)
-    with pytest.raises(NotImplementedError, match="paged"):
-        flash_attn_mojo.flash_attn_with_kvcache(q, kc, vc, block_table=bt)
+    cbi = torch.zeros(1, dtype=torch.int32)
+    with pytest.raises(NotImplementedError, match="block_table"):
+        flash_attn_mojo.flash_attn_with_kvcache(
+            q, kc, vc, block_table=bt, cache_batch_idx=cbi
+        )
 
 
 # Sanity: upstream flash_attn is importable in this env (non-fatal).

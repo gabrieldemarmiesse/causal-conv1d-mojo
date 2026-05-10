@@ -715,15 +715,11 @@ def flash_attn_with_kvcache(
     """
     if (rotary_cos is None) != (rotary_sin is None):
         raise ValueError("rotary_cos and rotary_sin must both be provided or both None")
-    # cache_batch_idx is validated below after we know nheads.
-    if block_table is not None:
+    if block_table is not None and cache_batch_idx is not None:
         raise NotImplementedError(
-            "paged kv-cache (block_table) is not yet implemented — phase 1.16"
+            "block_table + cache_batch_idx combo isn't wired up — upstream "
+            "doesn't support this combination either"
         )
-    if alibi_slopes is not None and (causal and window_size != (-1, -1)):
-        # Combinations work — leave as-is. Just keeping the gate logic
-        # honest. (Removed: this is supported.)
-        pass
     if (
         not isinstance(window_size, tuple)
         or len(window_size) != 2
@@ -734,20 +730,48 @@ def flash_attn_with_kvcache(
     # Shape validation
     if q.dim() != 4 or k_cache.dim() != 4 or v_cache.dim() != 4:
         raise ValueError(
-            "q, k_cache, v_cache must be 4-D (batch, seqlen, nheads, headdim); "
-            f"got {tuple(q.shape)}, {tuple(k_cache.shape)}, {tuple(v_cache.shape)}"
+            "q, k_cache, v_cache must be 4-D; got "
+            f"{tuple(q.shape)}, {tuple(k_cache.shape)}, {tuple(v_cache.shape)}"
         )
     batch, seqlen_q, nheads_q, headdim = q.shape
-    cache_batch = k_cache.shape[0]  # may differ from q's batch under cache_batch_idx
-    seqlen_kmax = k_cache.shape[1]
-    nheads_kv = k_cache.shape[2]
-    if k_cache.shape != (cache_batch, seqlen_kmax, nheads_kv, headdim):
-        raise ValueError(f"k_cache shape {tuple(k_cache.shape)} doesn't match expected")
-    if cache_batch_idx is None and cache_batch != batch:
-        raise ValueError(
-            f"k_cache batch ({cache_batch}) must match q batch ({batch}) when "
-            f"cache_batch_idx is not provided"
-        )
+
+    if block_table is None:
+        # ---- linear (un-paged) cache layout ----
+        # k_cache: (cache_batch, seqlen_kmax, nheads_kv, headdim)
+        cache_batch = k_cache.shape[0]
+        seqlen_kmax = k_cache.shape[1]
+        nheads_kv = k_cache.shape[2]
+        if k_cache.shape != (cache_batch, seqlen_kmax, nheads_kv, headdim):
+            raise ValueError(
+                f"k_cache shape {tuple(k_cache.shape)} doesn't match expected"
+            )
+        if cache_batch_idx is None and cache_batch != batch:
+            raise ValueError(
+                f"k_cache batch ({cache_batch}) must match q batch ({batch}) when "
+                f"cache_batch_idx is not provided"
+            )
+    else:
+        # ---- paged layout ----
+        # k_cache: (num_blocks, page_size, nheads_kv, headdim)
+        # block_table[b, j] = physical block holding logical positions
+        # [j * page_size, (j+1) * page_size) for batch element b.
+        if block_table.dim() != 2 or block_table.shape[0] != batch:
+            raise ValueError(
+                f"block_table must be (batch={batch}, max_blocks_per_seq); "
+                f"got {tuple(block_table.shape)}"
+            )
+        if k_cache.shape != v_cache.shape:
+            raise ValueError(
+                f"v_cache shape {tuple(v_cache.shape)} must match k_cache shape"
+            )
+        num_blocks, page_size, nheads_kv, hd_paged = k_cache.shape
+        if hd_paged != headdim:
+            raise ValueError(
+                f"k_cache headdim ({hd_paged}) doesn't match q's ({headdim})"
+            )
+        max_blocks_per_seq = block_table.shape[1]
+        seqlen_kmax = max_blocks_per_seq * page_size
+
     if v_cache.shape != k_cache.shape:
         raise ValueError(
             f"v_cache shape {tuple(v_cache.shape)} must match k_cache shape"
@@ -818,17 +842,45 @@ def flash_attn_with_kvcache(
                 f"k/v new-token shape must be ({batch}, {seqlen_q}, "
                 f"{nheads_kv}, {headdim}); got {tuple(k.shape)}/{tuple(v.shape)}"
             )
-        for b in range(batch):
-            n = int(cs[b].item())
-            slot = int(cbi[b].item()) if cbi is not None else b
-            if n + seqlen_q > seqlen_kmax:
-                raise ValueError(
-                    f"batch {b}: cache_seqlens[{b}]={n} + seqlen_q={seqlen_q} "
-                    f"exceeds seqlen_kmax={seqlen_kmax}"
-                )
-            k_cache[slot, n : n + seqlen_q] = k[b]
-            v_cache[slot, n : n + seqlen_q] = v[b]
+        if block_table is None:
+            for b in range(batch):
+                n = int(cs[b].item())
+                slot = int(cbi[b].item()) if cbi is not None else b
+                if n + seqlen_q > seqlen_kmax:
+                    raise ValueError(
+                        f"batch {b}: cache_seqlens[{b}]={n} + seqlen_q={seqlen_q} "
+                        f"exceeds seqlen_kmax={seqlen_kmax}"
+                    )
+                k_cache[slot, n : n + seqlen_q] = k[b]
+                v_cache[slot, n : n + seqlen_q] = v[b]
+        else:
+            # Paged: write each new token into the addressed physical block.
+            for b in range(batch):
+                n = int(cs[b].item())
+                if n + seqlen_q > seqlen_kmax:
+                    raise ValueError(
+                        f"batch {b}: cache_seqlens[{b}]={n} + seqlen_q={seqlen_q} "
+                        f"exceeds max_blocks_per_seq * page_size = {seqlen_kmax}"
+                    )
+                for t in range(seqlen_q):
+                    pos = n + t
+                    blk = int(block_table[b, pos // page_size].item())
+                    off = pos % page_size
+                    k_cache[blk, off] = k[b, t]
+                    v_cache[blk, off] = v[b, t]
         cs = cs + seqlen_q  # effective valid k length now includes new tokens
+
+    # Build the (batch, seqlen_kmax, nheads_kv, headdim) view that the
+    # kernel attends against. Linear cache: that's just k_cache. Paged:
+    # gather via block_table → contiguous (B, blocks*page_size, H_kv, D).
+    if block_table is None:
+        k_for_attn = k_cache
+        v_for_attn = v_cache
+    else:
+        bt_long = block_table.long()
+        # (B, blocks, page_size, H_kv, D) → (B, blocks*page_size, H_kv, D)
+        k_for_attn = k_cache[bt_long].reshape(batch, seqlen_kmax, nheads_kv, headdim)
+        v_for_attn = v_cache[bt_long].reshape(batch, seqlen_kmax, nheads_kv, headdim)
 
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(headdim)
@@ -839,8 +891,8 @@ def flash_attn_with_kvcache(
     lse = torch.empty(batch, nheads_q, seqlen_q, dtype=torch.float32, device=q.device)
     _native_fwd_cpu(
         q_for_attn,
-        k_cache,
-        v_cache,
+        k_for_attn,
+        v_for_attn,
         out,
         lse,
         softmax_scale,
