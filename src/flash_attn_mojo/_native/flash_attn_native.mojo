@@ -25,9 +25,11 @@ from flash_fwd_cpu import fwd_kernel_cpu
 from flash_bwd_cpu import bwd_kernel_cpu
 
 
-# Must match the dispatch in the Python wrapper.
-# 0=fp16, 1=bf16, 2=fp32. (Phase 1.1 only accepts 0.)
-comptime _DTYPES = [DType.float16, DType.bfloat16, DType.float32]
+# Must match the dispatch in the Python wrapper. Order is fixed
+# so the integer code from Python indexes directly into this list.
+# 0=fp16, 1=bf16, 2=fp32.
+alias _DTYPES = [DType.float16, DType.bfloat16, DType.float32]
+alias _HEADDIMS = [64, 96, 128]
 
 
 def flash_attn_fwd_cpu(
@@ -154,29 +156,33 @@ def flash_attn_fwd_cpu(
             o_d_stride,
         )
 
-    # Currently only fp16; headdim ∈ {64, 96, 128}. Other combos raise
-    # and the Python wrapper catches them earlier — this is a
-    # defence-in-depth check.
-    if dtype_code != 0:
-        raise Error("currently only supports dtype=fp16")
-    var causal: Bool = causal_rt != 0
-    if headdim_rt == 64:
-        if causal:
-            run[DType.float16, 64, True]()
-        else:
-            run[DType.float16, 64, False]()
-    elif headdim_rt == 96:
-        if causal:
-            run[DType.float16, 96, True]()
-        else:
-            run[DType.float16, 96, False]()
-    elif headdim_rt == 128:
-        if causal:
-            run[DType.float16, 128, True]()
-        else:
-            run[DType.float16, 128, False]()
-    else:
-        raise Error("currently only supports headdim ∈ {64, 96, 128}")
+    # Comptime expansion: 3 dtypes × 3 headdims × 2 causal = 18 leaves.
+    # The Python wrapper validates these earlier — this is defence in depth.
+    alias N_DTYPES = len(_DTYPES)
+    alias N_HEADDIMS = len(_HEADDIMS)
+    if dtype_code < 0 or dtype_code >= N_DTYPES:
+        raise Error("invalid dtype_code")
+    var dispatched: Bool = False
+
+    @parameter
+    for dt_idx in range(N_DTYPES):
+        alias dt = _DTYPES[dt_idx]
+
+        @parameter
+        for hd_idx in range(N_HEADDIMS):
+            alias hd = _HEADDIMS[hd_idx]
+            if dtype_code == dt_idx and headdim_rt == hd:
+                if causal_rt != 0:
+                    run[dt, hd, True]()
+                else:
+                    run[dt, hd, False]()
+                dispatched = True
+
+    if not dispatched:
+        raise Error(
+            "unsupported (dtype, headdim) — dtype ∈ {fp16, bf16, fp32},"
+            " headdim ∈ {64, 96, 128}"
+        )
 
     return PythonObject(None)
 
@@ -351,26 +357,31 @@ def flash_attn_bwd_cpu(
             dv_d_stride,
         )
 
-    if dtype_code != 0:
-        raise Error("currently only supports dtype=fp16")
-    var causal: Bool = causal_rt != 0
-    if headdim_rt == 64:
-        if causal:
-            run[DType.float16, 64, True]()
-        else:
-            run[DType.float16, 64, False]()
-    elif headdim_rt == 96:
-        if causal:
-            run[DType.float16, 96, True]()
-        else:
-            run[DType.float16, 96, False]()
-    elif headdim_rt == 128:
-        if causal:
-            run[DType.float16, 128, True]()
-        else:
-            run[DType.float16, 128, False]()
-    else:
-        raise Error("currently only supports headdim ∈ {64, 96, 128}")
+    alias N_DTYPES = len(_DTYPES)
+    alias N_HEADDIMS = len(_HEADDIMS)
+    if dtype_code < 0 or dtype_code >= N_DTYPES:
+        raise Error("invalid dtype_code")
+    var dispatched: Bool = False
+
+    @parameter
+    for dt_idx in range(N_DTYPES):
+        alias dt = _DTYPES[dt_idx]
+
+        @parameter
+        for hd_idx in range(N_HEADDIMS):
+            alias hd = _HEADDIMS[hd_idx]
+            if dtype_code == dt_idx and headdim_rt == hd:
+                if causal_rt != 0:
+                    run[dt, hd, True]()
+                else:
+                    run[dt, hd, False]()
+                dispatched = True
+
+    if not dispatched:
+        raise Error(
+            "unsupported (dtype, headdim) — dtype ∈ {fp16, bf16, fp32},"
+            " headdim ∈ {64, 96, 128}"
+        )
 
     return PythonObject(None)
 

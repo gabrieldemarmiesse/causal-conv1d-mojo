@@ -391,11 +391,62 @@ def test_alibi_raises():
         flash_attn_mojo.flash_attn_func(q, k, v, alibi_slopes=slopes)
 
 
-def test_bf16_fp32_raises():
-    q = torch.randn(1, 4, 1, 64, dtype=torch.bfloat16)
+# Phase 1.17: bf16 + fp32 dispatch.
+@pytest.mark.parametrize(
+    "input_dtype,fwd_tol,bwd_tol",
+    [
+        (torch.float16, 5e-3, 1e-2),
+        (torch.bfloat16, 1e-2, 5e-2),  # bf16 has 7 mantissa bits — looser
+        (torch.float32, 5e-5, 5e-4),
+    ],
+    ids=["fp16", "bf16", "fp32"],
+)
+def test_flash_attn_func_dtypes(input_dtype, fwd_tol, bwd_tol):
+    """Forward + backward correctness across fp16 / bf16 / fp32."""
+    batch, seqlen, nheads, headdim = 2, 16, 2, 64
+    q = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=input_dtype, requires_grad=True
+    )
+    k = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=input_dtype, requires_grad=True
+    )
+    v = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=input_dtype, requires_grad=True
+    )
+    dout = torch.randn(batch, seqlen, nheads, headdim, dtype=input_dtype)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=True)
+    ref = _ref_attention(q.detach(), k.detach(), v.detach(), causal=True)
+    assert out.dtype == input_dtype
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < fwd_tol, f"fwd max_diff={diff} ({input_dtype})"
+
+    out.backward(dout)
+    dq_ref, dk_ref, dv_ref = _grads_from_ref(q, k, v, dout, causal=True)
+    for name, got, ref in [
+        ("dq", q.grad, dq_ref),
+        ("dk", k.grad, dk_ref),
+        ("dv", v.grad, dv_ref),
+    ]:
+        diff = (got.float() - ref.float()).abs().max().item()
+        assert diff < bwd_tol, f"{name} max_diff={diff} ({input_dtype})"
+
+
+def test_unsupported_dtype_raises():
+    """fp64 isn't dispatched."""
+    q = torch.randn(1, 4, 1, 64, dtype=torch.float64)
+    k = torch.randn(1, 4, 1, 64, dtype=torch.float64)
+    v = torch.randn(1, 4, 1, 64, dtype=torch.float64)
+    with pytest.raises(NotImplementedError, match="dtype"):
+        flash_attn_mojo.flash_attn_func(q, k, v)
+
+
+def test_mixed_dtype_raises():
+    """q/k/v dtypes must match."""
+    q = torch.randn(1, 4, 1, 64, dtype=torch.float16)
     k = torch.randn(1, 4, 1, 64, dtype=torch.bfloat16)
     v = torch.randn(1, 4, 1, 64, dtype=torch.bfloat16)
-    with pytest.raises(NotImplementedError, match="phase 1.17"):
+    with pytest.raises(ValueError, match="dtype"):
         flash_attn_mojo.flash_attn_func(q, k, v)
 
 

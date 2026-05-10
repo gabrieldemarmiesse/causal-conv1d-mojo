@@ -190,9 +190,13 @@ def flash_attn_func(
             f"nheads_q ({nheads_q}) must be a multiple of nheads_kv "
             f"({nheads_kv}) for MQA/GQA"
         )
-    if q.dtype != torch.float16 or k.dtype != torch.float16 or v.dtype != torch.float16:
+    if q.dtype not in _DTYPE_CODE:
         raise NotImplementedError(
-            "currently only supports fp16; bf16 + fp32 land in phase 1.17"
+            f"unsupported dtype {q.dtype}; supported: fp16, bf16, fp32"
+        )
+    if k.dtype != q.dtype or v.dtype != q.dtype:
+        raise ValueError(
+            f"q, k, v must share dtype (got {q.dtype}, {k.dtype}, {v.dtype})"
         )
     if headdim not in (64, 96, 128):
         raise NotImplementedError(
