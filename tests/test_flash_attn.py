@@ -1476,6 +1476,24 @@ def test_upstream_importable():
 # Cross-check vs upstream flash_attn on GPU. Our impl is CPU-only and
 # fp32-internal, upstream is GPU/fp16 — they should agree within
 # ~5e-3 forward tolerance and ~1e-2 backward tolerance.
+
+
+def _cross_check_grads(
+    out_mojo, out_up, qm, km, vm, qg, kg, vg, dout, fwd_tol, bwd_tol
+):
+    fwd_diff = (out_mojo.float() - out_up.cpu().float()).abs().max().item()
+    assert fwd_diff < fwd_tol, f"fwd max_diff={fwd_diff}"
+    out_mojo.backward(dout)
+    out_up.backward(dout.cuda())
+    for name, mine, theirs in [
+        ("dq", qm.grad, qg.grad.cpu()),
+        ("dk", km.grad, kg.grad.cpu()),
+        ("dv", vm.grad, vg.grad.cpu()),
+    ]:
+        diff = (mine.float() - theirs.float()).abs().max().item()
+        assert diff < bwd_tol, f"{name} max_diff={diff}"
+
+
 @pytest.mark.parametrize("causal", [False, True])
 def test_flash_attn_func_matches_upstream(causal):
     _skip_if_no_upstream()
@@ -1486,28 +1504,124 @@ def test_flash_attn_func_matches_upstream(causal):
     q_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
     k_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
     v_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
-    dout_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    dout = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
 
-    # Ours: CPU.
     qm = q_cpu.clone().requires_grad_(True)
     km = k_cpu.clone().requires_grad_(True)
     vm = v_cpu.clone().requires_grad_(True)
-    out_mojo = flash_attn_mojo.flash_attn_func(qm, km, vm, causal=causal)
-    out_mojo.backward(dout_cpu)
-
-    # Upstream: GPU.
     qg = q_cpu.cuda().clone().requires_grad_(True)
     kg = k_cpu.cuda().clone().requires_grad_(True)
     vg = v_cpu.cuda().clone().requires_grad_(True)
-    out_up = flash_attn.flash_attn_func(qg, kg, vg, causal=causal)
-    out_up.backward(dout_cpu.cuda())
 
-    fwd_diff = (out_mojo.float() - out_up.cpu().float()).abs().max().item()
-    assert fwd_diff < 5e-3, f"forward max_diff={fwd_diff} (causal={causal})"
-    for name, mine, theirs in [
-        ("dq", qm.grad, qg.grad.cpu()),
-        ("dk", km.grad, kg.grad.cpu()),
-        ("dv", vm.grad, vg.grad.cpu()),
-    ]:
-        diff = (mine.float() - theirs.float()).abs().max().item()
-        assert diff < 1e-2, f"{name} max_diff={diff} (causal={causal})"
+    out_mojo = flash_attn_mojo.flash_attn_func(qm, km, vm, causal=causal)
+    out_up = flash_attn.flash_attn_func(qg, kg, vg, causal=causal)
+    _cross_check_grads(out_mojo, out_up, qm, km, vm, qg, kg, vg, dout, 5e-3, 1e-2)
+
+
+@pytest.mark.parametrize("nheads_q,nheads_kv", [(8, 1), (8, 2), (4, 2)])
+def test_flash_attn_func_gqa_matches_upstream(nheads_q, nheads_kv):
+    """GQA against upstream — covers the heads_per_kv broadcast."""
+    _skip_if_no_upstream()
+    _skip_if_unsupported_arch()
+    import flash_attn
+
+    batch, seqlen, headdim = 2, 16, 64
+    q_cpu = torch.randn(batch, seqlen, nheads_q, headdim, dtype=torch.float16)
+    k_cpu = torch.randn(batch, seqlen, nheads_kv, headdim, dtype=torch.float16)
+    v_cpu = torch.randn(batch, seqlen, nheads_kv, headdim, dtype=torch.float16)
+    dout = torch.randn(batch, seqlen, nheads_q, headdim, dtype=torch.float16)
+
+    qm = q_cpu.clone().requires_grad_(True)
+    km = k_cpu.clone().requires_grad_(True)
+    vm = v_cpu.clone().requires_grad_(True)
+    qg = q_cpu.cuda().clone().requires_grad_(True)
+    kg = k_cpu.cuda().clone().requires_grad_(True)
+    vg = v_cpu.cuda().clone().requires_grad_(True)
+
+    out_mojo = flash_attn_mojo.flash_attn_func(qm, km, vm, causal=True)
+    out_up = flash_attn.flash_attn_func(qg, kg, vg, causal=True)
+    _cross_check_grads(out_mojo, out_up, qm, km, vm, qg, kg, vg, dout, 5e-3, 1e-2)
+
+
+@pytest.mark.parametrize("window", [(4, 0), (3, 3)])
+def test_flash_attn_func_window_matches_upstream(window):
+    """Sliding window vs upstream."""
+    _skip_if_no_upstream()
+    _skip_if_unsupported_arch()
+    import flash_attn
+
+    batch, seqlen, nheads, headdim = 1, 16, 2, 64
+    q_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    dout = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    qm = q_cpu.clone().requires_grad_(True)
+    km = k_cpu.clone().requires_grad_(True)
+    vm = v_cpu.clone().requires_grad_(True)
+    qg = q_cpu.cuda().clone().requires_grad_(True)
+    kg = k_cpu.cuda().clone().requires_grad_(True)
+    vg = v_cpu.cuda().clone().requires_grad_(True)
+
+    out_mojo = flash_attn_mojo.flash_attn_func(
+        qm, km, vm, causal=True, window_size=window
+    )
+    out_up = flash_attn.flash_attn_func(qg, kg, vg, causal=True, window_size=window)
+    _cross_check_grads(out_mojo, out_up, qm, km, vm, qg, kg, vg, dout, 5e-3, 1e-2)
+
+
+def test_flash_attn_func_alibi_matches_upstream():
+    """ALiBi bias vs upstream."""
+    _skip_if_no_upstream()
+    _skip_if_unsupported_arch()
+    import flash_attn
+
+    batch, seqlen, nheads, headdim = 1, 16, 4, 64
+    q_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    dout = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    slopes = torch.tensor([0.5, 0.25, 0.125, 0.0625], dtype=torch.float32)
+
+    qm = q_cpu.clone().requires_grad_(True)
+    km = k_cpu.clone().requires_grad_(True)
+    vm = v_cpu.clone().requires_grad_(True)
+    qg = q_cpu.cuda().clone().requires_grad_(True)
+    kg = k_cpu.cuda().clone().requires_grad_(True)
+    vg = v_cpu.cuda().clone().requires_grad_(True)
+
+    out_mojo = flash_attn_mojo.flash_attn_func(
+        qm, km, vm, causal=True, alibi_slopes=slopes
+    )
+    out_up = flash_attn.flash_attn_func(
+        qg, kg, vg, causal=True, alibi_slopes=slopes.cuda()
+    )
+    _cross_check_grads(out_mojo, out_up, qm, km, vm, qg, kg, vg, dout, 5e-3, 1e-2)
+
+
+def test_flash_attn_with_kvcache_matches_upstream():
+    """Decode against a kv cache vs upstream."""
+    _skip_if_no_upstream()
+    _skip_if_unsupported_arch()
+    import flash_attn
+
+    batch, seqlen_q, nheads, headdim = 2, 1, 2, 64
+    seqlen_kmax = 32
+    cache_seqlens = torch.tensor([7, 11], dtype=torch.int32)
+
+    q_cpu = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    kc_cpu = torch.randn(batch, seqlen_kmax, nheads, headdim, dtype=torch.float16)
+    vc_cpu = torch.randn(batch, seqlen_kmax, nheads, headdim, dtype=torch.float16)
+
+    out_mojo = flash_attn_mojo.flash_attn_with_kvcache(
+        q_cpu, kc_cpu.clone(), vc_cpu.clone(), cache_seqlens=cache_seqlens, causal=True
+    )
+    out_up = flash_attn.flash_attn_with_kvcache(
+        q_cpu.cuda(),
+        kc_cpu.cuda(),
+        vc_cpu.cuda(),
+        cache_seqlens=cache_seqlens.cuda(),
+        causal=True,
+    )
+    diff = (out_mojo.float() - out_up.cpu().float()).abs().max().item()
+    assert diff < 5e-3, f"max_diff={diff}"
