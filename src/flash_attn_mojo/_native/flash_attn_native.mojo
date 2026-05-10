@@ -78,6 +78,7 @@ def flash_attn_fwd_cpu(
         35 cache_seqlens_addr (int) — int32 ptr (B,); 0 means "no
             kvcache, use seqlen_k for all batches".
         36 softcap (float) — Gemma2-style logit cap; 0.0 disables.
+        37 cache_batch_idx_addr (int) — int32 ptr (B,); 0 disables.
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -121,9 +122,11 @@ def flash_attn_fwd_cpu(
     var dropout_addr: Int = Int(py=args[34])
     var cache_seqlens_addr: Int = Int(py=args[35])
     var softcap_rt: Float32 = Float32(py=args[36])
+    var cache_batch_idx_addr: Int = Int(py=args[37])
     var has_alibi: Bool = alibi_addr != 0
     var has_dropout: Bool = dropout_addr != 0
     var has_cache_seqlens: Bool = cache_seqlens_addr != 0
+    var has_cache_batch_idx: Bool = cache_batch_idx_addr != 0
 
     if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
         return PythonObject(None)
@@ -162,6 +165,9 @@ def flash_attn_fwd_cpu(
         var cache_seqlens_ptr = UnsafePointer[Int32, MutAnyOrigin](
             unsafe_from_address=cache_seqlens_addr
         )
+        var cache_batch_idx_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=cache_batch_idx_addr
+        )
         fwd_kernel_cpu[dtype, headdim, causal](
             batch_int,
             seqlen_q_int,
@@ -178,6 +184,8 @@ def flash_attn_fwd_cpu(
             dropout_ptr,
             has_cache_seqlens,
             cache_seqlens_ptr,
+            has_cache_batch_idx,
+            cache_batch_idx_ptr,
             softcap_rt,
             q_ptr,
             k_ptr,
@@ -395,6 +403,8 @@ def flash_attn_bwd_cpu(
             alibi_ptr,
             has_dropout,
             dropout_ptr,
+            False,
+            cache_seqlens_dummy,
             False,
             cache_seqlens_dummy,
             softcap_rt,

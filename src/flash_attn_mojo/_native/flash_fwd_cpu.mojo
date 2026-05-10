@@ -65,6 +65,11 @@ fn fwd_kernel_cpu[
     # [0, cache_seqlens_ptr[b]).
     has_cache_seqlens: Bool,
     cache_seqlens_ptr: UnsafePointer[Int32, MutAnyOrigin],
+    # Optional indirection from q's batch axis to the kv-cache batch
+    # axis. When True, q[b] reads k_cache[cache_batch_idx_ptr[b]] /
+    # v_cache[cache_batch_idx_ptr[b]] instead of k_cache[b] / v_cache[b].
+    has_cache_batch_idx: Bool,
+    cache_batch_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     # Logit softcap (Gemma2-style). Zero disables; positive c replaces
     # `score` with `c * tanh(score / c)` before alibi/mask/softmax.
     softcap: Float32,
@@ -126,12 +131,17 @@ fn fwd_kernel_cpu[
         # GQA: each KV head is shared by `heads_per_kv` consecutive Q heads.
         var h_kv = h_q // heads_per_kv
 
+        # KV batch index — same as q's `b` unless cache_batch_idx redirects.
+        var b_kv: Int = b
+        if has_cache_batch_idx:
+            b_kv = Int(cache_batch_idx_ptr[b])
+
         var q_base = b * q_b_stride + q_idx * q_s_stride + h_q * q_h_stride
         var out_base = (
             b * out_b_stride + q_idx * out_s_stride + h_q * out_h_stride
         )
-        var k_b_h_base = b * k_b_stride + h_kv * k_h_stride
-        var v_b_h_base = b * v_b_stride + h_kv * v_h_stride
+        var k_b_h_base = b_kv * k_b_stride + h_kv * k_h_stride
+        var v_b_h_base = b_kv * v_b_stride + h_kv * v_h_stride
 
         # Load q vector into fp32 registers once.
         var q_vec = SIMD[accum_t, headdim](0)

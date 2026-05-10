@@ -56,6 +56,8 @@ fn bwd_kernel_cpu[
     # the dispatcher can stay symmetric. Pass `False` and a dummy ptr.
     has_cache_seqlens: Bool,
     cache_seqlens_ptr: UnsafePointer[Int32, MutAnyOrigin],
+    has_cache_batch_idx: Bool,
+    cache_batch_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     # Logit softcap (Gemma2-style); 0 disables.
     softcap: Float32,
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],

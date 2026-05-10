@@ -934,6 +934,52 @@ def test_flash_attn_with_kvcache_rotary_raises():
         flash_attn_mojo.flash_attn_with_kvcache(q, kc, vc, rotary_cos=cos)
 
 
+# Phase 1.15: cache_batch_idx — beam-search-style indirection.
+def test_flash_attn_with_kvcache_cache_batch_idx():
+    """Each q batch row reads k_cache[cache_batch_idx[b]] / v_cache[...]
+    instead of k_cache[b]. Useful for beam search where multiple beams
+    share the same kv state."""
+    cache_batch, q_batch = 4, 6
+    seqlen_q, nheads_q, nheads_kv, headdim = 1, 2, 1, 64
+    seqlen_kmax = 16
+
+    # Pre-populate the cache (only `cache_batch` slots).
+    k_cache = torch.randn(
+        cache_batch, seqlen_kmax, nheads_kv, headdim, dtype=torch.float16
+    )
+    v_cache = torch.randn(
+        cache_batch, seqlen_kmax, nheads_kv, headdim, dtype=torch.float16
+    )
+    cache_seqlens = torch.tensor([5, 8, 3, 11], dtype=torch.int32)
+
+    # 6 q rows that point to slots [0, 1, 2, 0, 3, 1] of the cache.
+    cbi = torch.tensor([0, 1, 2, 0, 3, 1], dtype=torch.int32)
+    q = torch.randn(q_batch, seqlen_q, nheads_q, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_with_kvcache(
+        q,
+        k_cache,
+        v_cache,
+        cache_seqlens=cache_seqlens[cbi],  # per-q-row valid length
+        cache_batch_idx=cbi,
+        causal=True,
+    )
+
+    # Reference: for each q row b, attend to k_cache[cbi[b], :cache_seqlens[cbi[b]]].
+    repeat = nheads_q // nheads_kv
+    for b in range(q_batch):
+        slot = int(cbi[b].item())
+        n = int(cache_seqlens[slot].item())
+        ref = _ref_attention(
+            q[b : b + 1],
+            k_cache[slot : slot + 1, :n].repeat_interleave(repeat, dim=2),
+            v_cache[slot : slot + 1, :n].repeat_interleave(repeat, dim=2),
+            causal=True,
+        )
+        diff = (out[b].float() - ref[0].float()).abs().max().item()
+        assert diff < 5e-3, f"q row {b} (slot {slot}): max_diff={diff}"
+
+
 def test_flash_attn_with_kvcache_paged_raises():
     q = torch.randn(1, 1, 1, 64, dtype=torch.float16)
     kc = torch.zeros(1, 4, 1, 64, dtype=torch.float16)

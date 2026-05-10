@@ -88,11 +88,15 @@ def _native_fwd_cpu(
     dropout_mask,
     cache_seqlens=None,
     softcap=0.0,
+    cache_batch_idx=None,
 ):
     alibi_t, alibi_stride = _normalise_alibi(alibi, q.shape[2], q.shape[0])
     alibi_addr = alibi_t.data_ptr() if alibi_t is not None else 0
     dropout_addr = dropout_mask.data_ptr() if dropout_mask is not None else 0
     cache_seqlens_addr = cache_seqlens.data_ptr() if cache_seqlens is not None else 0
+    cache_batch_idx_addr = (
+        cache_batch_idx.data_ptr() if cache_batch_idx is not None else 0
+    )
     _native_mod.flash_attn_fwd_cpu(
         q.data_ptr(),
         k.data_ptr(),
@@ -119,6 +123,7 @@ def _native_fwd_cpu(
         dropout_addr,
         cache_seqlens_addr,
         float(softcap),
+        cache_batch_idx_addr,
     )
 
 
@@ -445,11 +450,7 @@ def flash_attn_with_kvcache(
             "rotary embedding inside flash_attn_with_kvcache is not yet"
             " implemented — phase 1.14"
         )
-    if cache_batch_idx is not None:
-        raise NotImplementedError(
-            "cache_batch_idx (indexed kv-cache slots) is not yet"
-            " implemented — phase 1.15"
-        )
+    # cache_batch_idx is validated below after we know nheads.
     if block_table is not None:
         raise NotImplementedError(
             "paged kv-cache (block_table) is not yet implemented — phase 1.16"
@@ -472,10 +473,16 @@ def flash_attn_with_kvcache(
             f"got {tuple(q.shape)}, {tuple(k_cache.shape)}, {tuple(v_cache.shape)}"
         )
     batch, seqlen_q, nheads_q, headdim = q.shape
+    cache_batch = k_cache.shape[0]  # may differ from q's batch under cache_batch_idx
     seqlen_kmax = k_cache.shape[1]
     nheads_kv = k_cache.shape[2]
-    if k_cache.shape != (batch, seqlen_kmax, nheads_kv, headdim):
+    if k_cache.shape != (cache_batch, seqlen_kmax, nheads_kv, headdim):
         raise ValueError(f"k_cache shape {tuple(k_cache.shape)} doesn't match expected")
+    if cache_batch_idx is None and cache_batch != batch:
+        raise ValueError(
+            f"k_cache batch ({cache_batch}) must match q batch ({batch}) when "
+            f"cache_batch_idx is not provided"
+        )
     if v_cache.shape != k_cache.shape:
         raise ValueError(
             f"v_cache shape {tuple(v_cache.shape)} must match k_cache shape"
@@ -509,6 +516,17 @@ def flash_attn_with_kvcache(
             )
         cs = cache_seqlens.to(torch.int32).contiguous()
 
+    # Resolve cache_batch_idx (optional). When set, q[b] reads
+    # k_cache[cache_batch_idx[b]] / v_cache[cache_batch_idx[b]].
+    cbi = None
+    if cache_batch_idx is not None:
+        if cache_batch_idx.shape != (batch,):
+            raise ValueError(
+                f"cache_batch_idx shape {tuple(cache_batch_idx.shape)} must "
+                f"be ({batch},)"
+            )
+        cbi = cache_batch_idx.to(torch.int32).contiguous()
+
     # Optionally append new tokens to the cache.
     if (k is None) != (v is None):
         raise ValueError("k and v must be provided together (or neither)")
@@ -520,13 +538,14 @@ def flash_attn_with_kvcache(
             )
         for b in range(batch):
             n = int(cs[b].item())
+            slot = int(cbi[b].item()) if cbi is not None else b
             if n + seqlen_q > seqlen_kmax:
                 raise ValueError(
                     f"batch {b}: cache_seqlens[{b}]={n} + seqlen_q={seqlen_q} "
                     f"exceeds seqlen_kmax={seqlen_kmax}"
                 )
-            k_cache[b, n : n + seqlen_q] = k[b]
-            v_cache[b, n : n + seqlen_q] = v[b]
+            k_cache[slot, n : n + seqlen_q] = k[b]
+            v_cache[slot, n : n + seqlen_q] = v[b]
         cs = cs + seqlen_q  # effective valid k length now includes new tokens
 
     if softmax_scale is None:
@@ -549,5 +568,6 @@ def flash_attn_with_kvcache(
         None,  # no dropout in kvcache path
         cs,
         softcap=float(softcap),
+        cache_batch_idx=cbi,
     )
     return out
