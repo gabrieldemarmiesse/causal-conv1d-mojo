@@ -3,12 +3,25 @@
 Mirrors upstream's `causal_conv1d_fwd.cu`. The launcher lives in
 `causal_conv1d_native.mojo` (the dispatcher); this file holds only
 the kernel itself.
+
+Refactored to use `TileTensor` at the kernel boundary for the three
+main tensors (x, weight, output). Each gets its own comptime
+`LayoutType: TensorLayout` — the dispatcher picks the LayoutType
+based on whether the relevant innermost stride is 1 (the
+"contig_inner" fast path). When stride=1 is baked into the Layout
+via `Idx[1]()`, LLVM folds out the inner-stride multiply just like
+the previous hand-written `@parameter if contig_inner` branches.
+
+Bias / seq_idx / initial_states stay as raw pointers — bias is 1-D
+(no stride to worry about), and seq_idx / initial_states are rarely
+used in the perf-critical path.
 """
 
 from std.gpu import (
     block_idx_int as block_idx,
     thread_idx_int as thread_idx,
 )
+from layout import TileTensor, TensorLayout
 
 from causal_conv1d_common import _silu_f32, kNElts, kNThreads
 
@@ -20,36 +33,29 @@ fn fwd_kernel[
     has_seq_idx: Bool,
     has_initial_states: Bool,
     apply_silu: Bool,
-    contig_inner: Bool,
+    XLayoutType: TensorLayout,
+    WLayoutType: TensorLayout,
+    OLayoutType: TensorLayout,
 ](
     seqlen: Int,
-    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
+    weight: TileTensor[dtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    x_batch_stride: Int,
-    x_c_stride: Int,
-    x_l_stride: Int,
-    weight_c_stride: Int,
-    weight_w_stride: Int,
+    output: TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin],
     seq_idx_b_stride: Int,
     seq_idx_l_stride: Int,
     initial_states_b_stride: Int,
     initial_states_c_stride: Int,
     initial_states_l_stride: Int,
-    out_batch_stride: Int,
-    out_c_stride: Int,
-    out_l_stride: Int,
 ):
     """Causal conv1d forward, GPU.
 
-    `contig_inner` is the comptime fast path: when True, the innermost
-    axes of x / weight / out have stride=1 and we drop the
-    `* x_l_stride` / `* weight_w_stride` / `* out_l_stride` multiplies
-    so the compiler can constant-fold the index math (~2× kernel time
-    on memory-bound shapes if we don't).
+    The comptime fast path "innermost stride == 1" is now encoded by
+    the dispatcher in the Layout types of `x`, `weight`, `output`: when
+    the inner stride slot is `Idx[1]()`, the multiply is folded out at
+    compile time.
 
     `has_seq_idx`: when True, `seq_idx_ptr` is a `(B, L)` int32 tensor of
     sequence ids. For each output position `t`, historical reads from
@@ -71,19 +77,16 @@ fn fwd_kernel[
     var channel_id: Int = block_idx.y
     var chunk_id: Int = block_idx.x
 
+    # LayoutTensor views for indexed access (read in the inner loop).
+    var x_lt = x.to_layout_tensor()
+    var w_lt = weight.to_layout_tensor()
+    var o_lt = output.to_layout_tensor()
+
     var weights = InlineArray[Scalar[accum_t], width](uninitialized=True)
-    var weight_base = channel_id * weight_c_stride
 
     @parameter
     for k in range(width):
-
-        @parameter
-        if contig_inner:
-            weights[k] = weight_ptr[weight_base + k].cast[accum_t]()
-        else:
-            weights[k] = weight_ptr[weight_base + k * weight_w_stride].cast[
-                accum_t
-            ]()
+        weights[k] = rebind[Scalar[dtype]](w_lt[channel_id, k]).cast[accum_t]()
 
     var cur_bias: Scalar[accum_t] = 0
 
@@ -95,8 +98,6 @@ fn fwd_kernel[
     if seq_start >= seqlen:
         return
 
-    var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
-    var out_base = batch_id * out_batch_stride + channel_id * out_c_stride
     var seq_idx_base: Int = batch_id * seq_idx_b_stride
     var initial_states_base: Int = (
         batch_id * initial_states_b_stride
@@ -121,12 +122,9 @@ fn fwd_kernel[
             var src_t = t + k - (width - 1)
             var val: Scalar[accum_t] = 0
             if src_t >= 0:
-
-                @parameter
-                if contig_inner:
-                    val = x_ptr[x_base + src_t].cast[accum_t]()
-                else:
-                    val = x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
+                val = rebind[Scalar[dtype]](
+                    x_lt[batch_id, channel_id, src_t]
+                ).cast[accum_t]()
 
                 @parameter
                 if has_seq_idx:
@@ -158,8 +156,4 @@ fn fwd_kernel[
             if cur_id < 0:
                 acc = 0
 
-        @parameter
-        if contig_inner:
-            output_ptr[out_base + t] = acc.cast[dtype]()
-        else:
-            output_ptr[out_base + t * out_l_stride] = acc.cast[dtype]()
+        o_lt[batch_id, channel_id, t] = acc.cast[dtype]()
