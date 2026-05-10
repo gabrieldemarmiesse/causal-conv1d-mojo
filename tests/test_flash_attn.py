@@ -196,11 +196,29 @@ def test_flash_attn_func_causal_q_longer_than_k():
 # ---- "still raises" tests for features not yet implemented ----
 
 
-def test_headdim_other_than_64_raises():
-    q = torch.randn(1, 4, 1, 128, dtype=torch.float16)
-    k = torch.randn(1, 4, 1, 128, dtype=torch.float16)
-    v = torch.randn(1, 4, 1, 128, dtype=torch.float16)
-    with pytest.raises(NotImplementedError, match="phase 1.3"):
+# Phase 1.3: headdim ∈ {64, 96, 128} — the three most common GQA sizes.
+@pytest.mark.parametrize("headdim", [64, 96, 128])
+@pytest.mark.parametrize("causal", [False, True])
+def test_flash_attn_func_headdim(headdim, causal):
+    """Correctness for all three supported headdim values, both causal modes."""
+    batch, seqlen, nheads = 2, 16, 2
+    q = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=causal)
+    ref = _ref_attention(q, k, v, causal=causal)
+
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < 5e-3, f"max_diff={diff} (headdim={headdim}, causal={causal})"
+
+
+def test_unsupported_headdim_raises():
+    """headdim=32 (and 160/192/224/256) aren't dispatched yet."""
+    q = torch.randn(1, 4, 1, 32, dtype=torch.float16)
+    k = torch.randn(1, 4, 1, 32, dtype=torch.float16)
+    v = torch.randn(1, 4, 1, 32, dtype=torch.float16)
+    with pytest.raises(NotImplementedError, match="headdim"):
         flash_attn_mojo.flash_attn_func(q, k, v)
 
 

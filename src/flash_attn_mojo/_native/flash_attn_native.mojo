@@ -143,16 +143,29 @@ def flash_attn_fwd_cpu(
             o_d_stride,
         )
 
-    # Currently only fp16 + headdim=64. Other (dtype, headdim) combos
-    # raise and the Python wrapper catches them earlier — this is a
+    # Currently only fp16; headdim ∈ {64, 96, 128}. Other combos raise
+    # and the Python wrapper catches them earlier — this is a
     # defence-in-depth check.
-    if dtype_code == 0 and headdim_rt == 64:
-        if causal_rt != 0:
+    if dtype_code != 0:
+        raise Error("currently only supports dtype=fp16")
+    var causal: Bool = causal_rt != 0
+    if headdim_rt == 64:
+        if causal:
             run[DType.float16, 64, True]()
         else:
             run[DType.float16, 64, False]()
+    elif headdim_rt == 96:
+        if causal:
+            run[DType.float16, 96, True]()
+        else:
+            run[DType.float16, 96, False]()
+    elif headdim_rt == 128:
+        if causal:
+            run[DType.float16, 128, True]()
+        else:
+            run[DType.float16, 128, False]()
     else:
-        raise Error("currently only supports dtype=fp16 and headdim=64")
+        raise Error("currently only supports headdim ∈ {64, 96, 128}")
 
     return PythonObject(None)
 

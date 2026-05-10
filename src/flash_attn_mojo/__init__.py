@@ -8,7 +8,8 @@ Tri Dao `flash-attn` 2.x public API. Three entry points planned:
 - ``flash_attn_with_kvcache(q, k_cache, v_cache, ...)``   — autoregressive decode with KV-cache.
 
 Phase 1.x (current): minimal CPU forward for ``flash_attn_func`` —
-fp16, headdim=64, MHA (causal optional). Everything else still raises.
+fp16, headdim ∈ {64, 96, 128}, MHA (causal optional). Everything
+else still raises.
 
 Tests compare correctness against the upstream ``flash_attn`` PyPI
 package (pinned to a prebuilt wheel via pyproject.toml).
@@ -131,10 +132,12 @@ def flash_attn_func(
         raise NotImplementedError(
             "phase 1.1 only supports fp16; bf16 + fp32 land in phase 1.17"
         )
-    if headdim != 64:
+    if headdim not in (64, 96, 128):
         raise NotImplementedError(
-            f"phase 1.1 only supports headdim=64 (got {headdim}); "
-            f"96 + 128 land in phase 1.3"
+            f"currently only supports headdim ∈ (64, 96, 128); got {headdim}. "
+            f"Other sizes (32, 160, 192, 224, 256) are upstream-supported "
+            f"and can be added by extending the dispatch tree in "
+            f"_native/flash_attn_native.mojo."
         )
     if q.device != k.device or q.device != v.device:
         raise ValueError(
