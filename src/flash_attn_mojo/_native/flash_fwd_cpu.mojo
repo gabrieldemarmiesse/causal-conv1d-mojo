@@ -48,6 +48,11 @@ fn fwd_kernel_cpu[
     # on that side, 0+ means a finite window of that many tokens).
     window_left: Int,
     window_right: Int,
+    # ALiBi bias: bias_ij = -alibi_slope[b,h] * |pos - j|. NULL ptr
+    # (and zero strides) disables the bias.
+    has_alibi: Bool,
+    alibi_b_stride: Int,
+    alibi_ptr: UnsafePointer[Float32, MutAnyOrigin],
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -123,6 +128,11 @@ fn fwd_kernel_cpu[
         for d in range(headdim):
             q_vec[d] = q_ptr[q_base + d * q_d_stride].cast[accum_t]()
 
+        # ALiBi slope for this (b, h_q) row.
+        var alibi_slope: Float32 = 0
+        if has_alibi:
+            alibi_slope = alibi_ptr[b * alibi_b_stride + h_q]
+
         # Online softmax state.
         var m: Float32 = neg_inf
         var l: Float32 = 0
@@ -180,6 +190,12 @@ fn fwd_kernel_cpu[
                     q_vec[d] * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
                 )
             score *= softmax_scale
+            if has_alibi:
+                # bias = -slope * |pos - kj|, distance is non-negative.
+                var dist = pos - kj
+                if dist < 0:
+                    dist = -dist
+                score -= alibi_slope * Float32(dist)
 
             var m_new = max(m, score)
             var alpha = exp(m - m_new)

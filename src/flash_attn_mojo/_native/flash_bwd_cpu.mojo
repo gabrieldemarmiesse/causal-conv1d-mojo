@@ -46,6 +46,9 @@ fn bwd_kernel_cpu[
     softmax_scale: Float32,
     window_left: Int,
     window_right: Int,
+    has_alibi: Bool,
+    alibi_b_stride: Int,
+    alibi_ptr: UnsafePointer[Float32, MutAnyOrigin],
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -169,6 +172,11 @@ fn bwd_kernel_cpu[
         for d in range(headdim):
             D_i += do_vec[d] * o_vec[d]
 
+        # ALiBi slope for this (b, h_q) row (zero when not active).
+        var alibi_slope_a: Float32 = 0
+        if has_alibi:
+            alibi_slope_a = alibi_ptr[b * alibi_b_stride + h_q]
+
         # Accumulate dQ row.
         var dq_acc = SIMD[accum_t, headdim](0)
 
@@ -184,6 +192,11 @@ fn bwd_kernel_cpu[
                     q_vec[d] * k_ptr[k_base + d * k_d_stride].cast[accum_t]()
                 )
             s *= softmax_scale
+            if has_alibi:
+                var dist = pos - kj
+                if dist < 0:
+                    dist = -dist
+                s -= alibi_slope_a * Float32(dist)
             var p = exp(s - lse)
 
             # dP_j = dO · V_j
@@ -270,8 +283,12 @@ fn bwd_kernel_cpu[
         for h_off in range(heads_per_kv):
             var h_q = h_kv * heads_per_kv + h_off
 
-            for q_idx in range(q_lo, q_hi):
+            # Per-head ALiBi slope (zero when disabled).
+            var alibi_slope_b: Float32 = 0
+            if has_alibi:
+                alibi_slope_b = alibi_ptr[b * alibi_b_stride + h_q]
 
+            for q_idx in range(q_lo, q_hi):
                 var q_base = (
                     b * q_b_stride + q_idx * q_s_stride + h_q * q_h_stride
                 )
@@ -292,7 +309,7 @@ fn bwd_kernel_cpu[
                 if lse == neg_inf:
                     continue
 
-                # s = q · k * scale, P = exp(s - lse)
+                # s = q · k * scale + (-alibi * |pos - k_idx|), P = exp(s - lse)
                 var s: Float32 = 0
 
                 @parameter
@@ -302,6 +319,12 @@ fn bwd_kernel_cpu[
                         * k_vec[d]
                     )
                 s *= softmax_scale
+                if has_alibi:
+                    var pos = seq_offset + q_idx
+                    var dist = pos - k_idx
+                    if dist < 0:
+                        dist = -dist
+                    s -= alibi_slope_b * Float32(dist)
                 var p = exp(s - lse)
 
                 # dP = dO · V_j ; D_i = dO · O_i

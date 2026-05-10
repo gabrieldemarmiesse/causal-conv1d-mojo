@@ -44,7 +44,40 @@ def _strides_4d(t):
     return (t.stride(0), t.stride(1), t.stride(2), t.stride(3))
 
 
-def _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window):
+def _normalise_alibi(alibi_slopes, nheads_q, batch):
+    """Return a contiguous fp32 alibi tensor (or None) — the kernel reads
+    it as a flat fp32 buffer indexed by `b * batch_stride + h_q`.
+
+    Caller must hold the returned tensor alive for the duration of the
+    native call so its storage isn't freed.
+    """
+    if alibi_slopes is None:
+        return None, 0
+    if alibi_slopes.dtype != torch.float32:
+        raise ValueError(f"alibi_slopes must be fp32 (got {alibi_slopes.dtype})")
+    a = alibi_slopes.contiguous()
+    if a.dim() == 1:
+        if a.shape[0] != nheads_q:
+            raise ValueError(
+                f"alibi_slopes shape {tuple(a.shape)} doesn't match nheads_q={nheads_q}"
+            )
+        return a, 0
+    if a.dim() == 2:
+        if a.shape != (batch, nheads_q):
+            raise ValueError(
+                f"alibi_slopes shape {tuple(a.shape)} doesn't match "
+                f"(batch={batch}, nheads_q={nheads_q})"
+            )
+        return a, a.shape[1]
+    raise ValueError(
+        f"alibi_slopes must be 1-D (nheads,) or 2-D (batch, nheads); "
+        f"got shape {tuple(a.shape)}"
+    )
+
+
+def _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window, alibi):
+    alibi_t, alibi_stride = _normalise_alibi(alibi, q.shape[2], q.shape[0])
+    alibi_addr = alibi_t.data_ptr() if alibi_t is not None else 0
     _native_mod.flash_attn_fwd_cpu(
         q.data_ptr(),
         k.data_ptr(),
@@ -66,10 +99,16 @@ def _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window):
         1 if causal else 0,
         int(window[0]),
         int(window[1]),
+        alibi_addr,
+        alibi_stride,
     )
 
 
-def _native_bwd_cpu(q, k, v, out, dout, lse, dq, dk, dv, softmax_scale, causal, window):
+def _native_bwd_cpu(
+    q, k, v, out, dout, lse, dq, dk, dv, softmax_scale, causal, window, alibi
+):
+    alibi_t, alibi_stride = _normalise_alibi(alibi, q.shape[2], q.shape[0])
+    alibi_addr = alibi_t.data_ptr() if alibi_t is not None else 0
     _native_mod.flash_attn_bwd_cpu(
         q.data_ptr(),
         k.data_ptr(),
@@ -99,6 +138,8 @@ def _native_bwd_cpu(q, k, v, out, dout, lse, dq, dk, dv, softmax_scale, causal, 
         1 if causal else 0,
         int(window[0]),
         int(window[1]),
+        alibi_addr,
+        alibi_stride,
     )
 
 
@@ -106,17 +147,18 @@ class _FlashAttnFunc(torch.autograd.Function):
     """torch.autograd.Function wrapping the native fwd/bwd calls."""
 
     @staticmethod
-    def forward(ctx, q, k, v, softmax_scale, causal, window):
+    def forward(ctx, q, k, v, softmax_scale, causal, window, alibi):
         out = torch.empty_like(q)
         # lse is fp32, shape (batch, nheads_q, seqlen_q), contiguous.
         lse = torch.empty(
             q.shape[0], q.shape[2], q.shape[1], dtype=torch.float32, device=q.device
         )
-        _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window)
+        _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window, alibi)
         ctx.save_for_backward(q, k, v, out, lse)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window = window
+        ctx.alibi = alibi
         return out
 
     @staticmethod
@@ -140,10 +182,11 @@ class _FlashAttnFunc(torch.autograd.Function):
             ctx.softmax_scale,
             ctx.causal,
             ctx.window,
+            ctx.alibi,
         )
-        # 6 forward inputs: q, k, v, softmax_scale, causal, window —
+        # 7 forward inputs: q, k, v, softmax_scale, causal, window, alibi —
         # gradients only flow through the first three.
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, None, None, None, None
 
 
 def flash_attn_func(
@@ -176,8 +219,8 @@ def flash_attn_func(
         or not all(isinstance(w, int) for w in window_size)
     ):
         raise ValueError(f"window_size must be a 2-tuple of ints; got {window_size!r}")
-    if alibi_slopes is not None:
-        raise NotImplementedError("alibi_slopes is not implemented yet — phase 1.10")
+    # alibi_slopes is validated lazily inside _normalise_alibi (so we can
+    # reuse the validation in the bwd path).
     # `deterministic` is a no-op: the CPU backward already writes dQ/dK/dV
     # from disjoint workers (pass A over q rows, pass B over k rows), so
     # there's no nondeterminism source to suppress. Accept the kwarg for
@@ -237,7 +280,9 @@ def flash_attn_func(
             "currently CPU-only; GPU forward lands in a later 1.x step"
         )
 
-    return _FlashAttnFunc.apply(q, k, v, softmax_scale, causal, window_size)
+    return _FlashAttnFunc.apply(
+        q, k, v, softmax_scale, causal, window_size, alibi_slopes
+    )
 
 
 def flash_attn_qkvpacked_func(

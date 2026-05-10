@@ -59,7 +59,9 @@ def dtype(request):
     return request.param
 
 
-def _ref_attention(q, k, v, softmax_scale=None, causal=False, window=(-1, -1)):
+def _ref_attention(
+    q, k, v, softmax_scale=None, causal=False, window=(-1, -1), alibi=None
+):
     """Reference scaled-dot-product attention computed in fp32.
 
     q/k/v are (B, S, H, D) — the same layout flash_attn_func uses.
@@ -69,7 +71,8 @@ def _ref_attention(q, k, v, softmax_scale=None, causal=False, window=(-1, -1)):
     `flash_attn_func`: q_i attends to k_j iff j <= (Sk - Sq) + i.
     Sliding window: q_i attends to k_j iff j ∈ [pos-left, pos+right]
     where pos = (Sk - Sq) + i. left/right < 0 means "no bound" on
-    that side.
+    that side. ALiBi: bias_ij = -slope[h] * |pos - j|, slope is
+    fp32 (nheads,) or (batch, nheads).
     """
     import math
 
@@ -84,6 +87,14 @@ def _ref_attention(q, k, v, softmax_scale=None, causal=False, window=(-1, -1)):
     i = torch.arange(sq).unsqueeze(1)
     j = torch.arange(sk).unsqueeze(0)
     pos = (sk - sq) + i
+    if alibi is not None:
+        # broadcast slope to (B, H, 1, 1)
+        slope = alibi.to(torch.float32)
+        if slope.dim() == 1:
+            slope = slope[None, :]  # (1, H)
+        slope = slope[..., None, None]  # (B|1, H, 1, 1)
+        dist = (pos - j).abs().to(torch.float32)  # (sq, sk)
+        scores = scores - slope * dist
     allowed = torch.ones_like(scores[0, 0], dtype=torch.bool)
     if causal:
         allowed = allowed & (j <= pos)
@@ -481,13 +492,78 @@ def test_window_size_bad_shape_raises():
         flash_attn_mojo.flash_attn_func(q, q, q, window_size=(1, 2, 3))
 
 
-def test_alibi_raises():
-    q = torch.randn(1, 4, 1, 64, dtype=torch.float16)
-    k = torch.randn(1, 4, 1, 64, dtype=torch.float16)
-    v = torch.randn(1, 4, 1, 64, dtype=torch.float16)
-    slopes = torch.zeros(1, dtype=torch.float32)
-    with pytest.raises(NotImplementedError, match="phase 1.10"):
-        flash_attn_mojo.flash_attn_func(q, k, v, alibi_slopes=slopes)
+# Phase 1.10: ALiBi bias.
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("per_batch", [False, True])
+def test_flash_attn_func_alibi(causal, per_batch):
+    """ALiBi-biased attention matches the reference.
+
+    Bias: -alibi_slope[h] * |pos - k_idx|, where pos = (sk - sq) + q_idx.
+    """
+    batch, seqlen, nheads, headdim = 2, 16, 4, 64
+    q = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    k = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    v = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    dout = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    # Standard ALiBi slopes for 4 heads: powers of 1/2 (positive).
+    slopes_1d = torch.tensor([0.5, 0.25, 0.125, 0.0625], dtype=torch.float32)
+    slopes = (
+        slopes_1d.unsqueeze(0).expand(batch, -1).contiguous()
+        if per_batch
+        else slopes_1d
+    )
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=causal, alibi_slopes=slopes)
+    ref = _ref_attention(
+        q.detach(),
+        k.detach(),
+        v.detach(),
+        causal=causal,
+        alibi=slopes,
+    )
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < 5e-3, f"fwd max_diff={diff} (causal={causal}, per_batch={per_batch})"
+
+    out.backward(dout)
+    qg = q.detach().clone().to(torch.float32).requires_grad_(True)
+    kg = k.detach().clone().to(torch.float32).requires_grad_(True)
+    vg = v.detach().clone().to(torch.float32).requires_grad_(True)
+    out_ref = _ref_attention(
+        qg.to(q.dtype),
+        kg.to(k.dtype),
+        vg.to(v.dtype),
+        causal=causal,
+        alibi=slopes,
+    )
+    out_ref.float().backward(dout.float())
+    for name, got, ref in [
+        ("dq", q.grad, qg.grad),
+        ("dk", k.grad, kg.grad),
+        ("dv", v.grad, vg.grad),
+    ]:
+        diff = (got.float() - ref.float()).abs().max().item()
+        assert diff < 1e-2, f"{name} max_diff={diff}"
+
+
+def test_alibi_bad_dtype_raises():
+    q = torch.randn(1, 4, 2, 64, dtype=torch.float16)
+    slopes = torch.zeros(2, dtype=torch.float16)  # must be fp32
+    with pytest.raises(ValueError, match="alibi_slopes must be fp32"):
+        flash_attn_mojo.flash_attn_func(q, q, q, alibi_slopes=slopes)
+
+
+def test_alibi_bad_shape_raises():
+    q = torch.randn(1, 4, 2, 64, dtype=torch.float16)
+    slopes = torch.zeros(3, dtype=torch.float32)  # nheads=2, slopes has 3
+    with pytest.raises(ValueError, match="nheads_q"):
+        flash_attn_mojo.flash_attn_func(q, q, q, alibi_slopes=slopes)
 
 
 # Phase 1.17: bf16 + fp32 dispatch.

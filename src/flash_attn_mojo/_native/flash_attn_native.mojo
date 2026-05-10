@@ -71,6 +71,8 @@ def flash_attn_fwd_cpu(
         29 causal      (int) — 0 = no mask, 1 = causal (bottom-right)
         30 window_left  (int) — -1 = unbounded, ≥0 = num keys to the left
         31 window_right (int) — -1 = unbounded, ≥0 = num keys to the right
+        32 alibi_addr   (int) — fp32 ptr; 0 disables ALiBi
+        33 alibi_b_stride (int) — 0 if shape (H,), nheads if (B, H)
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -109,6 +111,9 @@ def flash_attn_fwd_cpu(
     var causal_rt: Int = Int(py=args[29])
     var window_left_rt: Int = Int(py=args[30])
     var window_right_rt: Int = Int(py=args[31])
+    var alibi_addr: Int = Int(py=args[32])
+    var alibi_b_stride: Int = Int(py=args[33])
+    var has_alibi: Bool = alibi_addr != 0
 
     if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
         return PythonObject(None)
@@ -130,6 +135,13 @@ def flash_attn_fwd_cpu(
         var lse_ptr = UnsafePointer[Float32, MutAnyOrigin](
             unsafe_from_address=lse_addr
         )
+        # Use lse_ptr as the dummy when alibi is disabled — it's a valid
+        # fp32 pointer; the kernel only reads from it when has_alibi is true.
+        var alibi_ptr = lse_ptr
+        if has_alibi:
+            alibi_ptr = UnsafePointer[Float32, MutAnyOrigin](
+                unsafe_from_address=alibi_addr
+            )
         fwd_kernel_cpu[dtype, headdim, causal](
             batch_int,
             seqlen_q_int,
@@ -139,6 +151,9 @@ def flash_attn_fwd_cpu(
             softmax_scale,
             window_left_rt,
             window_right_rt,
+            has_alibi,
+            alibi_b_stride,
+            alibi_ptr,
             q_ptr,
             k_ptr,
             v_ptr,
@@ -228,6 +243,8 @@ def flash_attn_bwd_cpu(
         49 causal     (int)
         50 window_left  (int)
         51 window_right (int)
+        52 alibi_addr   (int)
+        53 alibi_b_stride (int)
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -284,6 +301,9 @@ def flash_attn_bwd_cpu(
     var causal_rt: Int = Int(py=args[49])
     var window_left_rt: Int = Int(py=args[50])
     var window_right_rt: Int = Int(py=args[51])
+    var alibi_addr: Int = Int(py=args[52])
+    var alibi_b_stride: Int = Int(py=args[53])
+    var has_alibi: Bool = alibi_addr != 0
 
     if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
         return PythonObject(None)
@@ -317,6 +337,11 @@ def flash_attn_bwd_cpu(
         var dv_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=dv_addr
         )
+        var alibi_ptr = lse_ptr  # dummy when disabled
+        if has_alibi:
+            alibi_ptr = UnsafePointer[Float32, MutAnyOrigin](
+                unsafe_from_address=alibi_addr
+            )
         bwd_kernel_cpu[dtype, headdim, causal](
             batch_int,
             seqlen_q_int,
@@ -326,6 +351,9 @@ def flash_attn_bwd_cpu(
             softmax_scale,
             window_left_rt,
             window_right_rt,
+            has_alibi,
+            alibi_b_stride,
+            alibi_ptr,
             q_ptr,
             k_ptr,
             v_ptr,
