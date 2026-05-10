@@ -3,14 +3,10 @@ name = "causal-conv1d-mojo"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-# Pinned to 3.13 because flash-attn 2.8.x ships prebuilt cp313 wheels
-# but no cp314 ones — and we'd rather not build flash-attn from source
-# (~5 min nvcc compile). Once Dao-AILab ships cp314 wheels we can bump.
+# Pinned to 3.13: torch 2.8.0 + causal-conv1d 1.6.1 ship prebuilt
+# cp313 wheels but not cp314. Bump once those land.
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    # Pinned to 2.8.0 to match flash-attn 2.8.3's cp313+torch2.8 wheel
-    # below. causal-conv1d is built without isolation against this same
-    # torch (see [tool.pixi.pypi-options] below).
     "torch==2.8.0",
     "causal-conv1d==1.6.1",
     # 'max' here only ships the Mojo compiler + runtime libs that our
@@ -23,10 +19,6 @@ dependencies = [
     "wheel",
     "packaging",
     "ninja",
-    # Upstream flash-attn 2.8.3 — used by tests/test_flash_attn.py to
-    # validate flash_attn_mojo against. Pinned to a prebuilt wheel from
-    # the GitHub release so `pixi install` doesn't run nvcc for 5 min.
-    "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl",
 ]
 
 [build-system]
