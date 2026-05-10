@@ -44,6 +44,52 @@ def _strides_4d(t):
     return (t.stride(0), t.stride(1), t.stride(2), t.stride(3))
 
 
+def _apply_rotary(x, cos, sin, positions, interleaved):
+    """Apply rotary embedding to a (B, S, H, D) tensor.
+
+    `cos` / `sin` are (max_pos, rotary_dim // 2) (matches upstream's
+    flash_attn shape — half-size, since RoPE rotates *pairs* of dims).
+    `positions` is (B, S) int — actual token position per query row.
+    Only the first ``rotary_dim`` dims of x are touched; the remaining
+    headdim - rotary_dim dims pass through unchanged.
+
+    Layouts:
+        interleaved=True: pairs are (x[2i], x[2i+1]) — Llama / GPT-J style
+        interleaved=False: split — pairs are (x[i], x[D/2 + i])
+    """
+    if cos.shape != sin.shape:
+        raise ValueError(
+            f"rotary_cos and rotary_sin must have the same shape; got "
+            f"{tuple(cos.shape)} and {tuple(sin.shape)}"
+        )
+    if cos.dim() != 2:
+        raise ValueError(
+            f"rotary_cos must be 2-D (max_pos, rotary_dim/2); got {tuple(cos.shape)}"
+        )
+    rotary_half = cos.shape[1]
+    rotary_dim = rotary_half * 2
+    if rotary_dim > x.shape[-1]:
+        raise ValueError(f"rotary_dim ({rotary_dim}) > headdim ({x.shape[-1]})")
+    cos_at = cos[positions].unsqueeze(2)  # (B, S, 1, rotary_half)
+    sin_at = sin[positions].unsqueeze(2)
+    out = x.clone()
+    if interleaved:
+        # x[..., :rotary_dim] viewed as (..., rotary_half, 2) pairs
+        x_pairs = out[..., :rotary_dim].view(*x.shape[:-1], rotary_half, 2)
+        x0 = x_pairs[..., 0].clone()
+        x1 = x_pairs[..., 1].clone()
+        x_pairs[..., 0] = x0 * cos_at.to(x0.dtype) - x1 * sin_at.to(x0.dtype)
+        x_pairs[..., 1] = x0 * sin_at.to(x0.dtype) + x1 * cos_at.to(x0.dtype)
+    else:
+        x0 = out[..., :rotary_half].clone()
+        x1 = out[..., rotary_half:rotary_dim].clone()
+        out[..., :rotary_half] = x0 * cos_at.to(x0.dtype) - x1 * sin_at.to(x0.dtype)
+        out[..., rotary_half:rotary_dim] = x0 * sin_at.to(x0.dtype) + x1 * cos_at.to(
+            x0.dtype
+        )
+    return out
+
+
 def _normalise_alibi(alibi_slopes, nheads_q, batch):
     """Return a contiguous fp32 alibi tensor (or None) — the kernel reads
     it as a flat fp32 buffer indexed by `b * batch_stride + h_q`.
@@ -445,11 +491,8 @@ def flash_attn_with_kvcache(
 
     Returns: out of shape ``(batch, seqlen_q, nheads_q, headdim)``.
     """
-    if rotary_cos is not None or rotary_sin is not None:
-        raise NotImplementedError(
-            "rotary embedding inside flash_attn_with_kvcache is not yet"
-            " implemented — phase 1.14"
-        )
+    if (rotary_cos is None) != (rotary_sin is None):
+        raise ValueError("rotary_cos and rotary_sin must both be provided or both None")
     # cache_batch_idx is validated below after we know nheads.
     if block_table is not None:
         raise NotImplementedError(
@@ -530,6 +573,23 @@ def flash_attn_with_kvcache(
     # Optionally append new tokens to the cache.
     if (k is None) != (v is None):
         raise ValueError("k and v must be provided together (or neither)")
+
+    # When rotary is given, apply it to q and (the new) k at their
+    # absolute token positions. Positions for batch b, query offset i:
+    #   pos[b, i] = cache_seqlens[b] + i
+    q_for_attn = q
+    if rotary_cos is not None:
+        positions = cs.unsqueeze(1) + torch.arange(
+            seqlen_q, dtype=torch.int32, device=q.device
+        ).unsqueeze(0)
+        q_for_attn = _apply_rotary(
+            q, rotary_cos, rotary_sin, positions.long(), rotary_interleaved
+        )
+        if k is not None:
+            k = _apply_rotary(
+                k, rotary_cos, rotary_sin, positions.long(), rotary_interleaved
+            )
+
     if k is not None:
         if k.shape != (batch, seqlen_q, nheads_kv, headdim) or v.shape != k.shape:
             raise ValueError(
@@ -556,7 +616,7 @@ def flash_attn_with_kvcache(
     out = torch.empty_like(q)
     lse = torch.empty(batch, nheads_q, seqlen_q, dtype=torch.float32, device=q.device)
     _native_fwd_cpu(
-        q,
+        q_for_attn,
         k_cache,
         v_cache,
         out,

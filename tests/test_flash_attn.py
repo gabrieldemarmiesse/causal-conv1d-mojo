@@ -925,12 +925,87 @@ def test_flash_attn_with_kvcache_int_seqlen_broadcast():
     assert torch.equal(out, out_tensor)
 
 
-def test_flash_attn_with_kvcache_rotary_raises():
+# Phase 1.14: rotary embeddings inside flash_attn_with_kvcache.
+def _build_rope(rotary_dim, max_pos, base=10000.0):
+    """Standard RoPE inv-freq table → (max_pos, rotary_dim/2) cos and sin."""
+    assert rotary_dim % 2 == 0
+    inv_freq = 1.0 / (
+        base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+    )
+    pos = torch.arange(max_pos, dtype=torch.float32)
+    freqs = torch.einsum("p,d->pd", pos, inv_freq)
+    return freqs.cos().to(torch.float16), freqs.sin().to(torch.float16)
+
+
+@pytest.mark.parametrize("interleaved", [True, False])
+def test_flash_attn_with_kvcache_rotary(interleaved):
+    """Decode with rotary applied to q and k_new at absolute positions."""
+    batch, seqlen_q, nheads, headdim = 1, 1, 1, 64
+    seqlen_kmax = 16
+    rotary_dim = 32
+
+    cos, sin = _build_rope(rotary_dim, seqlen_kmax)
+    q = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    k_cache = torch.randn(batch, seqlen_kmax, nheads, headdim, dtype=torch.float16)
+    v_cache = torch.randn(batch, seqlen_kmax, nheads, headdim, dtype=torch.float16)
+    k_new = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    v_new = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    cache_seqlens = torch.tensor([5], dtype=torch.int32)
+
+    # Reference: apply rotary manually, then run no-rotary kvcache.
+    pos = cache_seqlens[0].item()
+    q_rot = flash_attn_mojo._apply_rotary(  # type: ignore[attr-defined]
+        q,
+        cos,
+        sin,
+        torch.tensor([[pos]], dtype=torch.long),
+        interleaved,
+    )
+    k_rot = flash_attn_mojo._apply_rotary(  # type: ignore[attr-defined]
+        k_new,
+        cos,
+        sin,
+        torch.tensor([[pos]], dtype=torch.long),
+        interleaved,
+    )
+    k_cache_ref = k_cache.clone()
+    v_cache_ref = v_cache.clone()
+    out_ref = flash_attn_mojo.flash_attn_with_kvcache(
+        q_rot,
+        k_cache_ref,
+        v_cache_ref,
+        k=k_rot,
+        v=v_new,
+        cache_seqlens=cache_seqlens,
+        causal=True,
+    )
+
+    # Run with rotary path:
+    out = flash_attn_mojo.flash_attn_with_kvcache(
+        q,
+        k_cache,
+        v_cache,
+        k=k_new,
+        v=v_new,
+        rotary_cos=cos,
+        rotary_sin=sin,
+        rotary_interleaved=interleaved,
+        cache_seqlens=cache_seqlens,
+        causal=True,
+    )
+
+    diff = (out.float() - out_ref.float()).abs().max().item()
+    # Roundoff between fp16 rotary done inline and out-of-line is small.
+    assert diff < 5e-3, f"max_diff={diff}"
+
+
+def test_flash_attn_with_kvcache_rotary_partial_one_only_raises():
     q = torch.randn(1, 1, 1, 64, dtype=torch.float16)
     kc = torch.zeros(1, 4, 1, 64, dtype=torch.float16)
     vc = torch.zeros(1, 4, 1, 64, dtype=torch.float16)
     cos = torch.zeros(4, 32, dtype=torch.float16)
-    with pytest.raises(NotImplementedError, match="rotary"):
+    # Only cos given, no sin → should raise.
+    with pytest.raises(ValueError, match="rotary"):
         flash_attn_mojo.flash_attn_with_kvcache(q, kc, vc, rotary_cos=cos)
 
 
