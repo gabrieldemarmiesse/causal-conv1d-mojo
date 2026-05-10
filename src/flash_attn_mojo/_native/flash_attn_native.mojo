@@ -42,27 +42,28 @@ def flash_attn_fwd_cpu(
         4  batch  (int)
         5  seqlen_q  (int)
         6  seqlen_k  (int)
-        7  nheads  (int)
-        8  q_batch_stride  (int)
-        9  q_seq_stride    (int)
-        10 q_head_stride   (int)
-        11 q_dim_stride    (int)
-        12 k_batch_stride  (int)
-        13 k_seq_stride    (int)
-        14 k_head_stride   (int)
-        15 k_dim_stride    (int)
-        16 v_batch_stride  (int)
-        17 v_seq_stride    (int)
-        18 v_head_stride   (int)
-        19 v_dim_stride    (int)
-        20 out_batch_stride (int)
-        21 out_seq_stride   (int)
-        22 out_head_stride  (int)
-        23 out_dim_stride   (int)
-        24 softmax_scale (float)
-        25 dtype_code  (int) — 0=fp16, 1=bf16, 2=fp32
-        26 headdim     (int) — supported: 64
-        27 causal      (int) — 0 = no mask, 1 = causal (bottom-right)
+        7  nheads_q  (int)
+        8  nheads_kv (int) — must divide nheads_q (MQA/GQA)
+        9  q_batch_stride  (int)
+        10 q_seq_stride    (int)
+        11 q_head_stride   (int)
+        12 q_dim_stride    (int)
+        13 k_batch_stride  (int)
+        14 k_seq_stride    (int)
+        15 k_head_stride   (int)
+        16 k_dim_stride    (int)
+        17 v_batch_stride  (int)
+        18 v_seq_stride    (int)
+        19 v_head_stride   (int)
+        20 v_dim_stride    (int)
+        21 out_batch_stride (int)
+        22 out_seq_stride   (int)
+        23 out_head_stride  (int)
+        24 out_dim_stride   (int)
+        25 softmax_scale (float)
+        26 dtype_code  (int) — 0=fp16, 1=bf16, 2=fp32
+        27 headdim     (int) — supported: 64, 96, 128
+        28 causal      (int) — 0 = no mask, 1 = causal (bottom-right)
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -72,33 +73,34 @@ def flash_attn_fwd_cpu(
     var batch_int: Int = Int(py=args[4])
     var seqlen_q_int: Int = Int(py=args[5])
     var seqlen_k_int: Int = Int(py=args[6])
-    var nheads_int: Int = Int(py=args[7])
+    var nheads_q_int: Int = Int(py=args[7])
+    var nheads_kv_int: Int = Int(py=args[8])
 
-    var q_b_stride: Int = Int(py=args[8])
-    var q_s_stride: Int = Int(py=args[9])
-    var q_h_stride: Int = Int(py=args[10])
-    var q_d_stride: Int = Int(py=args[11])
-    var k_b_stride: Int = Int(py=args[12])
-    var k_s_stride: Int = Int(py=args[13])
-    var k_h_stride: Int = Int(py=args[14])
-    var k_d_stride: Int = Int(py=args[15])
-    var v_b_stride: Int = Int(py=args[16])
-    var v_s_stride: Int = Int(py=args[17])
-    var v_h_stride: Int = Int(py=args[18])
-    var v_d_stride: Int = Int(py=args[19])
-    var o_b_stride: Int = Int(py=args[20])
-    var o_s_stride: Int = Int(py=args[21])
-    var o_h_stride: Int = Int(py=args[22])
-    var o_d_stride: Int = Int(py=args[23])
+    var q_b_stride: Int = Int(py=args[9])
+    var q_s_stride: Int = Int(py=args[10])
+    var q_h_stride: Int = Int(py=args[11])
+    var q_d_stride: Int = Int(py=args[12])
+    var k_b_stride: Int = Int(py=args[13])
+    var k_s_stride: Int = Int(py=args[14])
+    var k_h_stride: Int = Int(py=args[15])
+    var k_d_stride: Int = Int(py=args[16])
+    var v_b_stride: Int = Int(py=args[17])
+    var v_s_stride: Int = Int(py=args[18])
+    var v_h_stride: Int = Int(py=args[19])
+    var v_d_stride: Int = Int(py=args[20])
+    var o_b_stride: Int = Int(py=args[21])
+    var o_s_stride: Int = Int(py=args[22])
+    var o_h_stride: Int = Int(py=args[23])
+    var o_d_stride: Int = Int(py=args[24])
 
     # Python passes softmax_scale as a Python float; convert via the
     # standard cast.
-    var softmax_scale: Float32 = Float32(py=args[24])
-    var dtype_code: Int = Int(py=args[25])
-    var headdim_rt: Int = Int(py=args[26])
-    var causal_rt: Int = Int(py=args[27])
+    var softmax_scale: Float32 = Float32(py=args[25])
+    var dtype_code: Int = Int(py=args[26])
+    var headdim_rt: Int = Int(py=args[27])
+    var causal_rt: Int = Int(py=args[28])
 
-    if batch_int == 0 or seqlen_q_int == 0 or nheads_int == 0:
+    if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
         return PythonObject(None)
 
     @parameter
@@ -119,7 +121,8 @@ def flash_attn_fwd_cpu(
             batch_int,
             seqlen_q_int,
             seqlen_k_int,
-            nheads_int,
+            nheads_q_int,
+            nheads_kv_int,
             softmax_scale,
             q_ptr,
             k_ptr,

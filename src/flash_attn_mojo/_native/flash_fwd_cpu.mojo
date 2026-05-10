@@ -40,7 +40,8 @@ fn fwd_kernel_cpu[
     batch: Int,
     seqlen_q: Int,
     seqlen_k: Int,
-    nheads: Int,
+    nheads_q: Int,
+    nheads_kv: Int,
     softmax_scale: Float32,
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -66,12 +67,16 @@ fn fwd_kernel_cpu[
     """flash-attn forward, CPU path.
 
     Comptime params:
-        dtype:   element type (only fp16 in phase 1.1)
-        headdim: per-head dimension (only 64 in phase 1.1)
+        dtype:   element type (currently only fp16)
+        headdim: per-head dimension (currently 64, 96, or 128)
         causal:  apply causal mask with bottom-right alignment
 
-    Tensor layout (matches upstream `flash_attn_func`): all of q, k, v,
-    out are `(batch, seqlen, nheads, headdim)`. Strides are passed
+    Tensor layout (matches upstream `flash_attn_func`):
+        q   : (batch, seqlen_q, nheads_q,  headdim)
+        k, v: (batch, seqlen_k, nheads_kv, headdim)
+        out : (batch, seqlen_q, nheads_q,  headdim)
+    For MQA/GQA, `nheads_q % nheads_kv == 0` and a kv head is shared
+    by `nheads_q / nheads_kv` consecutive q heads. Strides are passed
     explicitly so non-contiguous tensors work too.
 
     Parallelised across (batch, head, q_position) workers via
@@ -84,22 +89,25 @@ fn fwd_kernel_cpu[
     # When seqlen_q == seqlen_k this collapses to standard j <= i.
     var seq_offset = seqlen_k - seqlen_q
 
+    var heads_per_kv = nheads_q // nheads_kv
+
     @parameter
     fn process_bhq(idx: Int):
-        # Decompose idx into (b, h, q_idx). The work axis is the
-        # combined size batch * nheads * seqlen_q so each worker is one
-        # output row.
-        var b = idx // (nheads * seqlen_q)
-        var rem = idx % (nheads * seqlen_q)
-        var h = rem // seqlen_q
+        # Decompose idx into (b, h_q, q_idx). The work axis is
+        # batch * nheads_q * seqlen_q, one worker per output row.
+        var b = idx // (nheads_q * seqlen_q)
+        var rem = idx % (nheads_q * seqlen_q)
+        var h_q = rem // seqlen_q
         var q_idx = rem % seqlen_q
+        # GQA: each KV head is shared by `heads_per_kv` consecutive Q heads.
+        var h_kv = h_q // heads_per_kv
 
-        var q_base = b * q_b_stride + q_idx * q_s_stride + h * q_h_stride
+        var q_base = b * q_b_stride + q_idx * q_s_stride + h_q * q_h_stride
         var out_base = (
-            b * out_b_stride + q_idx * out_s_stride + h * out_h_stride
+            b * out_b_stride + q_idx * out_s_stride + h_q * out_h_stride
         )
-        var k_b_h_base = b * k_b_stride + h * k_h_stride
-        var v_b_h_base = b * v_b_stride + h * v_h_stride
+        var k_b_h_base = b * k_b_stride + h_kv * k_h_stride
+        var v_b_h_base = b * v_b_stride + h_kv * v_h_stride
 
         # Load q vector into fp32 registers once.
         var q_vec = SIMD[accum_t, headdim](0)
@@ -163,4 +171,4 @@ fn fwd_kernel_cpu[
         for d in range(headdim):
             out_ptr[out_base + d * out_d_stride] = (o[d] * inv_l).cast[dtype]()
 
-    sync_parallelize[process_bhq](batch * nheads * seqlen_q)
+    sync_parallelize[process_bhq](batch * nheads_q * seqlen_q)

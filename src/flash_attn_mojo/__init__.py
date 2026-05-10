@@ -8,8 +8,8 @@ Tri Dao `flash-attn` 2.x public API. Three entry points planned:
 - ``flash_attn_with_kvcache(q, k_cache, v_cache, ...)``   — autoregressive decode with KV-cache.
 
 Phase 1.x (current): minimal CPU forward for ``flash_attn_func`` —
-fp16, headdim ∈ {64, 96, 128}, MHA (causal optional). Everything
-else still raises.
+fp16, headdim ∈ {64, 96, 128}, MHA / MQA / GQA, optional causal mask.
+Everything else still raises.
 
 Tests compare correctness against the upstream ``flash_attn`` PyPI
 package (pinned to a prebuilt wheel via pyproject.toml).
@@ -48,7 +48,8 @@ def _native_fwd_cpu(q, k, v, out, softmax_scale, causal):
         q.shape[0],  # batch
         q.shape[1],  # seqlen_q
         k.shape[1],  # seqlen_k
-        q.shape[2],  # nheads
+        q.shape[2],  # nheads_q
+        k.shape[2],  # nheads_kv
         q.stride(0),
         q.stride(1),
         q.stride(2),
@@ -124,9 +125,10 @@ def flash_attn_func(
             f"v shape {tuple(v.shape)} must match k shape {tuple(k.shape)}"
         )
     nheads_kv = k.shape[2]
-    if nheads_q != nheads_kv:
-        raise NotImplementedError(
-            "MQA/GQA (nheads_q != nheads_kv) is not implemented yet — phase 1.4"
+    if nheads_q % nheads_kv != 0:
+        raise ValueError(
+            f"nheads_q ({nheads_q}) must be a multiple of nheads_kv "
+            f"({nheads_kv}) for MQA/GQA"
         )
     if q.dtype != torch.float16 or k.dtype != torch.float16 or v.dtype != torch.float16:
         raise NotImplementedError(

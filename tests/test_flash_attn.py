@@ -222,12 +222,36 @@ def test_unsupported_headdim_raises():
         flash_attn_mojo.flash_attn_func(q, k, v)
 
 
-def test_mqa_gqa_raises():
-    """nheads_q != nheads_kv → MQA/GQA, not yet implemented."""
-    q = torch.randn(1, 4, 4, 64, dtype=torch.float16)
-    k = torch.randn(1, 4, 2, 64, dtype=torch.float16)
-    v = torch.randn(1, 4, 2, 64, dtype=torch.float16)
-    with pytest.raises(NotImplementedError, match="phase 1.4"):
+# Phase 1.4: MQA / GQA — nheads_q is a multiple of nheads_kv.
+@pytest.mark.parametrize(
+    "nheads_q,nheads_kv",
+    [(8, 1), (8, 2), (8, 4), (4, 2), (2, 1)],
+)
+@pytest.mark.parametrize("causal", [False, True])
+def test_flash_attn_func_gqa(nheads_q, nheads_kv, causal):
+    """flash_attn_func with shared KV heads matches the broadcast reference."""
+    batch, seqlen, headdim = 2, 16, 64
+    q = torch.randn(batch, seqlen, nheads_q, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen, nheads_kv, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen, nheads_kv, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=causal)
+    # Reference: tile k and v from nheads_kv to nheads_q.
+    repeat = nheads_q // nheads_kv
+    k_full = k.repeat_interleave(repeat, dim=2)
+    v_full = v.repeat_interleave(repeat, dim=2)
+    ref = _ref_attention(q, k_full, v_full, causal=causal)
+
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < 5e-3, f"max_diff={diff} (q={nheads_q}, kv={nheads_kv})"
+
+
+def test_gqa_non_divisible_raises():
+    """nheads_q must be a multiple of nheads_kv."""
+    q = torch.randn(1, 4, 6, 64, dtype=torch.float16)
+    k = torch.randn(1, 4, 4, 64, dtype=torch.float16)  # 6 % 4 != 0
+    v = torch.randn(1, 4, 4, 64, dtype=torch.float16)
+    with pytest.raises(ValueError, match="multiple"):
         flash_attn_mojo.flash_attn_func(q, k, v)
 
 
