@@ -22,3 +22,4 @@ wheels/
 # mojo extension build artifact (manual build) and runtime-compile cache
 *.so
 __mojocache__/
+flash-attention/
