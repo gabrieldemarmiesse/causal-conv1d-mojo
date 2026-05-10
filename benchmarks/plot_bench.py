@@ -1,5 +1,6 @@
-"""Run the wall-time benches (forward + forward+backward) and emit
-docs/bench_forward.png and docs/bench_backward.png.
+"""Run the wall-time benches (forward, forward+backward, single-step
+update) and emit docs/bench_forward.png, docs/bench_backward.png, and
+docs/bench_update.png.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import torch.nn.functional as F
 
 import causal_conv1d_mojo
 from causal_conv1d import causal_conv1d_fn as upstream_fn
+from causal_conv1d import causal_conv1d_update as upstream_update_fn
 
 
 SHAPES = [
@@ -23,10 +25,26 @@ SHAPES = [
     (4, 4096, 2048, 4),
     (8, 2048, 4096, 4),
 ]
+
+# Update op: per-call (B, D) with seqlen=1 (one-token-at-a-time decode).
+# state_len = W-1 = 3. These are typical Mamba decode shapes; per-call
+# wall time is what matters since the user runs this every token.
+UPDATE_SHAPES = [
+    (1, 1024),
+    (1, 2048),
+    (1, 4096),
+    (4, 1024),
+    (4, 2048),
+    (4, 4096),
+    (16, 2048),
+    (32, 4096),
+]
 WARMUP_FWD = 30
 ITERS_FWD = 500
 WARMUP_BWD = 20
 ITERS_BWD = 200
+WARMUP_UPDATE = 50
+ITERS_UPDATE = 1000
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 
 
@@ -51,18 +69,21 @@ def bench_wall(fn, warmup: int, iters: int) -> float:
     return min(samples) / 1_000.0
 
 
-def grouped_bar(labels, pt, up, mojo, *, title, out_path):
+def grouped_bar(
+    labels,
+    pt,
+    up,
+    mojo,
+    *,
+    title,
+    out_path,
+    pt_label="pure PyTorch (F.conv1d + F.silu)",
+):
     n = len(labels)
     x_pos = list(range(n))
     bw = 0.27
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(
-        [p - bw for p in x_pos],
-        pt,
-        bw,
-        label="pure PyTorch (F.conv1d + F.silu)",
-        color="#bbbbbb",
-    )
+    ax.bar([p - bw for p in x_pos], pt, bw, label=pt_label, color="#bbbbbb")
     ax.bar(x_pos, up, bw, label="upstream (Tri Dao CUDA)", color="#3a78c2")
     ax.bar([p + bw for p in x_pos], mojo, bw, label="mojo (this repo)", color="#d05050")
     ax.set_xticks(x_pos)
@@ -159,6 +180,58 @@ def main() -> None:
             f"fp16, bias, silu, {ITERS_BWD} iters, sync after each call"
         ),
         out_path=DOCS / "bench_backward.png",
+    )
+
+    # ---- single-step update bench ----
+    update_labels = [f"({b},{d})" for b, d in UPDATE_SHAPES]
+    update_mojo, update_up, update_ref = [], [], []
+    W = 4
+    state_len = W - 1
+    for b, d in UPDATE_SHAPES:
+        x = torch.randn(b, d, generator=g).to("cuda", torch.float16)
+        weight = torch.randn(d, W, generator=g).to("cuda", torch.float16)
+        bias = torch.randn(d, generator=g).to("cuda", torch.float16)
+
+        def make_step(impl, x=x, weight=weight, bias=bias):
+            # Each call needs its own state (mutated in place); reset
+            # before timing so the per-call cost is consistent.
+            state = torch.randn(b, d, state_len, generator=g).to("cuda", torch.float16)
+            if impl == "mojo":
+                fn = causal_conv1d_mojo.causal_conv1d_update
+            elif impl == "upstream":
+                fn = upstream_update_fn
+            else:
+                from causal_conv1d.causal_conv1d_interface import (
+                    causal_conv1d_update_ref as fn_ref,
+                )
+
+                fn = fn_ref
+
+            def step():
+                fn(x, state, weight, bias=bias, activation="silu")
+
+            return step
+
+        m_u = bench_wall(make_step("mojo"), WARMUP_UPDATE, ITERS_UPDATE)
+        u_u = bench_wall(make_step("upstream"), WARMUP_UPDATE, ITERS_UPDATE)
+        r_u = bench_wall(make_step("ref"), WARMUP_UPDATE, ITERS_UPDATE)
+        update_mojo.append(m_u)
+        update_up.append(u_u)
+        update_ref.append(r_u)
+        print(f"{(b, d)!s:>14}  update: mojo={m_u:7.1f} up={u_u:7.1f} ref={r_u:7.1f}")
+
+    grouped_bar(
+        update_labels,
+        update_ref,
+        update_up,
+        update_mojo,
+        title=(
+            f"causal_conv1d_update (single-step decode) — {gpu_name}\n"
+            f"fp16, bias, silu, seqlen=1, state_len=3, "
+            f"{ITERS_UPDATE} iters, sync after each call"
+        ),
+        out_path=DOCS / "bench_update.png",
+        pt_label="pure PyTorch (causal_conv1d_update_ref)",
     )
 
 

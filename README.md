@@ -22,16 +22,16 @@ Lower is better; log scale.
 
 | shape (B, D, L, W) | mojo | upstream | pure PyTorch |
 | --- | ---: | ---: | ---: |
-| (1, 1024, 512, 4) | **53 μs** | 60 μs | 77 μs |
-| (1, 1024, 2048, 4) | 89 μs | 64 μs | 158 μs |
-| (1, 1024, 8192, 4) | 222 μs | 104 μs | 570 μs |
-| (1, 4096, 2048, 4) | 190 μs | 102 μs | 454 μs |
-| (4, 4096, 2048, 4) | **873 μs** | 918 μs | 3753 μs |
-| (8, 2048, 4096, 4) | 2363 μs | 1716 μs | 10196 μs |
+| (1, 1024, 512, 4) | **54 μs** | 53 μs | 71 μs |
+| (1, 1024, 2048, 4) | 95 μs | 60 μs | 150 μs |
+| (1, 1024, 8192, 4) | 203 μs | 93 μs | 552 μs |
+| (1, 4096, 2048, 4) | 178 μs | 99 μs | 422 μs |
+| (4, 4096, 2048, 4) | **807 μs** | 845 μs | 3273 μs |
+| (8, 2048, 4096, 4) | **1541 μs** | 1580 μs | 8391 μs |
 
 Mixed picture across the shape grid:
-- Small + large shapes are competitive or win (`(1, 1024, 512)` and
-  `(4, 4096, 2048)` are both faster than upstream).
+- Small + large shapes are competitive or win (`(4, 4096, 2048)` and
+  `(8, 2048, 4096)` are both faster than upstream).
 - **Mid-size shapes (`1×1024×8192`, `1×4096×2048`) are where upstream
   pulls ahead by ~2×** — these are memory-bound and upstream's
   `cub::BlockLoad<WARP_TRANSPOSE>` keeps loads coalesced; our forward
@@ -51,16 +51,16 @@ runs one `block.sum` + atomic_add per `(channel, k)` at the end.
 
 | shape (B, D, L, W) | mojo | upstream | pure PyTorch |
 | --- | ---: | ---: | ---: |
-| (1, 1024, 512, 4) | **334 μs** | 340 μs | 375 μs |
-| (1, 1024, 2048, 4) | **346 μs** | 429 μs | 412 μs |
-| (1, 1024, 8192, 4) | **596 μs** | 623 μs | 1542 μs |
-| (1, 4096, 2048, 4) | **541 μs** | 636 μs | 1338 μs |
-| (4, 4096, 2048, 4) | **2208 μs** | 2244 μs | 10231 μs |
-| (8, 2048, 4096, 4) | 5647 μs | 4311 μs | 22974 μs |
+| (1, 1024, 512, 4) | **304 μs** | 329 μs | 321 μs |
+| (1, 1024, 2048, 4) | **310 μs** | 327 μs | 365 μs |
+| (1, 1024, 8192, 4) | **490 μs** | 524 μs | 1369 μs |
+| (1, 4096, 2048, 4) | **566 μs** | 596 μs | 1431 μs |
+| (4, 4096, 2048, 4) | **2011 μs** | 2071 μs | 8953 μs |
+| (8, 2048, 4096, 4) | **3347 μs** | 3909 μs | 20285 μs |
 
-**Mojo wins on 5 of 6 shapes**, including the heavy `(4, 4096, 2048)`,
-and is within ~30% of upstream on the heaviest. Pure PyTorch is **2-4×
-slower** everywhere.
+**Mojo wins on all 6 shapes**, including the heavy `(8, 2048, 4096)`
+where it beats upstream by ~14%. Pure PyTorch is **3-6× slower**
+everywhere.
 
 The big surprise during this work was that `Atomic.fetch_add` defaults to
 `Consistency.SEQUENTIAL` + system scope, lowering to
@@ -73,6 +73,32 @@ seq-cst-system atomics in the kernel epilogue, not in the chunk loop.
 
 For an extensive cross-shape sweep see `benchmarks/bench_backward_extensive.py`
 and `benchmarks/bench_forward_extensive.py`.
+
+### Single-step update (autoregressive decode)
+
+![update](docs/bench_update.png)
+
+`causal_conv1d_update(x, conv_state, weight, ...)` — the per-token
+decode op. `x` is `(B, D)` (one new token per batch element),
+`conv_state` is `(B, D, W-1)`, mutated in place. Same workload, 1000
+iters, min over samples.
+
+| shape (B, D) | mojo | upstream | pure PyTorch (`update_ref`) |
+| --- | ---: | ---: | ---: |
+| (1, 1024) | **40 μs** | 44 μs | 94 μs |
+| (1, 2048) | **42 μs** | 44 μs | 98 μs |
+| (1, 4096) | **42 μs** | 44 μs | 98 μs |
+| (4, 1024) | **41 μs** | 46 μs | 108 μs |
+| (4, 2048) | **45 μs** | 46 μs | 138 μs |
+| (4, 4096) | **47 μs** | 47 μs | 199 μs |
+| (16, 2048) | **43 μs** | 45 μs | 208 μs |
+| (32, 4096) | **44 μs** | 47 μs | 419 μs |
+
+Mojo is **on par or slightly faster than upstream** across all shapes.
+Per-call cost is dominated by kernel launch overhead (~40 μs); both
+implementations sit at the launch-overhead floor. Pure PyTorch is
+**2-10× slower** since it builds a full conv every call instead of
+running a single fused kernel.
 
 ## Layout
 
@@ -131,7 +157,7 @@ denote padding tokens whose output is zeroed). Both can be combined.
 pixi run test               # correctness
 pixi run bench-vs-pytorch   # forward wall-time numbers
 pixi run bench-backward     # forward + backward wall-time numbers
-pixi run plot-bench         # regenerate docs/bench_forward.png + bench_backward.png
+pixi run plot-bench         # regenerate docs/bench_forward.png + bench_backward.png + bench_update.png
 ```
 
 The Mojo source is compiled lazily on first `import causal_conv1d_mojo`
