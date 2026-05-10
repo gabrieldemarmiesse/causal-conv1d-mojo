@@ -23,7 +23,7 @@ from std.memory import OpaquePointer
 from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
-from layout import TileTensor, Idx
+from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
 
 from causal_conv1d_bwd import bwd_full_kernel
@@ -174,11 +174,64 @@ def causal_conv1d_fwd(
             apply_silu: Bool,
             contig_inner: Bool,
         ]() raises:
-            # Build TileTensors for x, weight, output. The `contig_inner`
-            # fast path bakes `Idx[1]()` into the inner stride slot of each
-            # Layout, so the multiply on the innermost stride folds out at
-            # comptime — same effect as the old `@parameter if contig_inner`
-            # branch in the kernel body.
+            # The `contig_inner` fast path bakes `Idx[1]()` into the inner
+            # stride slot of each Layout, so the multiply on the innermost
+            # stride folds out at comptime — same effect as the old
+            # `@parameter if contig_inner` branch in the kernel body. The
+            # Layout *types* differ per branch (comptime stride slot vs
+            # runtime), so the TileTensor construction has to live inside
+            # the comptime if. The compile+enqueue is identical in both
+            # arms — hoisted into `launch` below.
+            @parameter
+            fn launch[
+                XLT: TensorLayout, WLT: TensorLayout, OLT: TensorLayout
+            ](
+                x_tt: TileTensor[dtype, XLT, ImmutAnyOrigin],
+                w_tt: TileTensor[dtype, WLT, ImmutAnyOrigin],
+                o_tt: TileTensor[mut=True, dtype, OLT, MutAnyOrigin],
+            ) raises:
+                var compiled = ctx.compile_function[
+                    fwd_kernel[
+                        dtype,
+                        width,
+                        has_bias,
+                        has_seq_idx,
+                        has_initial_states,
+                        apply_silu,
+                        XLT,
+                        WLT,
+                        OLT,
+                    ],
+                    fwd_kernel[
+                        dtype,
+                        width,
+                        has_bias,
+                        has_seq_idx,
+                        has_initial_states,
+                        apply_silu,
+                        XLT,
+                        WLT,
+                        OLT,
+                    ],
+                ]()
+                stream.enqueue_function(
+                    compiled,
+                    seqlen_int,
+                    x_tt,
+                    w_tt,
+                    b_ptr,
+                    seq_idx_ptr,
+                    initial_states_ptr,
+                    o_tt,
+                    seq_idx_b_stride,
+                    seq_idx_l_stride,
+                    initial_states_b_stride,
+                    initial_states_c_stride,
+                    initial_states_l_stride,
+                    grid_dim=grid,
+                    block_dim=(kNThreads,),
+                )
+
             @parameter
             if contig_inner:
                 var x_tt = TileTensor(
@@ -202,47 +255,7 @@ def causal_conv1d_fwd(
                         (Idx(o_b_stride), Idx(o_c_stride), Idx[1]()),
                     ),
                 )
-                var compiled = ctx.compile_function[
-                    fwd_kernel[
-                        dtype,
-                        width,
-                        has_bias,
-                        has_seq_idx,
-                        has_initial_states,
-                        apply_silu,
-                        type_of(x_tt).LayoutType,
-                        type_of(w_tt).LayoutType,
-                        type_of(o_tt).LayoutType,
-                    ],
-                    fwd_kernel[
-                        dtype,
-                        width,
-                        has_bias,
-                        has_seq_idx,
-                        has_initial_states,
-                        apply_silu,
-                        type_of(x_tt).LayoutType,
-                        type_of(w_tt).LayoutType,
-                        type_of(o_tt).LayoutType,
-                    ],
-                ]()
-                stream.enqueue_function(
-                    compiled,
-                    seqlen_int,
-                    x_tt.as_immut(),
-                    w_tt.as_immut(),
-                    b_ptr,
-                    seq_idx_ptr,
-                    initial_states_ptr,
-                    o_tt,
-                    seq_idx_b_stride,
-                    seq_idx_l_stride,
-                    initial_states_b_stride,
-                    initial_states_c_stride,
-                    initial_states_l_stride,
-                    grid_dim=grid,
-                    block_dim=(kNThreads,),
-                )
+                launch(x_tt.as_immut(), w_tt.as_immut(), o_tt)
             else:
                 var x_tt = TileTensor(
                     x_ptr,
@@ -265,47 +278,7 @@ def causal_conv1d_fwd(
                         (Idx(o_b_stride), Idx(o_c_stride), Idx(o_l_stride)),
                     ),
                 )
-                var compiled = ctx.compile_function[
-                    fwd_kernel[
-                        dtype,
-                        width,
-                        has_bias,
-                        has_seq_idx,
-                        has_initial_states,
-                        apply_silu,
-                        type_of(x_tt).LayoutType,
-                        type_of(w_tt).LayoutType,
-                        type_of(o_tt).LayoutType,
-                    ],
-                    fwd_kernel[
-                        dtype,
-                        width,
-                        has_bias,
-                        has_seq_idx,
-                        has_initial_states,
-                        apply_silu,
-                        type_of(x_tt).LayoutType,
-                        type_of(w_tt).LayoutType,
-                        type_of(o_tt).LayoutType,
-                    ],
-                ]()
-                stream.enqueue_function(
-                    compiled,
-                    seqlen_int,
-                    x_tt.as_immut(),
-                    w_tt.as_immut(),
-                    b_ptr,
-                    seq_idx_ptr,
-                    initial_states_ptr,
-                    o_tt,
-                    seq_idx_b_stride,
-                    seq_idx_l_stride,
-                    initial_states_b_stride,
-                    initial_states_c_stride,
-                    initial_states_l_stride,
-                    grid_dim=grid,
-                    block_dim=(kNThreads,),
-                )
+                launch(x_tt.as_immut(), w_tt.as_immut(), o_tt)
 
         # 4-way comptime sweep across (has_seq_idx, has_initial_states,
         # apply_silu, contig_inner), nested under the has_bias loop. The
