@@ -100,6 +100,7 @@ fn bwd_full_kernel[
     width: Int,
     has_bias: Bool,
     has_seq_idx: Bool,
+    has_initial_states: Bool,
     apply_silu: Bool,
     contig_inner: Bool,
     aligned_seq: Bool,
@@ -110,9 +111,11 @@ fn bwd_full_kernel[
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     dout_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
+    initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     dx_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     dweight_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
     dbias_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
+    dinitial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     x_batch_stride: Int,
     x_c_stride: Int,
     x_l_stride: Int,
@@ -123,9 +126,15 @@ fn bwd_full_kernel[
     dout_l_stride: Int,
     seq_idx_b_stride: Int,
     seq_idx_l_stride: Int,
+    initial_states_batch_stride: Int,
+    initial_states_c_stride: Int,
+    initial_states_l_stride: Int,
     dx_batch_stride: Int,
     dx_c_stride: Int,
     dx_l_stride: Int,
+    dinitial_states_batch_stride: Int,
+    dinitial_states_c_stride: Int,
+    dinitial_states_l_stride: Int,
 ):
     """Fused backward: dx + dweight + dbias, one block per (B, D).
 
@@ -203,6 +212,14 @@ fn bwd_full_kernel[
     var dout_base = batch_id * dout_batch_stride + channel_id * dout_c_stride
     var dx_base = batch_id * dx_batch_stride + channel_id * dx_c_stride
     var seq_idx_base: Int = batch_id * seq_idx_b_stride
+    var init_base: Int = (
+        batch_id * initial_states_batch_stride
+        + channel_id * initial_states_c_stride
+    )
+    var dinit_base: Int = (
+        batch_id * dinitial_states_batch_stride
+        + channel_id * dinitial_states_c_stride
+    )
 
     # Per-thread accumulators (persist across chunks).
     var local_dweight = SIMD[accum_t, width](0)
@@ -322,6 +339,21 @@ fn bwd_full_kernel[
                         x_prev[i] = x_ptr[x_base + t * x_l_stride].cast[
                             accum_t
                         ]()
+
+        # When `has_initial_states`, chunk 0 / tidx 0 reads the trailing
+        # `W-1` x_prev positions (which correspond to t in [-(W-1), 0))
+        # from initial_states instead of leaving them at zero. This
+        # makes Phase 3's silu' recomputation see the same `pre[t]` the
+        # forward did for the first (W-1) output positions.
+        @parameter
+        if has_initial_states:
+            if tidx == 0 and chunk == 0:
+
+                @parameter
+                for i in range(width - 1):
+                    x_prev[kNElts - (width - 1) + i] = initial_states_ptr[
+                        init_base + i * initial_states_l_stride
+                    ].cast[accum_t]()
 
         # Publish x_curr to smem so the next thread can pick it up as halo.
         @parameter
@@ -567,6 +599,45 @@ fn bwd_full_kernel[
                     else:
                         acc += x_curr[i] * dout_halo[halo_idx_dw - kNElts]
             local_dweight[k] += acc
+
+        # ---- [P7] initial_states-only contributions (chunk 0, tidx 0) ----
+        # When the forward read initial_states for `t in [0, W-1)`, two
+        # gradient pieces appear:
+        #   - dinitial_states[i] = sum_{k<=i} weight[k] * dpre[i - k]
+        #     for i in [0, W-1). All needed dpre[0..W-2] are in this
+        #     thread's `dpre` register.
+        #   - dweight[k] picks up a "boundary" term from the part of the
+        #     forward conv that hit initial_states:
+        #       dweight[k] += sum_{t<W-1-k} dpre[t] * initial_states[t+k].
+        # dinitial_states is written here directly; the dweight terms
+        # accumulate into local_dweight and join the block reduce below.
+        @parameter
+        if has_initial_states:
+            if chunk == 0 and tidx == 0:
+
+                @parameter
+                for i in range(width - 1):
+                    var dinit_v: Scalar[accum_t] = 0
+
+                    @parameter
+                    for k in range(width):
+
+                        @parameter
+                        if i - k >= 0:
+                            dinit_v += weights[k] * dpre[i - k]
+                    dinitial_states_ptr[
+                        dinit_base + i * dinitial_states_l_stride
+                    ] = dinit_v.cast[dtype]()
+
+                @parameter
+                for k in range(width):
+
+                    @parameter
+                    for t in range(width - 1 - k):
+                        var is_v = initial_states_ptr[
+                            init_base + (t + k) * initial_states_l_stride
+                        ].cast[accum_t]()
+                        local_dweight[k] += dpre[t] * is_v
 
     # === Phase 4: block-reduce dweight, dbias and atomic-add to global ===
     # `scope="device"` + `ordering=MONOTONIC` is the same memory model as

@@ -110,10 +110,11 @@ Width: 2, 3, or 4 (Mamba uses 4). Inputs may be fp16, bf16, or fp32;
 forward and backward — masks reads at packed-sequence boundaries,
 padding rows (`seq_idx < 0`) produce zero output and zero gradient.
 `initial_states` (a `(B, D, W-1)` historical context before `t=0` for
-chunked stateful execution) is forward-only; backward through it
-raises `NotImplementedError`. `return_final_states` / `final_states_out`
-is full forward + backward. Both paths go through native Mojo kernels
-(GPU + CPU); the autograd `Function` plumbs all flags through.
+chunked stateful execution) is also forward + backward — `dinitial_states`
+flows back from the conv's leftmost W-1 outputs. `return_final_states`
+/ `final_states_out` is full forward + backward. Both paths go through
+native Mojo kernels (GPU + CPU); the autograd `Function` plumbs all
+flags through.
 
 `causal_conv1d_update(x, conv_state, weight, ...)` provides the
 single-step / KV-cache decode op: takes 1 (or a few) new tokens,

@@ -518,18 +518,57 @@ def test_initial_states_chunked_roundtrip(device, dtype, bias_present):
     assert diff < _FWD_TOL[dtype], f"chunked vs full max_diff={diff}"
 
 
-def test_initial_states_backward_raises(device):
-    """Backward through initial_states is not implemented yet."""
-    B, D, L, W = 1, 8, 32, 4
-    x = torch.randn(B, D, L, dtype=torch.float16, device=device, requires_grad=True)
-    weight = torch.randn(D, W, dtype=torch.float16, device=device, requires_grad=True)
-    init = torch.randn(B, D, W - 1, dtype=torch.float16, device=device)
+def test_initial_states_backward(device, dtype, width, bias_present):
+    """Backward through initial_states: dx, dw, dbias, and dinitial_states
+    all match the cat([initial_states, x]) reference. The kernel reads
+    initial_states for the silu' recomputation in chunk 0 / tidx 0 and
+    accumulates the boundary dweight contribution; dinitial_states is
+    derived from dpre[0..W-2] with the anti-causal weight kernel.
+    """
+    B, D, L = 2, 16, 64
+    x = torch.randn(B, D, L, dtype=dtype, device=device, requires_grad=True)
+    weight = torch.randn(D, width, dtype=dtype, device=device, requires_grad=True)
+    bias = _make_bias(
+        D, dtype=dtype, device=device, present=bias_present, requires_grad=True
+    )
+    init = torch.randn(B, D, width - 1, dtype=dtype, device=device, requires_grad=True)
+    dout = torch.randn(B, D, L, dtype=dtype, device=device)
 
     out = causal_conv1d_mojo.causal_conv1d_fn(
-        x, weight, initial_states=init, activation="silu"
+        x, weight, bias=bias, initial_states=init, activation="silu"
     )
-    with pytest.raises(NotImplementedError, match="backward through initial_states"):
-        out.sum().backward()
+    out.backward(dout)
+
+    # Reference: cat([init, x], -1) → standard causal_conv1d_ref →
+    # autograd. Slice the resulting dx into dinit + dx parts.
+    x_ref = x.detach().clone().requires_grad_()
+    w_ref = weight.detach().clone().requires_grad_()
+    b_ref = bias.detach().clone().requires_grad_() if bias is not None else None
+    init_ref = init.detach().clone().requires_grad_()
+    out_ref = causal_conv1d_ref(
+        torch.cat([init_ref, x_ref], dim=-1),
+        w_ref,
+        bias=b_ref,
+        initial_states=None,
+        activation="silu",
+    )[..., width - 1 :]
+    out_ref.backward(dout)
+
+    assert _max_diff(x.grad, x_ref.grad) < _DX_TOL[dtype], (
+        f"dx max_diff={_max_diff(x.grad, x_ref.grad)}"
+    )
+    assert _max_diff(weight.grad, w_ref.grad) < _DW_TOL[dtype], (
+        f"dw max_diff={_max_diff(weight.grad, w_ref.grad)}"
+    )
+    if bias_present:
+        assert _max_diff(bias.grad, b_ref.grad) < _DW_TOL[dtype], (
+            f"db max_diff={_max_diff(bias.grad, b_ref.grad)}"
+        )
+    # dinitial_states correctness — main feature. Tighter tolerance than
+    # dweight since the sum is over much fewer terms (W-1, not B*L).
+    assert _max_diff(init.grad, init_ref.grad) < _DX_TOL[dtype], (
+        f"dinit max_diff={_max_diff(init.grad, init_ref.grad)}"
+    )
 
 
 def test_initial_states_mutual_exclusion_with_seq_idx():

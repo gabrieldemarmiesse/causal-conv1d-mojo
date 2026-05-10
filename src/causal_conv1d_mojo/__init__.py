@@ -76,7 +76,17 @@ def _native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu):
 
 
 def _native_bwd_full(
-    x, weight, bias, dout, seq_idx, dx, dweight_acc, dbias_acc, apply_silu
+    x,
+    weight,
+    bias,
+    dout,
+    seq_idx,
+    initial_states,
+    dx,
+    dweight_acc,
+    dbias_acc,
+    dinitial_states,
+    apply_silu,
 ):
     _native_mod.causal_conv1d_bwd_full(
         x.data_ptr(),
@@ -109,6 +119,15 @@ def _native_bwd_full(
         _ptr(seq_idx),
         seq_idx.stride(0) if seq_idx is not None else 0,
         seq_idx.stride(1) if seq_idx is not None else 0,
+        int(initial_states is not None),
+        _ptr(initial_states),
+        initial_states.stride(0) if initial_states is not None else 0,
+        initial_states.stride(1) if initial_states is not None else 0,
+        initial_states.stride(2) if initial_states is not None else 0,
+        _ptr(dinitial_states),
+        dinitial_states.stride(0) if dinitial_states is not None else 0,
+        dinitial_states.stride(1) if dinitial_states is not None else 0,
+        dinitial_states.stride(2) if dinitial_states is not None else 0,
     )
 
 
@@ -146,7 +165,17 @@ def _native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu):
 
 
 def _native_bwd_full_cpu(
-    x, weight, bias, dout, seq_idx, dx, dweight_acc, dbias_acc, apply_silu
+    x,
+    weight,
+    bias,
+    dout,
+    seq_idx,
+    initial_states,
+    dx,
+    dweight_acc,
+    dbias_acc,
+    dinitial_states,
+    apply_silu,
 ):
     _native_mod.causal_conv1d_bwd_full_cpu(
         x.data_ptr(),
@@ -178,6 +207,15 @@ def _native_bwd_full_cpu(
         _ptr(seq_idx),
         seq_idx.stride(0) if seq_idx is not None else 0,
         seq_idx.stride(1) if seq_idx is not None else 0,
+        int(initial_states is not None),
+        _ptr(initial_states),
+        initial_states.stride(0) if initial_states is not None else 0,
+        initial_states.stride(1) if initial_states is not None else 0,
+        initial_states.stride(2) if initial_states is not None else 0,
+        _ptr(dinitial_states),
+        dinitial_states.stride(0) if dinitial_states is not None else 0,
+        dinitial_states.stride(1) if dinitial_states is not None else 0,
+        dinitial_states.stride(2) if dinitial_states is not None else 0,
     )
 
 
@@ -227,12 +265,12 @@ class _CausalConv1dFn(torch.autograd.Function):
         if final_states_out is not None:
             _write_final_states(x, final_states_out, weight.shape[1])
         # `save_for_backward` accepts None — the slot just won't have a
-        # tensor on retrieval. seq_idx is non-differentiable but we save
-        # it so backward can reapply the same gating it used in forward.
-        ctx.save_for_backward(x, weight, bias, seq_idx)
+        # tensor on retrieval. seq_idx and initial_states are
+        # non-differentiable inputs (well, initial_states *can* be
+        # differentiable; we save it either way and decide in backward).
+        ctx.save_for_backward(x, weight, bias, seq_idx, initial_states)
         ctx.apply_silu = apply_silu
         ctx.has_bias = bias is not None
-        ctx.has_initial_states = initial_states is not None
         ctx.return_final_states = final_states_out is not None
         if final_states_out is not None:
             return out, final_states_out
@@ -243,20 +281,9 @@ class _CausalConv1dFn(torch.autograd.Function):
         # `grad_outputs` is `(dout,)` or `(dout, dfinal_states)` depending
         # on whether forward returned a tuple. dfinal_states is None when
         # the user never read .grad on final_states (no consumer).
-        if ctx.has_initial_states:
-            # Forward initial_states is implemented in the kernels; the
-            # bwd kernel doesn't yet read initial_states for the silu'
-            # recomputation, doesn't accumulate the boundary dweight
-            # contributions, and doesn't emit dinitial_states. Inference
-            # works fine.
-            raise NotImplementedError(
-                "backward through initial_states is not implemented yet — "
-                "only the forward path supports initial_states. Call the op "
-                "under `torch.no_grad()` for inference."
-            )
         dout = grad_outputs[0]
         dfinal_states = grad_outputs[1] if ctx.return_final_states else None
-        x, weight, bias, seq_idx = ctx.saved_tensors
+        x, weight, bias, seq_idx, initial_states = ctx.saved_tensors
         apply_silu = ctx.apply_silu
         has_bias = ctx.has_bias
         D, W = weight.shape
@@ -273,6 +300,14 @@ class _CausalConv1dFn(torch.autograd.Function):
         dbias_acc = (
             torch.zeros(D, dtype=torch.float32, device=x.device) if has_bias else None
         )
+        # Always allocate dinitial_states when initial_states is set —
+        # the kernel writes it unconditionally to keep the dispatch lean
+        # (one comptime flag instead of two). We only return it when the
+        # user actually wants the gradient, but the kernel populates it
+        # in place either way.
+        dinitial_states = (
+            torch.empty_like(initial_states) if initial_states is not None else None
+        )
 
         if x.is_cuda:
             _native_bwd_full(
@@ -281,9 +316,11 @@ class _CausalConv1dFn(torch.autograd.Function):
                 bias,
                 dout,
                 seq_idx,
+                initial_states,
                 dx,
                 dweight_acc,
                 dbias_acc,
+                dinitial_states,
                 apply_silu,
             )
         else:
@@ -293,9 +330,11 @@ class _CausalConv1dFn(torch.autograd.Function):
                 bias,
                 dout,
                 seq_idx,
+                initial_states,
                 dx,
                 dweight_acc,
                 dbias_acc,
+                dinitial_states,
                 apply_silu,
             )
 
@@ -309,10 +348,21 @@ class _CausalConv1dFn(torch.autograd.Function):
                 dx[..., -tail:] += dfinal_states[..., -tail:].to(dx.dtype)
 
         dbias = dbias_acc.to(bias.dtype) if has_bias else None
-        # `seq_idx`, `initial_states`, `apply_silu`, and `final_states_out`
-        # are non-tensor / non-diff inputs — autograd expects one return
-        # per forward input, with `None` for non-differentiable inputs.
-        return dx, dweight_acc.to(weight.dtype), dbias, None, None, None, None
+        # Forward input order: (x, weight, bias, seq_idx, initial_states,
+        # apply_silu, final_states_out). Returns map 1:1; `seq_idx`,
+        # `apply_silu`, `final_states_out` are non-differentiable so we
+        # return None. `initial_states` gets dinitial_states when it was
+        # provided (the kernel always populated it; autograd will only
+        # use it if init.requires_grad).
+        return (
+            dx,
+            dweight_acc.to(weight.dtype),
+            dbias,
+            None,
+            dinitial_states,
+            None,
+            None,
+        )
 
 
 def causal_conv1d_fn(

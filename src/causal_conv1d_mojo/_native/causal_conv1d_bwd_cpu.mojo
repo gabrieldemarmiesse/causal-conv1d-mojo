@@ -26,6 +26,7 @@ fn _cpu_dpre_at[
     dtype: DType,
     width: Int,
     has_seq_idx: Bool,
+    has_initial_states: Bool,
     apply_silu: Bool,
 ](
     t: Int,
@@ -41,6 +42,9 @@ fn _cpu_dpre_at[
     seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     seq_idx_base: Int,
     seq_idx_l_stride: Int,
+    initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    initial_states_base: Int,
+    initial_states_l_stride: Int,
 ) -> Float32:
     """`dpre[t]` for the CPU backward, 0 if `t` is out of [0, seqlen).
 
@@ -52,6 +56,10 @@ fn _cpu_dpre_at[
     output was forced to 0 in the forward); the silu_grad recomputation
     of `pre[t]` masks historical x reads on
     `seq_idx[src_t] == seq_idx[t]` to mirror the forward gate.
+
+    With `has_initial_states`, the silu_grad pre recomputation reads
+    `initial_states[src_t + W - 1]` for `src_t ∈ [-(W-1), 0)` instead of
+    treating those positions as zero (mirrors the forward).
     """
     if t < 0 or t >= seqlen:
         return 0
@@ -88,6 +96,17 @@ fn _cpu_dpre_at[
                     weights[k]
                     * x_ptr[x_base + src_t * x_l_stride].cast[DType.float32]()
                 )
+        else:
+
+            @parameter
+            if has_initial_states:
+                var is_idx: Int = src_t + (width - 1)
+                pre += (
+                    weights[k]
+                    * initial_states_ptr[
+                        initial_states_base + is_idx * initial_states_l_stride
+                    ].cast[DType.float32]()
+                )
     var sig: Float32 = 1.0 / (1.0 + exp(-pre))
     var silu_grad: Float32 = sig * (1.0 + pre * (1.0 - sig))
     var dout_v = dout_ptr[dout_base + t * dout_l_stride].cast[DType.float32]()
@@ -99,6 +118,7 @@ fn bwd_kernel_cpu[
     width: Int,
     has_bias: Bool,
     has_seq_idx: Bool,
+    has_initial_states: Bool,
     apply_silu: Bool,
 ](
     batch: Int,
@@ -109,9 +129,11 @@ fn bwd_kernel_cpu[
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     dout_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
+    initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     dx_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     dweight_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
     dbias_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
+    dinitial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     x_batch_stride: Int,
     x_c_stride: Int,
     x_l_stride: Int,
@@ -122,9 +144,15 @@ fn bwd_kernel_cpu[
     dout_l_stride: Int,
     seq_idx_b_stride: Int,
     seq_idx_l_stride: Int,
+    initial_states_batch_stride: Int,
+    initial_states_c_stride: Int,
+    initial_states_l_stride: Int,
     dx_batch_stride: Int,
     dx_c_stride: Int,
     dx_l_stride: Int,
+    dinitial_states_batch_stride: Int,
+    dinitial_states_c_stride: Int,
+    dinitial_states_l_stride: Int,
 ):
     """Causal conv1d backward, CPU path.
 
@@ -161,13 +189,21 @@ fn bwd_kernel_cpu[
         var dout_base = b * dout_batch_stride + d * dout_c_stride
         var dx_base = b * dx_batch_stride + d * dx_c_stride
         var seq_idx_base: Int = b * seq_idx_b_stride
+        var init_base: Int = (
+            b * initial_states_batch_stride + d * initial_states_c_stride
+        )
+        var dinit_base: Int = (
+            b * dinitial_states_batch_stride + d * dinitial_states_c_stride
+        )
 
         # Sliding window: dpre_win[k] = dpre[t + k]. Prefill with dpre[0..W-1].
         var dpre_win = SIMD[accum_t, width](0)
 
         @parameter
         for k in range(width):
-            dpre_win[k] = _cpu_dpre_at[dtype, width, has_seq_idx, apply_silu](
+            dpre_win[k] = _cpu_dpre_at[
+                dtype, width, has_seq_idx, has_initial_states, apply_silu
+            ](
                 k,
                 seqlen,
                 bias_v,
@@ -181,10 +217,48 @@ fn bwd_kernel_cpu[
                 seq_idx_ptr,
                 seq_idx_base,
                 seq_idx_l_stride,
+                initial_states_ptr,
+                init_base,
+                initial_states_l_stride,
             )
 
         var local_dweight = SIMD[accum_t, width](0)
         var local_dbias: Scalar[accum_t] = 0
+
+        # ---- initial_states-only contributions ----
+        # dpre_win[0..W-2] = dpre[0..W-2] right now (the prefill); these
+        # are exactly the dpre values that flow into dinitial_states and
+        # the "boundary" dweight terms (where the forward conv read
+        # initial_states instead of x). Compute both before the main
+        # loop slides the window away.
+        @parameter
+        if has_initial_states:
+            # dinit[i] = sum_{k=0..i} weight[k] * dpre[i - k]   for i in [0, W-1)
+            @parameter
+            for i in range(width - 1):
+                var dinit_v: Scalar[accum_t] = 0
+
+                @parameter
+                for k in range(width):
+
+                    @parameter
+                    if i - k >= 0:
+                        dinit_v += weights[k] * dpre_win[i - k]
+                dinitial_states_ptr[
+                    dinit_base + i * dinitial_states_l_stride
+                ] = dinit_v.cast[dtype]()
+
+            # dweight[k] += sum_{t=0..W-2-k} dpre[t] * initial_states[t + k]
+            # — the part of the conv that read initial_states in the forward.
+            @parameter
+            for k in range(width):
+
+                @parameter
+                for t in range(width - 1 - k):
+                    var is_v = initial_states_ptr[
+                        init_base + (t + k) * initial_states_l_stride
+                    ].cast[accum_t]()
+                    local_dweight[k] += dpre_win[t] * is_v
 
         for t in range(seqlen):
             var cur_id_t: Int32 = 0
@@ -250,7 +324,7 @@ fn bwd_kernel_cpu[
             for k in range(width - 1):
                 dpre_win[k] = dpre_win[k + 1]
             dpre_win[width - 1] = _cpu_dpre_at[
-                dtype, width, has_seq_idx, apply_silu
+                dtype, width, has_seq_idx, has_initial_states, apply_silu
             ](
                 t + width,
                 seqlen,
@@ -265,6 +339,9 @@ fn bwd_kernel_cpu[
                 seq_idx_ptr,
                 seq_idx_base,
                 seq_idx_l_stride,
+                initial_states_ptr,
+                init_base,
+                initial_states_l_stride,
             )
 
         # Atomic-add the (b, d) block's contribution. Multiple parallel

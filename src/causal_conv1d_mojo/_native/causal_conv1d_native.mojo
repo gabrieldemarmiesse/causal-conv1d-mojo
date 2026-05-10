@@ -296,6 +296,15 @@ def causal_conv1d_bwd_full(
         27 seq_idx_data_ptr (int, int32) — pass 0 if `has_seq_idx=0`
         28 seq_idx_batch_stride (int)
         29 seq_idx_l_stride (int)
+        30 has_initial_states (int, 0 or 1)
+        31 initial_states_data_ptr (int) — pass 0 if `has_initial_states=0`
+        32 initial_states_batch_stride (int)
+        33 initial_states_c_stride (int)
+        34 initial_states_l_stride (int)
+        35 dinitial_states_data_ptr (int) — pass 0 if `has_initial_states=0`
+        36 dinitial_states_batch_stride (int)
+        37 dinitial_states_c_stride (int)
+        38 dinitial_states_l_stride (int)
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -329,6 +338,15 @@ def causal_conv1d_bwd_full(
     var seq_idx_addr: Int = Int(py=args[27])
     var seq_idx_b_stride: Int = Int(py=args[28])
     var seq_idx_l_stride: Int = Int(py=args[29])
+    var has_initial_states_rt: Bool = Int(py=args[30]) != 0
+    var initial_states_addr: Int = Int(py=args[31])
+    var initial_states_b_stride: Int = Int(py=args[32])
+    var initial_states_c_stride: Int = Int(py=args[33])
+    var initial_states_l_stride: Int = Int(py=args[34])
+    var dinitial_states_addr: Int = Int(py=args[35])
+    var dinitial_states_b_stride: Int = Int(py=args[36])
+    var dinitial_states_c_stride: Int = Int(py=args[37])
+    var dinitial_states_l_stride: Int = Int(py=args[38])
 
     # Zero-sized tensor: nothing to compute and no atomic updates to
     # dweight_acc / dbias_acc needed (the autograd `backward` already
@@ -374,6 +392,9 @@ def causal_conv1d_bwd_full(
         var seq_idx_ptr = UnsafePointer[Int32, MutAnyOrigin](
             unsafe_from_address=seq_idx_addr
         )
+        var initial_states_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=initial_states_addr
+        )
         var dx_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=dx_addr
         )
@@ -383,12 +404,16 @@ def causal_conv1d_bwd_full(
         var dbias_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
             unsafe_from_address=dbias_acc_addr
         )
+        var dinitial_states_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=dinitial_states_addr
+        )
 
         @parameter
         fn enqueue_bwd[
             width: Int,
             has_bias: Bool,
             has_seq_idx: Bool,
+            has_initial_states: Bool,
             apply_silu: Bool,
             contig_inner: Bool,
             aligned_seq: Bool,
@@ -399,6 +424,7 @@ def causal_conv1d_bwd_full(
                     width,
                     has_bias,
                     has_seq_idx,
+                    has_initial_states,
                     apply_silu,
                     contig_inner,
                     aligned_seq,
@@ -408,6 +434,7 @@ def causal_conv1d_bwd_full(
                     width,
                     has_bias,
                     has_seq_idx,
+                    has_initial_states,
                     apply_silu,
                     contig_inner,
                     aligned_seq,
@@ -421,9 +448,11 @@ def causal_conv1d_bwd_full(
                 b_ptr,
                 dout_ptr,
                 seq_idx_ptr,
+                initial_states_ptr,
                 dx_ptr,
                 dweight_acc_ptr,
                 dbias_acc_ptr,
+                dinitial_states_ptr,
                 x_b_stride,
                 x_c_stride,
                 x_l_stride,
@@ -434,34 +463,48 @@ def causal_conv1d_bwd_full(
                 dout_l_stride,
                 seq_idx_b_stride,
                 seq_idx_l_stride,
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
                 dx_b_stride,
                 dx_c_stride,
                 dx_l_stride,
+                dinitial_states_b_stride,
+                dinitial_states_c_stride,
+                dinitial_states_l_stride,
                 grid_dim=grid,
                 block_dim=(kNThreads,),
             )
 
-        # 5-flag comptime sweep across (has_bias, has_seq_idx, apply_silu,
-        # contig_inner, aligned_seq). std.itertools.product caps at 4
-        # iterables, so has_seq_idx is the outer loop and the remaining
-        # 4 form the inner product. `aligned_seq=True` only makes sense
-        # with `contig_inner=True`, so the `comptime if` drops that
-        # dead combination.
+        # 6-flag comptime sweep across (has_bias, has_seq_idx,
+        # has_initial_states, apply_silu, contig_inner, aligned_seq).
+        # std.itertools.product caps at 4 iterables, so has_seq_idx and
+        # has_initial_states are the outer comptime loops and the
+        # remaining 4 form the inner product. `aligned_seq=True` only
+        # makes sense with `contig_inner=True`. Note: seq_idx and
+        # initial_states are mutually exclusive at the public API, but
+        # we still emit the (hs=T, hi=T) combination — keeps the sweep
+        # symmetric and the `comptime if` filter only catches the
+        # aligned/contig invariant.
         @parameter
         fn dispatch_w[width: Int]() raises:
             comptime for hs in _BOOLS:
-                comptime for hb, silu, contig, aligned in product(
-                    _BOOLS, _BOOLS, _BOOLS, _BOOLS
-                ):
-                    comptime if not (aligned and not contig):
-                        if (
-                            hb == has_bias_rt
-                            and hs == has_seq_idx_rt
-                            and silu == apply_silu_rt
-                            and contig == contig_inner_rt
-                            and aligned == aligned_seq_rt
-                        ):
-                            enqueue_bwd[width, hb, hs, silu, contig, aligned]()
+                comptime for hi in _BOOLS:
+                    comptime for hb, silu, contig, aligned in product(
+                        _BOOLS, _BOOLS, _BOOLS, _BOOLS
+                    ):
+                        comptime if not (aligned and not contig):
+                            if (
+                                hb == has_bias_rt
+                                and hs == has_seq_idx_rt
+                                and hi == has_initial_states_rt
+                                and silu == apply_silu_rt
+                                and contig == contig_inner_rt
+                                and aligned == aligned_seq_rt
+                            ):
+                                enqueue_bwd[
+                                    width, hb, hs, hi, silu, contig, aligned
+                                ]()
 
         comptime for w in _WIDTHS:
             if width_rt == w:
@@ -679,6 +722,15 @@ def causal_conv1d_bwd_full_cpu(
         26 seq_idx_data_ptr (int, int32) — pass 0 if `has_seq_idx=0`
         27 seq_idx_batch_stride (int)
         28 seq_idx_l_stride (int)
+        29 has_initial_states (int, 0 or 1)
+        30 initial_states_data_ptr (int) — pass 0 if `has_initial_states=0`
+        31 initial_states_batch_stride (int)
+        32 initial_states_c_stride (int)
+        33 initial_states_l_stride (int)
+        34 dinitial_states_data_ptr (int) — pass 0 if `has_initial_states=0`
+        35 dinitial_states_batch_stride (int)
+        36 dinitial_states_c_stride (int)
+        37 dinitial_states_l_stride (int)
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -710,6 +762,15 @@ def causal_conv1d_bwd_full_cpu(
     var seq_idx_addr: Int = Int(py=args[26])
     var seq_idx_b_stride: Int = Int(py=args[27])
     var seq_idx_l_stride: Int = Int(py=args[28])
+    var has_initial_states_rt: Bool = Int(py=args[29]) != 0
+    var initial_states_addr: Int = Int(py=args[30])
+    var initial_states_b_stride: Int = Int(py=args[31])
+    var initial_states_c_stride: Int = Int(py=args[32])
+    var initial_states_l_stride: Int = Int(py=args[33])
+    var dinitial_states_addr: Int = Int(py=args[34])
+    var dinitial_states_b_stride: Int = Int(py=args[35])
+    var dinitial_states_c_stride: Int = Int(py=args[36])
+    var dinitial_states_l_stride: Int = Int(py=args[37])
 
     var dweight_acc_ptr = UnsafePointer[Float32, MutAnyOrigin](
         unsafe_from_address=dweight_acc_addr
@@ -735,8 +796,14 @@ def causal_conv1d_bwd_full_cpu(
         var seq_idx_ptr = UnsafePointer[Int32, MutAnyOrigin](
             unsafe_from_address=seq_idx_addr
         )
+        var initial_states_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=initial_states_addr
+        )
         var dx_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=dx_addr
+        )
+        var dinitial_states_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=dinitial_states_addr
         )
 
         @parameter
@@ -744,9 +811,17 @@ def causal_conv1d_bwd_full_cpu(
             width: Int,
             has_bias: Bool,
             has_seq_idx: Bool,
+            has_initial_states: Bool,
             apply_silu: Bool,
         ]() raises:
-            bwd_kernel_cpu[dtype, width, has_bias, has_seq_idx, apply_silu](
+            bwd_kernel_cpu[
+                dtype,
+                width,
+                has_bias,
+                has_seq_idx,
+                has_initial_states,
+                apply_silu,
+            ](
                 batch_int,
                 dim_int,
                 seqlen_int,
@@ -755,9 +830,11 @@ def causal_conv1d_bwd_full_cpu(
                 b_ptr,
                 dout_ptr,
                 seq_idx_ptr,
+                initial_states_ptr,
                 dx_ptr,
                 dweight_acc_ptr,
                 dbias_acc_ptr,
+                dinitial_states_ptr,
                 x_b_stride,
                 x_c_stride,
                 x_l_stride,
@@ -768,20 +845,29 @@ def causal_conv1d_bwd_full_cpu(
                 dout_l_stride,
                 seq_idx_b_stride,
                 seq_idx_l_stride,
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
                 dx_b_stride,
                 dx_c_stride,
                 dx_l_stride,
+                dinitial_states_b_stride,
+                dinitial_states_c_stride,
+                dinitial_states_l_stride,
             )
 
         @parameter
         fn dispatch_w[width: Int]() raises:
-            comptime for hb, hs, silu in product(_BOOLS, _BOOLS, _BOOLS):
+            comptime for hb, hs, hi, silu in product(
+                _BOOLS, _BOOLS, _BOOLS, _BOOLS
+            ):
                 if (
                     hb == has_bias_rt
                     and hs == has_seq_idx_rt
+                    and hi == has_initial_states_rt
                     and silu == apply_silu_rt
                 ):
-                    dispatch[width, hb, hs, silu]()
+                    dispatch[width, hb, hs, hi, silu]()
 
         comptime for w in _WIDTHS:
             if width_rt == w:
