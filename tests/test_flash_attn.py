@@ -762,12 +762,125 @@ def test_flash_attn_qkvpacked_func_bad_shape_raises():
         flash_attn_mojo.flash_attn_qkvpacked_func(bad)
 
 
-def test_flash_attn_with_kvcache_raises():
-    q = torch.randn(1, 1, 2, 64, dtype=torch.float16)
-    k_cache = torch.zeros(1, 16, 2, 64, dtype=torch.float16)
-    v_cache = torch.zeros(1, 16, 2, 64, dtype=torch.float16)
-    with pytest.raises(NotImplementedError, match="phase 1"):
-        flash_attn_mojo.flash_attn_with_kvcache(q, k_cache, v_cache)
+# Phase 1.12: flash_attn_with_kvcache (basic).
+def test_flash_attn_with_kvcache_no_append():
+    """Decode against a pre-populated cache, no new tokens appended."""
+    batch, seqlen_q, nheads_q, nheads_kv, headdim = 2, 1, 4, 2, 64
+    seqlen_kmax = 32
+    cache_seqlens = torch.tensor([7, 13], dtype=torch.int32)
+
+    q = torch.randn(batch, seqlen_q, nheads_q, headdim, dtype=torch.float16)
+    k_cache = torch.randn(batch, seqlen_kmax, nheads_kv, headdim, dtype=torch.float16)
+    v_cache = torch.randn(batch, seqlen_kmax, nheads_kv, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_with_kvcache(
+        q, k_cache, v_cache, cache_seqlens=cache_seqlens, causal=True
+    )
+
+    # Reference: per-batch, attend to k_cache[b, :cache_seqlens[b]].
+    repeat = nheads_q // nheads_kv
+    for b in range(batch):
+        n = int(cache_seqlens[b].item())
+        ref = _ref_attention(
+            q[b : b + 1],
+            k_cache[b : b + 1, :n].repeat_interleave(repeat, dim=2),
+            v_cache[b : b + 1, :n].repeat_interleave(repeat, dim=2),
+            causal=True,
+        )
+        diff = (out[b].float() - ref[0].float()).abs().max().item()
+        assert diff < 5e-3, f"batch {b}: max_diff={diff}"
+
+
+def test_flash_attn_with_kvcache_append():
+    """Decode appending new k, v tokens then attending to the full
+    valid range."""
+    batch, seqlen_q, nheads, headdim = 2, 2, 1, 64
+    seqlen_kmax = 16
+    n0, n1 = 5, 8
+    cache_seqlens = torch.tensor([n0, n1], dtype=torch.int32)
+
+    q = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    k_cache = torch.zeros(batch, seqlen_kmax, nheads, headdim, dtype=torch.float16)
+    v_cache = torch.zeros(batch, seqlen_kmax, nheads, headdim, dtype=torch.float16)
+    # Pre-populate the valid prefix.
+    k_cache[0, :n0] = torch.randn(n0, nheads, headdim, dtype=torch.float16)
+    k_cache[1, :n1] = torch.randn(n1, nheads, headdim, dtype=torch.float16)
+    v_cache[0, :n0] = torch.randn(n0, nheads, headdim, dtype=torch.float16)
+    v_cache[1, :n1] = torch.randn(n1, nheads, headdim, dtype=torch.float16)
+
+    k_new = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    v_new = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+
+    # Snapshot cache before; the kernel mutates it in place.
+    k_cache_before = k_cache.clone()
+
+    out = flash_attn_mojo.flash_attn_with_kvcache(
+        q,
+        k_cache,
+        v_cache,
+        k=k_new,
+        v=v_new,
+        cache_seqlens=cache_seqlens,
+        causal=True,
+    )
+
+    # The cache should have been updated at slots [n_b, n_b + S_new).
+    assert torch.equal(k_cache[0, n0 : n0 + seqlen_q], k_new[0])
+    assert torch.equal(v_cache[1, n1 : n1 + seqlen_q], v_new[1])
+    # Untouched regions unchanged.
+    assert torch.equal(k_cache[0, :n0], k_cache_before[0, :n0])
+    assert torch.equal(k_cache[0, n0 + seqlen_q :], k_cache_before[0, n0 + seqlen_q :])
+
+    # Reference: attend over [0, n_b + S_new) of the updated cache.
+    for b, n in [(0, n0), (1, n1)]:
+        n_eff = n + seqlen_q
+        ref = _ref_attention(
+            q[b : b + 1],
+            k_cache[b : b + 1, :n_eff],
+            v_cache[b : b + 1, :n_eff],
+            causal=True,
+        )
+        diff = (out[b].float() - ref[0].float()).abs().max().item()
+        assert diff < 5e-3
+
+
+def test_flash_attn_with_kvcache_int_seqlen_broadcast():
+    """cache_seqlens as a single int broadcasts across batches."""
+    batch, seqlen_q, nheads, headdim = 3, 1, 1, 64
+    seqlen_kmax = 8
+    q = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    k_cache = torch.randn(batch, seqlen_kmax, nheads, headdim, dtype=torch.float16)
+    v_cache = torch.randn(batch, seqlen_kmax, nheads, headdim, dtype=torch.float16)
+    out = flash_attn_mojo.flash_attn_with_kvcache(
+        q, k_cache, v_cache, cache_seqlens=4, causal=True
+    )
+    # Tensor form should give identical result.
+    out_tensor = flash_attn_mojo.flash_attn_with_kvcache(
+        q,
+        k_cache,
+        v_cache,
+        cache_seqlens=torch.full((batch,), 4, dtype=torch.int32),
+        causal=True,
+    )
+    assert torch.equal(out, out_tensor)
+
+
+def test_flash_attn_with_kvcache_rotary_raises():
+    q = torch.randn(1, 1, 1, 64, dtype=torch.float16)
+    kc = torch.zeros(1, 4, 1, 64, dtype=torch.float16)
+    vc = torch.zeros(1, 4, 1, 64, dtype=torch.float16)
+    cos = torch.zeros(4, 32, dtype=torch.float16)
+    with pytest.raises(NotImplementedError, match="rotary"):
+        flash_attn_mojo.flash_attn_with_kvcache(q, kc, vc, rotary_cos=cos)
+
+
+def test_flash_attn_with_kvcache_paged_raises():
+    q = torch.randn(1, 1, 1, 64, dtype=torch.float16)
+    kc = torch.zeros(1, 4, 1, 64, dtype=torch.float16)
+    vc = torch.zeros(1, 4, 1, 64, dtype=torch.float16)
+    bt = torch.zeros(1, 4, dtype=torch.int32)
+    with pytest.raises(NotImplementedError, match="paged"):
+        flash_attn_mojo.flash_attn_with_kvcache(q, kc, vc, block_table=bt)
 
 
 # Sanity: upstream flash_attn is importable in this env (non-fatal).

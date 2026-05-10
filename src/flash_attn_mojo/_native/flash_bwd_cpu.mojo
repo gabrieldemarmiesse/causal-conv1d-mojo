@@ -51,6 +51,11 @@ fn bwd_kernel_cpu[
     alibi_ptr: UnsafePointer[Float32, MutAnyOrigin],
     has_dropout: Bool,
     dropout_mask_ptr: UnsafePointer[Float32, MutAnyOrigin],
+    # The bwd kernel doesn't expose flash_attn_with_kvcache (autoregressive
+    # decode has no backward), but we accept the slot in the signature so
+    # the dispatcher can stay symmetric. Pass `False` and a dummy ptr.
+    has_cache_seqlens: Bool,
+    cache_seqlens_ptr: UnsafePointer[Int32, MutAnyOrigin],
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],

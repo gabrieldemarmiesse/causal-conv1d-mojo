@@ -76,11 +76,22 @@ def _normalise_alibi(alibi_slopes, nheads_q, batch):
 
 
 def _native_fwd_cpu(
-    q, k, v, out, lse, softmax_scale, causal, window, alibi, dropout_mask
+    q,
+    k,
+    v,
+    out,
+    lse,
+    softmax_scale,
+    causal,
+    window,
+    alibi,
+    dropout_mask,
+    cache_seqlens=None,
 ):
     alibi_t, alibi_stride = _normalise_alibi(alibi, q.shape[2], q.shape[0])
     alibi_addr = alibi_t.data_ptr() if alibi_t is not None else 0
     dropout_addr = dropout_mask.data_ptr() if dropout_mask is not None else 0
+    cache_seqlens_addr = cache_seqlens.data_ptr() if cache_seqlens is not None else 0
     _native_mod.flash_attn_fwd_cpu(
         q.data_ptr(),
         k.data_ptr(),
@@ -105,6 +116,7 @@ def _native_fwd_cpu(
         alibi_addr,
         alibi_stride,
         dropout_addr,
+        cache_seqlens_addr,
     )
 
 
@@ -379,9 +391,132 @@ def flash_attn_with_kvcache(
 ):
     """Autoregressive-decode attention with an in-place updated KV cache.
 
-    Lands in phase 1.12 (basic case) and is fleshed out through 1.16
-    (rotary, paged kv cache, indirection).
+    Phase 1.12 implements the basic case: q + k_cache + v_cache, with
+    optional new-token (k, v) append, per-batch valid lengths via
+    cache_seqlens, plus causal / window / alibi. Rotary, paged caches,
+    and cache_batch_idx remain ``NotImplementedError`` (phases 1.13+).
+
+    Tensor layout:
+        q       : (batch, seqlen_q,    nheads_q,  headdim)
+        k_cache : (batch, seqlen_kmax, nheads_kv, headdim)
+        v_cache : (batch, seqlen_kmax, nheads_kv, headdim)
+        k, v    : (batch, seqlen_q,    nheads_kv, headdim) — optional
+        cache_seqlens : (batch,) int32, or scalar int (broadcast)
+
+    Side effect: when k and v are provided, they are written into
+    k_cache / v_cache at slots [cache_seqlens[b], cache_seqlens[b] +
+    seqlen_q). cache_seqlens itself is NOT mutated — that's the
+    caller's responsibility (matches upstream).
+
+    Returns: out of shape ``(batch, seqlen_q, nheads_q, headdim)``.
     """
-    raise NotImplementedError(
-        "flash_attn_with_kvcache is not implemented yet — phase 1.12+."
+    if rotary_cos is not None or rotary_sin is not None:
+        raise NotImplementedError(
+            "rotary embedding inside flash_attn_with_kvcache is not yet"
+            " implemented — phase 1.14"
+        )
+    if cache_batch_idx is not None:
+        raise NotImplementedError(
+            "cache_batch_idx (indexed kv-cache slots) is not yet"
+            " implemented — phase 1.15"
+        )
+    if block_table is not None:
+        raise NotImplementedError(
+            "paged kv-cache (block_table) is not yet implemented — phase 1.16"
+        )
+    if alibi_slopes is not None and (causal and window_size != (-1, -1)):
+        # Combinations work — leave as-is. Just keeping the gate logic
+        # honest. (Removed: this is supported.)
+        pass
+    if (
+        not isinstance(window_size, tuple)
+        or len(window_size) != 2
+        or not all(isinstance(w, int) for w in window_size)
+    ):
+        raise ValueError(f"window_size must be a 2-tuple of ints; got {window_size!r}")
+
+    # Shape validation
+    if q.dim() != 4 or k_cache.dim() != 4 or v_cache.dim() != 4:
+        raise ValueError(
+            "q, k_cache, v_cache must be 4-D (batch, seqlen, nheads, headdim); "
+            f"got {tuple(q.shape)}, {tuple(k_cache.shape)}, {tuple(v_cache.shape)}"
+        )
+    batch, seqlen_q, nheads_q, headdim = q.shape
+    seqlen_kmax = k_cache.shape[1]
+    nheads_kv = k_cache.shape[2]
+    if k_cache.shape != (batch, seqlen_kmax, nheads_kv, headdim):
+        raise ValueError(f"k_cache shape {tuple(k_cache.shape)} doesn't match expected")
+    if v_cache.shape != k_cache.shape:
+        raise ValueError(
+            f"v_cache shape {tuple(v_cache.shape)} must match k_cache shape"
+        )
+    if nheads_q % nheads_kv != 0:
+        raise ValueError(
+            f"nheads_q ({nheads_q}) must be a multiple of nheads_kv "
+            f"({nheads_kv}) for MQA/GQA"
+        )
+    if q.dtype not in _DTYPE_CODE or q.dtype != k_cache.dtype != v_cache.dtype:
+        raise ValueError(
+            f"q, k_cache, v_cache must share supported dtype; got "
+            f"{q.dtype}, {k_cache.dtype}, {v_cache.dtype}"
+        )
+    if headdim not in (64, 96, 128):
+        raise NotImplementedError(
+            f"currently only supports headdim ∈ (64, 96, 128); got {headdim}"
+        )
+    if q.is_cuda:
+        raise NotImplementedError("flash_attn_with_kvcache is CPU-only for now")
+
+    # Resolve cache_seqlens to a contiguous int32 (B,) tensor.
+    if cache_seqlens is None:
+        cs = torch.zeros(batch, dtype=torch.int32, device=q.device)
+    elif isinstance(cache_seqlens, int):
+        cs = torch.full((batch,), cache_seqlens, dtype=torch.int32, device=q.device)
+    else:
+        if cache_seqlens.shape != (batch,):
+            raise ValueError(
+                f"cache_seqlens shape {tuple(cache_seqlens.shape)} must be ({batch},)"
+            )
+        cs = cache_seqlens.to(torch.int32).contiguous()
+
+    # Optionally append new tokens to the cache.
+    if (k is None) != (v is None):
+        raise ValueError("k and v must be provided together (or neither)")
+    if k is not None:
+        if k.shape != (batch, seqlen_q, nheads_kv, headdim) or v.shape != k.shape:
+            raise ValueError(
+                f"k/v new-token shape must be ({batch}, {seqlen_q}, "
+                f"{nheads_kv}, {headdim}); got {tuple(k.shape)}/{tuple(v.shape)}"
+            )
+        for b in range(batch):
+            n = int(cs[b].item())
+            if n + seqlen_q > seqlen_kmax:
+                raise ValueError(
+                    f"batch {b}: cache_seqlens[{b}]={n} + seqlen_q={seqlen_q} "
+                    f"exceeds seqlen_kmax={seqlen_kmax}"
+                )
+            k_cache[b, n : n + seqlen_q] = k[b]
+            v_cache[b, n : n + seqlen_q] = v[b]
+        cs = cs + seqlen_q  # effective valid k length now includes new tokens
+
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(headdim)
+
+    # Allocate out + lse and call the kernel directly (no autograd —
+    # decode-time inference doesn't need gradients).
+    out = torch.empty_like(q)
+    lse = torch.empty(batch, nheads_q, seqlen_q, dtype=torch.float32, device=q.device)
+    _native_fwd_cpu(
+        q,
+        k_cache,
+        v_cache,
+        out,
+        lse,
+        softmax_scale,
+        causal,
+        window_size,
+        alibi_slopes,
+        None,  # no dropout in kvcache path
+        cs,
     )
+    return out

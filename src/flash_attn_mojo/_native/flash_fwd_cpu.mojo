@@ -59,6 +59,12 @@ fn fwd_kernel_cpu[
     # multiplies in).
     has_dropout: Bool,
     dropout_mask_ptr: UnsafePointer[Float32, MutAnyOrigin],
+    # Per-batch effective k length for the KV-cache path. When
+    # has_cache_seqlens is False, the kernel uses the global seqlen_k.
+    # When True, batch element b only attends over k positions
+    # [0, cache_seqlens_ptr[b]).
+    has_cache_seqlens: Bool,
+    cache_seqlens_ptr: UnsafePointer[Int32, MutAnyOrigin],
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -103,9 +109,6 @@ fn fwd_kernel_cpu[
     """
     alias accum_t = DType.float32
     var neg_inf: Float32 = -inf[accum_t]()
-    # Bottom-right alignment: q_i attends to k_j iff j <= seq_offset + i.
-    # When seqlen_q == seqlen_k this collapses to standard j <= i.
-    var seq_offset = seqlen_k - seqlen_q
 
     var heads_per_kv = nheads_q // nheads_kv
 
@@ -144,10 +147,17 @@ fn fwd_kernel_cpu[
         var l: Float32 = 0
         var o = SIMD[accum_t, headdim](0)
 
+        # Per-batch effective k length: full seqlen_k by default, or
+        # cache_seqlens[b] in the kvcache path.
+        var seqlen_k_eff: Int = seqlen_k
+        if has_cache_seqlens:
+            seqlen_k_eff = Int(cache_seqlens_ptr[b])
+        var local_seq_offset = seqlen_k_eff - seqlen_q
+
         # Half-open k range for this query row: [kj_start, kj_end).
         var kj_start: Int = 0
-        var kj_end: Int = seqlen_k
-        var pos: Int = seq_offset + q_idx  # bottom-right query position
+        var kj_end: Int = seqlen_k_eff
+        var pos: Int = local_seq_offset + q_idx  # bottom-right query position
 
         @parameter
         if causal:
@@ -168,8 +178,8 @@ fn fwd_kernel_cpu[
                 kj_end = hi
         if kj_start < 0:
             kj_start = 0
-        if kj_end > seqlen_k:
-            kj_end = seqlen_k
+        if kj_end > seqlen_k_eff:
+            kj_end = seqlen_k_eff
 
         # lse output index: contiguous (b, h_q, q_idx).
         var lse_idx = (b * nheads_q + h_q) * seqlen_q + q_idx

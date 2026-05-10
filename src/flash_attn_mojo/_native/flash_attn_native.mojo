@@ -75,6 +75,8 @@ def flash_attn_fwd_cpu(
         33 alibi_b_stride (int) — 0 if shape (H,), nheads if (B, H)
         34 dropout_mask_addr (int) — fp32 ptr to (B, H_q, S_q, S_k) mask;
             0 disables dropout. Mask values are pre-scaled by 1/(1-p).
+        35 cache_seqlens_addr (int) — int32 ptr (B,); 0 means "no
+            kvcache, use seqlen_k for all batches".
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -116,8 +118,10 @@ def flash_attn_fwd_cpu(
     var alibi_addr: Int = Int(py=args[32])
     var alibi_b_stride: Int = Int(py=args[33])
     var dropout_addr: Int = Int(py=args[34])
+    var cache_seqlens_addr: Int = Int(py=args[35])
     var has_alibi: Bool = alibi_addr != 0
     var has_dropout: Bool = dropout_addr != 0
+    var has_cache_seqlens: Bool = cache_seqlens_addr != 0
 
     if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
         return PythonObject(None)
@@ -151,6 +155,11 @@ def flash_attn_fwd_cpu(
             dropout_ptr = UnsafePointer[Float32, MutAnyOrigin](
                 unsafe_from_address=dropout_addr
             )
+        # cache_seqlens is int32. Build a dummy if disabled (the kernel
+        # only dereferences when has_cache_seqlens is true).
+        var cache_seqlens_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=cache_seqlens_addr
+        )
         fwd_kernel_cpu[dtype, headdim, causal](
             batch_int,
             seqlen_q_int,
@@ -165,6 +174,8 @@ def flash_attn_fwd_cpu(
             alibi_ptr,
             has_dropout,
             dropout_ptr,
+            has_cache_seqlens,
+            cache_seqlens_ptr,
             q_ptr,
             k_ptr,
             v_ptr,
@@ -361,6 +372,10 @@ def flash_attn_bwd_cpu(
             dropout_ptr = UnsafePointer[Float32, MutAnyOrigin](
                 unsafe_from_address=dropout_addr
             )
+        # Backward path never sees cache_seqlens — pass a null int32 ptr.
+        var cache_seqlens_dummy = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=0
+        )
         bwd_kernel_cpu[dtype, headdim, causal](
             batch_int,
             seqlen_q_int,
@@ -375,6 +390,8 @@ def flash_attn_bwd_cpu(
             alibi_ptr,
             has_dropout,
             dropout_ptr,
+            False,
+            cache_seqlens_dummy,
             q_ptr,
             k_ptr,
             v_ptr,
