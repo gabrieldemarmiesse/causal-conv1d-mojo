@@ -29,7 +29,7 @@ from flash_bwd_cpu import bwd_kernel_cpu
 # so the integer code from Python indexes directly into this list.
 # 0=fp16, 1=bf16, 2=fp32.
 alias _DTYPES = [DType.float16, DType.bfloat16, DType.float32]
-alias _HEADDIMS = [64, 96, 128]
+alias _HEADDIMS = [32, 64, 96, 128, 160, 192, 224, 256]
 
 
 def flash_attn_fwd_cpu(

@@ -359,12 +359,13 @@ def test_flash_attn_func_deterministic_kwarg_accepted():
 # ---- "still raises" tests for features not yet implemented ----
 
 
-# Phase 1.3: headdim ∈ {64, 96, 128} — the three most common GQA sizes.
-@pytest.mark.parametrize("headdim", [64, 96, 128])
+# Phase 1.3: full headdim sweep. Upstream supports
+# {32, 64, 96, 128, 160, 192, 224, 256}; we dispatch all of them.
+@pytest.mark.parametrize("headdim", [32, 64, 96, 128, 160, 192, 224, 256])
 @pytest.mark.parametrize("causal", [False, True])
 def test_flash_attn_func_headdim(headdim, causal):
-    """Correctness for all three supported headdim values, both causal modes."""
-    batch, seqlen, nheads = 2, 16, 2
+    """Forward correctness for every supported headdim, both causal modes."""
+    batch, seqlen, nheads = 1, 8, 1
     q = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
     k = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
     v = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
@@ -377,10 +378,10 @@ def test_flash_attn_func_headdim(headdim, causal):
 
 
 def test_unsupported_headdim_raises():
-    """headdim=32 (and 160/192/224/256) aren't dispatched yet."""
-    q = torch.randn(1, 4, 1, 32, dtype=torch.float16)
-    k = torch.randn(1, 4, 1, 32, dtype=torch.float16)
-    v = torch.randn(1, 4, 1, 32, dtype=torch.float16)
+    """headdim=48 (and other non-listed sizes) aren't dispatched."""
+    q = torch.randn(1, 4, 1, 48, dtype=torch.float16)
+    k = torch.randn(1, 4, 1, 48, dtype=torch.float16)
+    v = torch.randn(1, 4, 1, 48, dtype=torch.float16)
     with pytest.raises(NotImplementedError, match="headdim"):
         flash_attn_mojo.flash_attn_func(q, k, v)
 
