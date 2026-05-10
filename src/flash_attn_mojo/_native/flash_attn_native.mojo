@@ -7,11 +7,11 @@ build on first import and caches the resulting `.so` under
 
 This file is the dispatcher (mirrors upstream's `flash_api.cpp`):
 parses Python tuple args, builds a comptime dispatch tree on
-`(dtype, headdim)`, forwards to the kernel implementations.
+`(dtype, headdim, causal)`, forwards to the kernel implementations.
 
-Phase 1.1 entry points:
-- `flash_attn_fwd_cpu` — naive CPU forward (no causal, MHA only,
-  fp16 only, headdim=64 only).
+Current entry points:
+- `flash_attn_fwd_cpu` — naive CPU forward (MHA only, fp16 only,
+  headdim=64 only; causal optional).
 
 GPU forward, backward, and other features land in subsequent phases.
 """
@@ -32,9 +32,9 @@ def flash_attn_fwd_cpu(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    """CPU forward for `flash_attn_func`. Phase 1.1 minimum.
+    """CPU forward for `flash_attn_func`.
 
-    Python tuple positional args (22):
+    Python tuple positional args:
         0  q_data_ptr  (int)
         1  k_data_ptr  (int)
         2  v_data_ptr  (int)
@@ -59,9 +59,10 @@ def flash_attn_fwd_cpu(
         21 out_seq_stride   (int)
         22 out_head_stride  (int)
         23 out_dim_stride   (int)
-        24 softmax_scale (float, fp32 bits packed as int)
+        24 softmax_scale (float)
         25 dtype_code  (int) — 0=fp16, 1=bf16, 2=fp32
         26 headdim     (int) — supported: 64
+        27 causal      (int) — 0 = no mask, 1 = causal (bottom-right)
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -95,12 +96,13 @@ def flash_attn_fwd_cpu(
     var softmax_scale: Float32 = Float32(py=args[24])
     var dtype_code: Int = Int(py=args[25])
     var headdim_rt: Int = Int(py=args[26])
+    var causal_rt: Int = Int(py=args[27])
 
     if batch_int == 0 or seqlen_q_int == 0 or nheads_int == 0:
         return PythonObject(None)
 
     @parameter
-    fn run[dtype: DType, headdim: Int]() raises:
+    fn run[dtype: DType, headdim: Int, causal: Bool]() raises:
         var q_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=q_addr
         )
@@ -113,7 +115,7 @@ def flash_attn_fwd_cpu(
         var o_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=o_addr
         )
-        fwd_kernel_cpu[dtype, headdim](
+        fwd_kernel_cpu[dtype, headdim, causal](
             batch_int,
             seqlen_q_int,
             seqlen_k_int,
@@ -141,13 +143,16 @@ def flash_attn_fwd_cpu(
             o_d_stride,
         )
 
-    # Phase 1.1: only fp16 + headdim=64. Other (dtype, headdim) combos
+    # Currently only fp16 + headdim=64. Other (dtype, headdim) combos
     # raise and the Python wrapper catches them earlier — this is a
     # defence-in-depth check.
     if dtype_code == 0 and headdim_rt == 64:
-        run[DType.float16, 64]()
+        if causal_rt != 0:
+            run[DType.float16, 64, True]()
+        else:
+            run[DType.float16, 64, False]()
     else:
-        raise Error("phase 1.1 only supports dtype=fp16 and headdim=64")
+        raise Error("currently only supports dtype=fp16 and headdim=64")
 
     return PythonObject(None)
 

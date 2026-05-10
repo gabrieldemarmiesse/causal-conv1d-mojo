@@ -59,11 +59,14 @@ def dtype(request):
     return request.param
 
 
-def _ref_attention(q, k, v, softmax_scale=None):
+def _ref_attention(q, k, v, softmax_scale=None, causal=False):
     """Reference scaled-dot-product attention computed in fp32.
 
     q/k/v are (B, S, H, D) — the same layout flash_attn_func uses.
     Internally we transpose to (B, H, S, D) for the matmuls, then back.
+
+    Causal mask uses bottom-right alignment, matching upstream
+    `flash_attn_func`: q_i attends to k_j iff j <= (Sk - Sq) + i.
     """
     import math
 
@@ -74,7 +77,17 @@ def _ref_attention(q, k, v, softmax_scale=None):
     k32 = k.transpose(1, 2).to(torch.float32)
     v32 = v.transpose(1, 2).to(torch.float32)
     scores = torch.matmul(q32, k32.transpose(-2, -1)) * softmax_scale
+    if causal:
+        sq, sk = q.shape[1], k.shape[1]
+        # mask[i, j] = True where attention is allowed.
+        i = torch.arange(sq).unsqueeze(1)
+        j = torch.arange(sk).unsqueeze(0)
+        allowed = j <= (sk - sq) + i
+        scores = scores.masked_fill(~allowed, float("-inf"))
     probs = torch.softmax(scores, dim=-1)
+    # All-masked rows become NaN under softmax — mirror our kernel's
+    # zero output in that case.
+    probs = torch.nan_to_num(probs, nan=0.0)
     out = torch.matmul(probs, v32)
     # Back to (B, S, H, D), cast to input dtype.
     return out.transpose(1, 2).to(q.dtype)
@@ -129,15 +142,58 @@ def test_flash_attn_func_explicit_softmax_scale():
     assert diff < 5e-3
 
 
+# Phase 1.2: causal masking with bottom-right alignment.
+@pytest.mark.parametrize("seqlen", [1, 4, 16, 128])
+@pytest.mark.parametrize("nheads", [1, 4])
+@pytest.mark.parametrize("batch", [1, 2])
+def test_flash_attn_func_causal(batch, nheads, seqlen):
+    """Causal flash_attn_func matches the reference for seqlen_q=seqlen_k."""
+    headdim = 64
+    q = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=True)
+    ref = _ref_attention(q, k, v, causal=True)
+
+    assert out.shape == ref.shape == q.shape
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < 5e-3, f"max_diff={diff}"
+
+
+@pytest.mark.parametrize("seqlen_q,seqlen_k", [(1, 4), (3, 5), (4, 16), (8, 8)])
+def test_flash_attn_func_causal_unequal_seqlens(seqlen_q, seqlen_k):
+    """Causal with seqlen_q < seqlen_k: bottom-right aligned mask."""
+    headdim, nheads, batch = 64, 2, 1
+    q = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen_k, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen_k, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=True)
+    ref = _ref_attention(q, k, v, causal=True)
+
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < 5e-3, f"max_diff={diff} (sq={seqlen_q}, sk={seqlen_k})"
+
+
+def test_flash_attn_func_causal_q_longer_than_k():
+    """Causal with seqlen_q > seqlen_k: rows above the bottom-right
+    diagonal attend to nothing and produce zero output."""
+    seqlen_q, seqlen_k, headdim, nheads, batch = 5, 3, 64, 1, 1
+    q = torch.randn(batch, seqlen_q, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen_k, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen_k, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=True)
+    # First two rows have k_max = (3-5) + i < 0 → output zero.
+    assert torch.equal(out[:, :2], torch.zeros_like(out[:, :2]))
+    # Last three rows (i ∈ {2, 3, 4}) have k_max ∈ {0, 1, 2} → match ref.
+    ref = _ref_attention(q, k, v, causal=True)
+    diff = (out[:, 2:].float() - ref[:, 2:].float()).abs().max().item()
+    assert diff < 5e-3
+
+
 # ---- "still raises" tests for features not yet implemented ----
-
-
-def test_causal_raises():
-    q = torch.randn(1, 4, 1, 64, dtype=torch.float16)
-    k = torch.randn(1, 4, 1, 64, dtype=torch.float16)
-    v = torch.randn(1, 4, 1, 64, dtype=torch.float16)
-    with pytest.raises(NotImplementedError, match="phase 1.2"):
-        flash_attn_mojo.flash_attn_func(q, k, v, causal=True)
 
 
 def test_headdim_other_than_64_raises():

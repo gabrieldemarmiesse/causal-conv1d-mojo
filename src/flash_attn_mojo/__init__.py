@@ -7,8 +7,8 @@ Tri Dao `flash-attn` 2.x public API. Three entry points planned:
 - ``flash_attn_qkvpacked_func(qkv, ...)``                 — Q/K/V packed into one tensor.
 - ``flash_attn_with_kvcache(q, k_cache, v_cache, ...)``   — autoregressive decode with KV-cache.
 
-Phase 1.1 (current): minimal CPU forward for ``flash_attn_func`` —
-fp16, headdim=64, non-causal, MHA. Everything else still raises.
+Phase 1.x (current): minimal CPU forward for ``flash_attn_func`` —
+fp16, headdim=64, MHA (causal optional). Everything else still raises.
 
 Tests compare correctness against the upstream ``flash_attn`` PyPI
 package (pinned to a prebuilt wheel via pyproject.toml).
@@ -38,7 +38,7 @@ _DTYPE_CODE = {
 }
 
 
-def _native_fwd_cpu(q, k, v, out, softmax_scale):
+def _native_fwd_cpu(q, k, v, out, softmax_scale, causal):
     _native_mod.flash_attn_fwd_cpu(
         q.data_ptr(),
         k.data_ptr(),
@@ -67,6 +67,7 @@ def _native_fwd_cpu(q, k, v, out, softmax_scale):
         float(softmax_scale),
         _DTYPE_CODE[q.dtype],
         q.shape[3],  # headdim
+        1 if causal else 0,
     )
 
 
@@ -87,15 +88,13 @@ def flash_attn_func(
     is ``(batch, seqlen, nheads, headdim)``; the last dim must be
     contiguous.
 
-    Phase 1.1 only: fp16, headdim=64, ``causal=False``, MHA (Q and K
-    have the same nheads), no dropout / window / alibi. Everything
-    else raises ``NotImplementedError`` with a phase pointer.
+    Currently: fp16, headdim=64, MHA (Q and K have the same nheads),
+    optional ``causal``, no dropout / window / alibi. Everything else
+    raises ``NotImplementedError`` with a phase pointer.
     """
-    # ---- phase 1.1 feature gates ----
+    # ---- feature gates ----
     if dropout_p != 0.0:
         raise NotImplementedError("dropout_p is not implemented yet — phase 1.8")
-    if causal:
-        raise NotImplementedError("causal is not implemented yet — phase 1.2")
     if window_size != (-1, -1):
         raise NotImplementedError(
             "window_size (sliding-window/local) is not implemented yet — phase 1.9"
@@ -154,7 +153,7 @@ def flash_attn_func(
         )
 
     out = torch.empty_like(q)
-    _native_fwd_cpu(q, k, v, out, softmax_scale)
+    _native_fwd_cpu(q, k, v, out, softmax_scale, causal)
     return out
 
 

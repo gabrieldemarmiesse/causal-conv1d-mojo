@@ -8,7 +8,7 @@ the GPU kernel in `flash_fwd.mojo` is the real product.
 Algorithm — standard "FlashAttention" online softmax recurrence:
 
     m, l, o = -inf, 0, zeros(D)
-    for kj in range(seqlen_k):
+    for kj in range(k_max + 1):
         s = (q . k_j) * softmax_scale
         m_new = max(m, s)
         alpha = exp(m - m_new)
@@ -18,8 +18,14 @@ Algorithm — standard "FlashAttention" online softmax recurrence:
         m     = m_new
     out = o / l
 
-The first iteration (m = -inf, l = 0, o = 0) handles cleanly:
-m_new = s, alpha = exp(-inf - s) = 0, l = 1, o = v_0, m = s.
+`k_max` is `seqlen_k - 1` for non-causal, or
+`(seqlen_k - seqlen_q) + q_idx` for causal — bottom-right alignment,
+matching upstream `flash_attn_func`. If `k_max < 0` (only possible
+when `seqlen_k < seqlen_q` with causal), the row attends to nothing
+and the output is zero.
+
+The first valid iteration (m = -inf) handles cleanly:
+m_new = s, alpha = exp(-inf - s) = 0, l = 1, o = v_first, m = s.
 """
 
 from std.algorithm import sync_parallelize
@@ -29,6 +35,7 @@ from std.math import exp, inf
 fn fwd_kernel_cpu[
     dtype: DType,
     headdim: Int,
+    causal: Bool,
 ](
     batch: Int,
     seqlen_q: Int,
@@ -56,11 +63,12 @@ fn fwd_kernel_cpu[
     out_h_stride: Int,
     out_d_stride: Int,
 ):
-    """Causal conv1d... no wait, flash-attn forward, CPU path.
+    """flash-attn forward, CPU path.
 
     Comptime params:
         dtype:   element type (only fp16 in phase 1.1)
         headdim: per-head dimension (only 64 in phase 1.1)
+        causal:  apply causal mask with bottom-right alignment
 
     Tensor layout (matches upstream `flash_attn_func`): all of q, k, v,
     out are `(batch, seqlen, nheads, headdim)`. Strides are passed
@@ -72,6 +80,9 @@ fn fwd_kernel_cpu[
     """
     alias accum_t = DType.float32
     var neg_inf: Float32 = -inf[accum_t]()
+    # Bottom-right alignment: q_i attends to k_j iff j <= seq_offset + i.
+    # When seqlen_q == seqlen_k this collapses to standard j <= i.
+    var seq_offset = seqlen_k - seqlen_q
 
     @parameter
     fn process_bhq(idx: Int):
@@ -102,7 +113,23 @@ fn fwd_kernel_cpu[
         var l: Float32 = 0
         var o = SIMD[accum_t, headdim](0)
 
-        for kj in range(seqlen_k):
+        # Inclusive upper bound on k positions for this query row.
+        var kj_end: Int = seqlen_k
+
+        @parameter
+        if causal:
+            var k_max = seq_offset + q_idx
+            if k_max < 0:
+                # Row attends to nothing — write zeros and return.
+                @parameter
+                for d in range(headdim):
+                    out_ptr[out_base + d * out_d_stride] = Scalar[dtype](0)
+                return
+            kj_end = k_max + 1
+            if kj_end > seqlen_k:
+                kj_end = seqlen_k
+
+        for kj in range(kj_end):
             var k_base = k_b_h_base + kj * k_s_stride
             var v_base = v_b_h_base + kj * v_s_stride
 
