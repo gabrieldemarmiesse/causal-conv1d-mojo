@@ -73,6 +73,8 @@ def flash_attn_fwd_cpu(
         31 window_right (int) — -1 = unbounded, ≥0 = num keys to the right
         32 alibi_addr   (int) — fp32 ptr; 0 disables ALiBi
         33 alibi_b_stride (int) — 0 if shape (H,), nheads if (B, H)
+        34 dropout_mask_addr (int) — fp32 ptr to (B, H_q, S_q, S_k) mask;
+            0 disables dropout. Mask values are pre-scaled by 1/(1-p).
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -113,7 +115,9 @@ def flash_attn_fwd_cpu(
     var window_right_rt: Int = Int(py=args[31])
     var alibi_addr: Int = Int(py=args[32])
     var alibi_b_stride: Int = Int(py=args[33])
+    var dropout_addr: Int = Int(py=args[34])
     var has_alibi: Bool = alibi_addr != 0
+    var has_dropout: Bool = dropout_addr != 0
 
     if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
         return PythonObject(None)
@@ -142,6 +146,11 @@ def flash_attn_fwd_cpu(
             alibi_ptr = UnsafePointer[Float32, MutAnyOrigin](
                 unsafe_from_address=alibi_addr
             )
+        var dropout_ptr = lse_ptr  # dummy when disabled
+        if has_dropout:
+            dropout_ptr = UnsafePointer[Float32, MutAnyOrigin](
+                unsafe_from_address=dropout_addr
+            )
         fwd_kernel_cpu[dtype, headdim, causal](
             batch_int,
             seqlen_q_int,
@@ -154,6 +163,8 @@ def flash_attn_fwd_cpu(
             has_alibi,
             alibi_b_stride,
             alibi_ptr,
+            has_dropout,
+            dropout_ptr,
             q_ptr,
             k_ptr,
             v_ptr,
@@ -245,6 +256,7 @@ def flash_attn_bwd_cpu(
         51 window_right (int)
         52 alibi_addr   (int)
         53 alibi_b_stride (int)
+        54 dropout_mask_addr (int)
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -303,7 +315,9 @@ def flash_attn_bwd_cpu(
     var window_right_rt: Int = Int(py=args[51])
     var alibi_addr: Int = Int(py=args[52])
     var alibi_b_stride: Int = Int(py=args[53])
+    var dropout_addr: Int = Int(py=args[54])
     var has_alibi: Bool = alibi_addr != 0
+    var has_dropout: Bool = dropout_addr != 0
 
     if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
         return PythonObject(None)
@@ -342,6 +356,11 @@ def flash_attn_bwd_cpu(
             alibi_ptr = UnsafePointer[Float32, MutAnyOrigin](
                 unsafe_from_address=alibi_addr
             )
+        var dropout_ptr = lse_ptr
+        if has_dropout:
+            dropout_ptr = UnsafePointer[Float32, MutAnyOrigin](
+                unsafe_from_address=dropout_addr
+            )
         bwd_kernel_cpu[dtype, headdim, causal](
             batch_int,
             seqlen_q_int,
@@ -354,6 +373,8 @@ def flash_attn_bwd_cpu(
             has_alibi,
             alibi_b_stride,
             alibi_ptr,
+            has_dropout,
+            dropout_ptr,
             q_ptr,
             k_ptr,
             v_ptr,

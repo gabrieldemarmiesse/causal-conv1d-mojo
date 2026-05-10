@@ -53,6 +53,12 @@ fn fwd_kernel_cpu[
     has_alibi: Bool,
     alibi_b_stride: Int,
     alibi_ptr: UnsafePointer[Float32, MutAnyOrigin],
+    # Dropout: when has_dropout is False, mask_ptr is unused. When True,
+    # mask is fp32 of shape (batch, nheads_q, seqlen_q, seqlen_k), each
+    # element ∈ {0, 1/(1-p)} (already scale-baked, so the kernel just
+    # multiplies in).
+    has_dropout: Bool,
+    dropout_mask_ptr: UnsafePointer[Float32, MutAnyOrigin],
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -202,11 +208,21 @@ fn fwd_kernel_cpu[
             var p = exp(score - m_new)
             l = alpha * l + p
 
-            # o = alpha * o + p * v_j  (per-element, vectorised over D)
+            # Dropout: read pre-scaled mask weight; non-dropout path reuses 1.
+            var mask_weight: Float32 = 1
+            if has_dropout:
+                var mask_idx = (
+                    (b * nheads_q + h_q) * seqlen_q + q_idx
+                ) * seqlen_k + kj
+                mask_weight = dropout_mask_ptr[mask_idx]
+
+            # o = alpha * o + (mask * p) * v_j  (vectorised over D)
+            var p_eff = p * mask_weight
+
             @parameter
             for d in range(headdim):
                 var v_d = v_ptr[v_base + d * v_d_stride].cast[accum_t]()
-                o[d] = alpha * o[d] + p * v_d
+                o[d] = alpha * o[d] + p_eff * v_d
             m = m_new
 
         # Final normalise + writeback. l is guaranteed > 0 because

@@ -75,9 +75,12 @@ def _normalise_alibi(alibi_slopes, nheads_q, batch):
     )
 
 
-def _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window, alibi):
+def _native_fwd_cpu(
+    q, k, v, out, lse, softmax_scale, causal, window, alibi, dropout_mask
+):
     alibi_t, alibi_stride = _normalise_alibi(alibi, q.shape[2], q.shape[0])
     alibi_addr = alibi_t.data_ptr() if alibi_t is not None else 0
+    dropout_addr = dropout_mask.data_ptr() if dropout_mask is not None else 0
     _native_mod.flash_attn_fwd_cpu(
         q.data_ptr(),
         k.data_ptr(),
@@ -101,14 +104,29 @@ def _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window, alibi):
         int(window[1]),
         alibi_addr,
         alibi_stride,
+        dropout_addr,
     )
 
 
 def _native_bwd_cpu(
-    q, k, v, out, dout, lse, dq, dk, dv, softmax_scale, causal, window, alibi
+    q,
+    k,
+    v,
+    out,
+    dout,
+    lse,
+    dq,
+    dk,
+    dv,
+    softmax_scale,
+    causal,
+    window,
+    alibi,
+    dropout_mask,
 ):
     alibi_t, alibi_stride = _normalise_alibi(alibi, q.shape[2], q.shape[0])
     alibi_addr = alibi_t.data_ptr() if alibi_t is not None else 0
+    dropout_addr = dropout_mask.data_ptr() if dropout_mask is not None else 0
     _native_mod.flash_attn_bwd_cpu(
         q.data_ptr(),
         k.data_ptr(),
@@ -140,6 +158,7 @@ def _native_bwd_cpu(
         int(window[1]),
         alibi_addr,
         alibi_stride,
+        dropout_addr,
     )
 
 
@@ -147,14 +166,34 @@ class _FlashAttnFunc(torch.autograd.Function):
     """torch.autograd.Function wrapping the native fwd/bwd calls."""
 
     @staticmethod
-    def forward(ctx, q, k, v, softmax_scale, causal, window, alibi):
+    def forward(ctx, q, k, v, softmax_scale, causal, window, alibi, dropout_p):
         out = torch.empty_like(q)
         # lse is fp32, shape (batch, nheads_q, seqlen_q), contiguous.
         lse = torch.empty(
             q.shape[0], q.shape[2], q.shape[1], dtype=torch.float32, device=q.device
         )
-        _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window, alibi)
+        # Materialise dropout mask up-front. Pre-scaled by 1/(1-p) so the
+        # kernel only needs to multiply.
+        dropout_mask = None
+        if dropout_p > 0.0:
+            keep_prob = 1.0 - dropout_p
+            dropout_mask = (
+                torch.empty(
+                    q.shape[0],
+                    q.shape[2],  # nheads_q
+                    q.shape[1],  # seqlen_q
+                    k.shape[1],  # seqlen_k
+                    dtype=torch.float32,
+                    device=q.device,
+                )
+                .bernoulli_(keep_prob)
+                .div_(keep_prob)
+            )
+        _native_fwd_cpu(
+            q, k, v, out, lse, softmax_scale, causal, window, alibi, dropout_mask
+        )
         ctx.save_for_backward(q, k, v, out, lse)
+        ctx.dropout_mask = dropout_mask  # tensor or None — keeps it alive
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window = window
@@ -183,10 +222,11 @@ class _FlashAttnFunc(torch.autograd.Function):
             ctx.causal,
             ctx.window,
             ctx.alibi,
+            ctx.dropout_mask,
         )
-        # 7 forward inputs: q, k, v, softmax_scale, causal, window, alibi —
-        # gradients only flow through the first three.
-        return dq, dk, dv, None, None, None, None
+        # 8 forward inputs (q, k, v, softmax_scale, causal, window, alibi,
+        # dropout_p) — gradients only flow through the first three.
+        return dq, dk, dv, None, None, None, None, None
 
 
 def flash_attn_func(
@@ -211,8 +251,8 @@ def flash_attn_func(
     raises ``NotImplementedError`` with a phase pointer.
     """
     # ---- feature gates ----
-    if dropout_p != 0.0:
-        raise NotImplementedError("dropout_p is not implemented yet — phase 1.8")
+    if not isinstance(dropout_p, (int, float)) or dropout_p < 0.0 or dropout_p >= 1.0:
+        raise ValueError(f"dropout_p must be in [0, 1); got {dropout_p!r}")
     if (
         not isinstance(window_size, tuple)
         or len(window_size) != 2
@@ -281,7 +321,7 @@ def flash_attn_func(
         )
 
     return _FlashAttnFunc.apply(
-        q, k, v, softmax_scale, causal, window_size, alibi_slopes
+        q, k, v, softmax_scale, causal, window_size, alibi_slopes, dropout_p
     )
 
 

@@ -49,6 +49,8 @@ fn bwd_kernel_cpu[
     has_alibi: Bool,
     alibi_b_stride: Int,
     alibi_ptr: UnsafePointer[Float32, MutAnyOrigin],
+    has_dropout: Bool,
+    dropout_mask_ptr: UnsafePointer[Float32, MutAnyOrigin],
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -199,7 +201,7 @@ fn bwd_kernel_cpu[
                 s -= alibi_slope_a * Float32(dist)
             var p = exp(s - lse)
 
-            # dP_j = dO · V_j
+            # dP̃_j = dO · V_j  (gradient w.r.t. dropped-and-scaled prob)
             var dp: Float32 = 0
 
             @parameter
@@ -208,7 +210,14 @@ fn bwd_kernel_cpu[
                     do_vec[d] * v_ptr[v_base + d * v_d_stride].cast[accum_t]()
                 )
 
-            var ds = p * (dp - D_i)
+            # dS = P_softmax * (dP̃ * mask/(1-p) - D_i)
+            var mask_weight: Float32 = 1
+            if has_dropout:
+                var mask_idx = (
+                    (b * nheads_q + h_q) * seqlen_q + q_idx
+                ) * seqlen_k + kj
+                mask_weight = dropout_mask_ptr[mask_idx]
+            var ds = p * (dp * mask_weight - D_i)
 
             @parameter
             for d in range(headdim):
@@ -327,7 +336,8 @@ fn bwd_kernel_cpu[
                     s -= alibi_slope_b * Float32(dist)
                 var p = exp(s - lse)
 
-                # dP = dO · V_j ; D_i = dO · O_i
+                # dP̃ = dO · V_j ; D_i = dO · O_i (note D_i is unchanged
+                # by dropout — see flash_bwd_cpu module docstring).
                 var dp: Float32 = 0
                 var D_i: Float32 = 0
 
@@ -342,7 +352,14 @@ fn bwd_kernel_cpu[
                         * out_ptr[o_base + d * out_d_stride].cast[accum_t]()
                     )
 
-                var ds = p * (dp - D_i)
+                var mask_weight: Float32 = 1
+                if has_dropout:
+                    var mask_idx = (
+                        (b * nheads_q + h_q) * seqlen_q + q_idx
+                    ) * seqlen_k + k_idx
+                    mask_weight = dropout_mask_ptr[mask_idx]
+                var p_dropped = p * mask_weight  # = P̃[i,j]
+                var ds = p * (dp * mask_weight - D_i)
 
                 @parameter
                 for d in range(headdim):
@@ -350,7 +367,7 @@ fn bwd_kernel_cpu[
                         do_base + d * dout_d_stride
                     ].cast[accum_t]()
                     var q_d = q_ptr[q_base + d * q_d_stride].cast[accum_t]()
-                    dv_acc[d] += p * do_d
+                    dv_acc[d] += p_dropped * do_d
                     dk_acc[d] += ds * q_d * softmax_scale
 
         @parameter
