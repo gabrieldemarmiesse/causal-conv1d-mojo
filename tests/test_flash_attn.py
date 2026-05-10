@@ -1471,3 +1471,43 @@ def test_upstream_importable():
     import flash_attn
 
     assert flash_attn.__version__.startswith("2.")
+
+
+# Cross-check vs upstream flash_attn on GPU. Our impl is CPU-only and
+# fp32-internal, upstream is GPU/fp16 — they should agree within
+# ~5e-3 forward tolerance and ~1e-2 backward tolerance.
+@pytest.mark.parametrize("causal", [False, True])
+def test_flash_attn_func_matches_upstream(causal):
+    _skip_if_no_upstream()
+    _skip_if_unsupported_arch()
+    import flash_attn
+
+    batch, seqlen, nheads, headdim = 2, 32, 4, 64
+    q_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    dout_cpu = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    # Ours: CPU.
+    qm = q_cpu.clone().requires_grad_(True)
+    km = k_cpu.clone().requires_grad_(True)
+    vm = v_cpu.clone().requires_grad_(True)
+    out_mojo = flash_attn_mojo.flash_attn_func(qm, km, vm, causal=causal)
+    out_mojo.backward(dout_cpu)
+
+    # Upstream: GPU.
+    qg = q_cpu.cuda().clone().requires_grad_(True)
+    kg = k_cpu.cuda().clone().requires_grad_(True)
+    vg = v_cpu.cuda().clone().requires_grad_(True)
+    out_up = flash_attn.flash_attn_func(qg, kg, vg, causal=causal)
+    out_up.backward(dout_cpu.cuda())
+
+    fwd_diff = (out_mojo.float() - out_up.cpu().float()).abs().max().item()
+    assert fwd_diff < 5e-3, f"forward max_diff={fwd_diff} (causal={causal})"
+    for name, mine, theirs in [
+        ("dq", qm.grad, qg.grad.cpu()),
+        ("dk", km.grad, kg.grad.cpu()),
+        ("dv", vm.grad, vg.grad.cpu()),
+    ]:
+        diff = (mine.float() - theirs.float()).abs().max().item()
+        assert diff < 1e-2, f"{name} max_diff={diff} (causal={causal})"
