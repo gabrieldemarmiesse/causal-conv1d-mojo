@@ -12,6 +12,7 @@ write head. `has_state_indices` redirects the state row via
 """
 
 from std.algorithm import sync_parallelize
+from layout import TileTensor, TensorLayout
 
 from causal_conv1d_common import _silu_f32
 
@@ -23,29 +24,27 @@ fn update_kernel_cpu[
     apply_silu: Bool,
     has_state_indices: Bool,
     is_circular: Bool,
+    XLayoutType: TensorLayout,
+    WLayoutType: TensorLayout,
+    SLayoutType: TensorLayout,
+    OLayoutType: TensorLayout,
 ](
     batch: Int,
     dim: Int,
     seqlen: Int,
     state_len: Int,
-    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
+    weight: TileTensor[dtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    conv_state_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    conv_state: TileTensor[mut=True, dtype, SLayoutType, MutAnyOrigin],
     state_indices_ptr: UnsafePointer[Int32, MutAnyOrigin],
     cache_seqlens_ptr: UnsafePointer[Int32, MutAnyOrigin],
-    output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    x_batch_stride: Int,
-    x_c_stride: Int,
-    x_l_stride: Int,
-    weight_c_stride: Int,
-    weight_w_stride: Int,
-    state_batch_stride: Int,
-    state_c_stride: Int,
-    state_l_stride: Int,
-    out_batch_stride: Int,
-    out_c_stride: Int,
-    out_l_stride: Int,
+    output: TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin],
+) where (
+    TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
+    and TileTensor[mut=True, dtype, SLayoutType, MutAnyOrigin].flat_rank == 3
+    and TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin].flat_rank == 3
 ):
     comptime accum_t = DType.float32
 
@@ -54,29 +53,20 @@ fn update_kernel_cpu[
         var b = bc_idx // dim
         var d = bc_idx % dim
 
-        var x_base = b * x_batch_stride + d * x_c_stride
-        var out_base = b * out_batch_stride + d * out_c_stride
-
         var state_batch_coord: Int = b
 
         comptime if has_state_indices:
             var idx_val: Int = Int(state_indices_ptr[b])
             if idx_val < 0:
                 for i in range(seqlen):
-                    output_ptr[out_base + i * out_l_stride] = Scalar[dtype](0)
+                    output[b, d, i] = Scalar[dtype](0)
                 return
             state_batch_coord = idx_val
-
-        var state_base = (
-            state_batch_coord * state_batch_stride + d * state_c_stride
-        )
 
         var weights = SIMD[accum_t, width](0)
 
         comptime for k in range(width):
-            weights[k] = weight_ptr[
-                d * weight_c_stride + k * weight_w_stride
-            ].cast[accum_t]()
+            weights[k] = weight[d, k].cast[accum_t]()
 
         var bias_v: Scalar[accum_t] = 0
 
@@ -97,31 +87,23 @@ fn update_kernel_cpu[
         comptime if not is_circular:
             # Phase 1 (linear): shift state left by `seqlen`.
             for i in range(state_len - advance_len - (width - 1)):
-                conv_state_ptr[
-                    state_base + i * state_l_stride
-                ] = conv_state_ptr[
-                    state_base + (i + advance_len) * state_l_stride
+                conv_state[state_batch_coord, d, i] = conv_state[
+                    state_batch_coord, d, i + advance_len
                 ]
 
             # Phase 2 (linear): read trailing W-1 history (with writeback
             # for the small-state_len edge case).
             comptime for i in range(width - 1):
                 var read_idx: Int = state_len - (width - 1) + i
-                var state_val = conv_state_ptr[
-                    state_base + read_idx * state_l_stride
-                ]
+                var state_val = conv_state[state_batch_coord, d, read_idx]
                 var write_idx: Int = state_len - advance_len - (width - 1) + i
                 if i < advance_len + (width - 1) and write_idx >= 0:
-                    conv_state_ptr[
-                        state_base + write_idx * state_l_stride
-                    ] = state_val
+                    conv_state[state_batch_coord, d, write_idx] = state_val
                 x_vals[i] = state_val.cast[accum_t]()
         else:
             # Circular: read W-1 history starting at update_idx (mod state_len).
             comptime for i in range(width - 1):
-                var state_val = conv_state_ptr[
-                    state_base + update_idx * state_l_stride
-                ]
+                var state_val = conv_state[state_batch_coord, d, update_idx]
                 x_vals[i] = state_val.cast[accum_t]()
                 update_idx += 1
                 if update_idx >= state_len:
@@ -129,16 +111,14 @@ fn update_kernel_cpu[
 
         # Phase 3: walk new x.
         for i in range(seqlen):
-            var x_val = x_ptr[x_base + i * x_l_stride]
+            var x_val = x[b, d, i]
 
             comptime if not is_circular:
                 var write_idx: Int = state_len - advance_len + i
                 if i < advance_len and write_idx >= 0:
-                    conv_state_ptr[
-                        state_base + write_idx * state_l_stride
-                    ] = x_val
+                    conv_state[state_batch_coord, d, write_idx] = x_val
             else:
-                conv_state_ptr[state_base + update_idx * state_l_stride] = x_val
+                conv_state[state_batch_coord, d, update_idx] = x_val
                 update_idx += 1
                 if update_idx >= state_len:
                     update_idx -= state_len
@@ -153,7 +133,7 @@ fn update_kernel_cpu[
             comptime if apply_silu:
                 out_val = _silu_f32(Float32(out_val))
 
-            output_ptr[out_base + i * out_l_stride] = out_val.cast[dtype]()
+            output[b, d, i] = out_val.cast[dtype]()
 
             comptime for k in range(width - 1):
                 x_vals[k] = x_vals[k + 1]

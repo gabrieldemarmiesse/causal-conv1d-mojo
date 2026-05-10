@@ -19,6 +19,7 @@ where `dpre[t] = silu'(pre[t]) * dout[t]`.
 from std.algorithm import sync_parallelize
 from std.math import exp
 from std.os.atomic import Atomic, Consistency
+from layout import TileTensor, TensorLayout
 
 
 @always_inline
@@ -28,24 +29,27 @@ fn _cpu_dpre_at[
     has_seq_idx: Bool,
     has_initial_states: Bool,
     apply_silu: Bool,
+    XLayoutType: TensorLayout,
+    DoutLayoutType: TensorLayout,
 ](
     t: Int,
+    b: Int,
+    d: Int,
     seqlen: Int,
     bias_v: Float32,
     weights: SIMD[DType.float32, width],
-    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    x_base: Int,
-    x_l_stride: Int,
-    dout_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    dout_base: Int,
-    dout_l_stride: Int,
+    x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
+    dout: TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin],
     seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     seq_idx_base: Int,
     seq_idx_l_stride: Int,
     initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     initial_states_base: Int,
     initial_states_l_stride: Int,
-) -> Float32:
+) -> Float32 where (
+    TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin].flat_rank == 3
+):
     """`dpre[t]` for the CPU backward, 0 if `t` is out of [0, seqlen).
 
     With `apply_silu`, `dpre[t] = silu'(pre[t]) * dout[t]` (the bias-aware
@@ -73,7 +77,7 @@ fn _cpu_dpre_at[
             return 0
 
     comptime if not apply_silu:
-        return dout_ptr[dout_base + t * dout_l_stride].cast[DType.float32]()
+        return dout[b, d, t].cast[DType.float32]()
 
     var pre: Float32 = bias_v
 
@@ -88,10 +92,7 @@ fn _cpu_dpre_at[
                 ]
                 include = src_id == cur_id
             if include:
-                pre += (
-                    weights[k]
-                    * x_ptr[x_base + src_t * x_l_stride].cast[DType.float32]()
-                )
+                pre += weights[k] * x[b, d, src_t].cast[DType.float32]()
         else:
 
             comptime if has_initial_states:
@@ -104,7 +105,7 @@ fn _cpu_dpre_at[
                 )
     var sig: Float32 = 1.0 / (1.0 + exp(-pre))
     var silu_grad: Float32 = sig * (1.0 + pre * (1.0 - sig))
-    var dout_v = dout_ptr[dout_base + t * dout_l_stride].cast[DType.float32]()
+    var dout_v = dout[b, d, t].cast[DType.float32]()
     return dout_v * silu_grad
 
 
@@ -115,39 +116,37 @@ fn bwd_kernel_cpu[
     has_seq_idx: Bool,
     has_initial_states: Bool,
     apply_silu: Bool,
+    XLayoutType: TensorLayout,
+    WLayoutType: TensorLayout,
+    DoutLayoutType: TensorLayout,
+    DxLayoutType: TensorLayout,
 ](
     batch: Int,
     dim: Int,
     seqlen: Int,
-    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
+    weight: TileTensor[dtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    dout_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    dout: TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin],
     seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    dx_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    dx: TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin],
     dweight_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
     dbias_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
     dinitial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    x_batch_stride: Int,
-    x_c_stride: Int,
-    x_l_stride: Int,
-    weight_c_stride: Int,
-    weight_w_stride: Int,
-    dout_batch_stride: Int,
-    dout_c_stride: Int,
-    dout_l_stride: Int,
     seq_idx_b_stride: Int,
     seq_idx_l_stride: Int,
     initial_states_batch_stride: Int,
     initial_states_c_stride: Int,
     initial_states_l_stride: Int,
-    dx_batch_stride: Int,
-    dx_c_stride: Int,
-    dx_l_stride: Int,
     dinitial_states_batch_stride: Int,
     dinitial_states_c_stride: Int,
     dinitial_states_l_stride: Int,
+) where (
+    TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
+    and TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin].flat_rank == 3
 ):
     """Causal conv1d backward, CPU path.
 
@@ -174,13 +173,8 @@ fn bwd_kernel_cpu[
         var weights = SIMD[accum_t, width](0)
 
         comptime for k in range(width):
-            weights[k] = weight_ptr[
-                d * weight_c_stride + k * weight_w_stride
-            ].cast[accum_t]()
+            weights[k] = weight[d, k].cast[accum_t]()
 
-        var x_base = b * x_batch_stride + d * x_c_stride
-        var dout_base = b * dout_batch_stride + d * dout_c_stride
-        var dx_base = b * dx_batch_stride + d * dx_c_stride
         var seq_idx_base: Int = b * seq_idx_b_stride
         var init_base: Int = (
             b * initial_states_batch_stride + d * initial_states_c_stride
@@ -194,18 +188,22 @@ fn bwd_kernel_cpu[
 
         comptime for k in range(width):
             dpre_win[k] = _cpu_dpre_at[
-                dtype, width, has_seq_idx, has_initial_states, apply_silu
+                dtype,
+                width,
+                has_seq_idx,
+                has_initial_states,
+                apply_silu,
+                XLayoutType,
+                DoutLayoutType,
             ](
                 k,
+                b,
+                d,
                 seqlen,
                 bias_v,
                 weights,
-                x_ptr,
-                x_base,
-                x_l_stride,
-                dout_ptr,
-                dout_base,
-                dout_l_stride,
+                x,
+                dout,
                 seq_idx_ptr,
                 seq_idx_base,
                 seq_idx_l_stride,
@@ -272,7 +270,7 @@ fn bwd_kernel_cpu[
                         include = False
                 if include:
                     dx_v += weights[width - 1 - k] * dpre_win[k]
-            dx_ptr[dx_base + t * dx_l_stride] = dx_v.cast[dtype]()
+            dx[b, d, t] = dx_v.cast[dtype]()
 
             # dweight[k] += dpre[t] * x[t + k - (W-1)];  dbias += dpre[t]
             # dpre_win[0] = dpre[t]; already zero if seq_idx[t] < 0.
@@ -294,27 +292,29 @@ fn bwd_kernel_cpu[
                         ]
                         include = sid == cur_id_t
                     if include:
-                        var x_v = x_ptr[x_base + src_t * x_l_stride].cast[
-                            accum_t
-                        ]()
+                        var x_v = x[b, d, src_t].cast[accum_t]()
                         local_dweight[k] += dpre_t * x_v
 
             # Slide window left, append dpre[t + W] (or 0 past seqlen).
             comptime for k in range(width - 1):
                 dpre_win[k] = dpre_win[k + 1]
             dpre_win[width - 1] = _cpu_dpre_at[
-                dtype, width, has_seq_idx, has_initial_states, apply_silu
+                dtype,
+                width,
+                has_seq_idx,
+                has_initial_states,
+                apply_silu,
+                XLayoutType,
+                DoutLayoutType,
             ](
                 t + width,
+                b,
+                d,
                 seqlen,
                 bias_v,
                 weights,
-                x_ptr,
-                x_base,
-                x_l_stride,
-                dout_ptr,
-                dout_base,
-                dout_l_stride,
+                x,
+                dout,
                 seq_idx_ptr,
                 seq_idx_base,
                 seq_idx_l_stride,

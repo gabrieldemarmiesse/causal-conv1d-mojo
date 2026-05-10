@@ -754,6 +754,27 @@ def causal_conv1d_fwd_cpu(
             has_initial_states: Bool,
             apply_silu: Bool,
         ]() raises:
+            var x_tt = TileTensor(
+                x_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                    (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+                ),
+            )
+            var w_tt = TileTensor(
+                w_ptr,
+                Layout(
+                    (Idx(dim_int), Idx[width]()),
+                    (Idx(w_c_stride), Idx(w_w_stride)),
+                ),
+            )
+            var o_tt = TileTensor(
+                o_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                    (Idx(o_b_stride), Idx(o_c_stride), Idx(o_l_stride)),
+                ),
+            )
             fwd_kernel_cpu[
                 dtype,
                 width,
@@ -761,29 +782,24 @@ def causal_conv1d_fwd_cpu(
                 has_seq_idx,
                 has_initial_states,
                 apply_silu,
+                type_of(x_tt).LayoutType,
+                type_of(w_tt).LayoutType,
+                type_of(o_tt).LayoutType,
             ](
                 batch_int,
                 dim_int,
                 seqlen_int,
-                x_ptr,
-                w_ptr,
+                x_tt.as_immut(),
+                w_tt.as_immut(),
                 b_ptr,
                 seq_idx_ptr,
                 initial_states_ptr,
-                o_ptr,
-                x_b_stride,
-                x_c_stride,
-                x_l_stride,
-                w_c_stride,
-                w_w_stride,
+                o_tt,
                 seq_idx_b_stride,
                 seq_idx_l_stride,
                 initial_states_b_stride,
                 initial_states_c_stride,
                 initial_states_l_stride,
-                o_b_stride,
-                o_c_stride,
-                o_l_stride,
             )
 
         # Comptime sweep across (has_bias, has_seq_idx, has_initial_states,
@@ -951,6 +967,34 @@ def causal_conv1d_bwd_full_cpu(
             has_initial_states: Bool,
             apply_silu: Bool,
         ]() raises:
+            var x_tt = TileTensor(
+                x_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                    (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+                ),
+            )
+            var w_tt = TileTensor(
+                w_ptr,
+                Layout(
+                    (Idx(dim_int), Idx[width]()),
+                    (Idx(w_c_stride), Idx(w_w_stride)),
+                ),
+            )
+            var dout_tt = TileTensor(
+                dout_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                    (Idx(dout_b_stride), Idx(dout_c_stride), Idx(dout_l_stride)),
+                ),
+            )
+            var dx_tt = TileTensor(
+                dx_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                    (Idx(dx_b_stride), Idx(dx_c_stride), Idx(dx_l_stride)),
+                ),
+            )
             bwd_kernel_cpu[
                 dtype,
                 width,
@@ -958,36 +1002,29 @@ def causal_conv1d_bwd_full_cpu(
                 has_seq_idx,
                 has_initial_states,
                 apply_silu,
+                type_of(x_tt).LayoutType,
+                type_of(w_tt).LayoutType,
+                type_of(dout_tt).LayoutType,
+                type_of(dx_tt).LayoutType,
             ](
                 batch_int,
                 dim_int,
                 seqlen_int,
-                x_ptr,
-                w_ptr,
+                x_tt.as_immut(),
+                w_tt.as_immut(),
                 b_ptr,
-                dout_ptr,
+                dout_tt.as_immut(),
                 seq_idx_ptr,
                 initial_states_ptr,
-                dx_ptr,
+                dx_tt,
                 dweight_acc_ptr,
                 dbias_acc_ptr,
                 dinitial_states_ptr,
-                x_b_stride,
-                x_c_stride,
-                x_l_stride,
-                w_c_stride,
-                w_w_stride,
-                dout_b_stride,
-                dout_c_stride,
-                dout_l_stride,
                 seq_idx_b_stride,
                 seq_idx_l_stride,
                 initial_states_b_stride,
                 initial_states_c_stride,
                 initial_states_l_stride,
-                dx_b_stride,
-                dx_c_stride,
-                dx_l_stride,
                 dinitial_states_b_stride,
                 dinitial_states_c_stride,
                 dinitial_states_l_stride,
@@ -1319,6 +1356,34 @@ def causal_conv1d_update_cpu(
             has_state_indices: Bool,
             is_circular: Bool,
         ]() raises:
+            var x_tt = TileTensor(
+                x_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                    (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+                ),
+            )
+            var w_tt = TileTensor(
+                w_ptr,
+                Layout(
+                    (Idx(dim_int), Idx[width]()),
+                    (Idx(w_c_stride), Idx(w_w_stride)),
+                ),
+            )
+            var state_tt = TileTensor(
+                state_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(state_len_int)),
+                    (Idx(state_b_stride), Idx(state_c_stride), Idx(state_l_stride)),
+                ),
+            )
+            var o_tt = TileTensor(
+                o_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                    (Idx(o_b_stride), Idx(o_c_stride), Idx(o_l_stride)),
+                ),
+            )
             update_kernel_cpu[
                 dtype,
                 width,
@@ -1326,29 +1391,22 @@ def causal_conv1d_update_cpu(
                 apply_silu,
                 has_state_indices,
                 is_circular,
+                type_of(x_tt).LayoutType,
+                type_of(w_tt).LayoutType,
+                type_of(state_tt).LayoutType,
+                type_of(o_tt).LayoutType,
             ](
                 batch_int,
                 dim_int,
                 seqlen_int,
                 state_len_int,
-                x_ptr,
-                w_ptr,
+                x_tt.as_immut(),
+                w_tt.as_immut(),
                 b_ptr,
-                state_ptr,
+                state_tt,
                 state_indices_ptr,
                 cache_seqlens_ptr,
-                o_ptr,
-                x_b_stride,
-                x_c_stride,
-                x_l_stride,
-                w_c_stride,
-                w_w_stride,
-                state_b_stride,
-                state_c_stride,
-                state_l_stride,
-                o_b_stride,
-                o_c_stride,
-                o_l_stride,
+                o_tt,
             )
 
         @parameter

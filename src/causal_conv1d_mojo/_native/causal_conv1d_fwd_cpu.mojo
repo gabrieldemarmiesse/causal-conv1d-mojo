@@ -13,6 +13,7 @@ seqlen.
 """
 
 from std.algorithm import sync_parallelize
+from layout import TileTensor, TensorLayout
 
 from causal_conv1d_common import _silu_f32
 
@@ -24,29 +25,28 @@ fn fwd_kernel_cpu[
     has_seq_idx: Bool,
     has_initial_states: Bool,
     apply_silu: Bool,
+    XLayoutType: TensorLayout,
+    WLayoutType: TensorLayout,
+    OLayoutType: TensorLayout,
 ](
     batch: Int,
     dim: Int,
     seqlen: Int,
-    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
+    weight: TileTensor[dtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    x_batch_stride: Int,
-    x_c_stride: Int,
-    x_l_stride: Int,
-    weight_c_stride: Int,
-    weight_w_stride: Int,
+    output: TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin],
     seq_idx_b_stride: Int,
     seq_idx_l_stride: Int,
     initial_states_b_stride: Int,
     initial_states_c_stride: Int,
     initial_states_l_stride: Int,
-    out_batch_stride: Int,
-    out_c_stride: Int,
-    out_l_stride: Int,
+) where (
+    TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
+    and TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin].flat_rank == 3
 ):
     """Causal conv1d forward, CPU path.
 
@@ -74,12 +74,8 @@ fn fwd_kernel_cpu[
         var weights = SIMD[accum_t, width](0)
 
         comptime for k in range(width):
-            weights[k] = weight_ptr[
-                d * weight_c_stride + k * weight_w_stride
-            ].cast[accum_t]()
+            weights[k] = weight[d, k].cast[accum_t]()
 
-        var x_base = b * x_batch_stride + d * x_c_stride
-        var out_base = b * out_batch_stride + d * out_c_stride
         var seq_idx_base: Int = b * seq_idx_b_stride
         var initial_states_base: Int = (
             b * initial_states_b_stride + d * initial_states_c_stride
@@ -104,10 +100,7 @@ fn fwd_kernel_cpu[
                         ]
                         include = src_id == cur_id
                     if include:
-                        pre += (
-                            weights[k]
-                            * x_ptr[x_base + src_t * x_l_stride].cast[accum_t]()
-                        )
+                        pre += weights[k] * x[b, d, src_t].cast[accum_t]()
                 else:
 
                     comptime if has_initial_states:
@@ -132,6 +125,6 @@ fn fwd_kernel_cpu[
                 if cur_id < 0:
                     out_v = 0
 
-            output_ptr[out_base + t * out_l_stride] = out_v.cast[dtype]()
+            output[b, d, t] = out_v.cast[dtype]()
 
     sync_parallelize[process_bc](batch * dim)
