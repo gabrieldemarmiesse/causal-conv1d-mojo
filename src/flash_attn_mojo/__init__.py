@@ -23,10 +23,11 @@ Public API (matches upstream — see flash_attn 2.x):
   - flash_attn_with_kvcache(q, k_cache, v_cache, k=, v=, ...)
 
 Supported features (all together):
-  fp16 / bf16 / fp32; headdim ∈ {64, 96, 128}; MHA / MQA / GQA;
-  causal (bottom-right alignment); window_size = (left, right);
-  alibi_slopes (1-D or 2-D); softcap (Gemma-style logit cap);
-  dropout_p; deterministic backward (always — no atomics);
+  fp16 / bf16 / fp32; headdim ∈ {32, 64, 96, 128, 160, 192, 224, 256};
+  MHA / MQA / GQA; causal (bottom-right alignment); window_size =
+  (left, right); alibi_slopes (1-D or 2-D); softcap (Gemma-style
+  logit cap); dropout_p; deterministic backward (always — no
+  atomics); return_attn_probs (debug-mode tuple return).
   flash_attn_with_kvcache adds: cache_seqlens, cache_batch_idx,
   rotary embedding (interleaved + split), block_table (paged cache).
 
@@ -49,6 +50,19 @@ import torch
 import mojo.importer  # noqa: F401
 
 from flash_attn_mojo._native import flash_attn_native as _native_mod
+from flash_attn_mojo import bert_padding
+
+
+__all__ = [
+    "flash_attn_func",
+    "flash_attn_qkvpacked_func",
+    "flash_attn_kvpacked_func",
+    "flash_attn_varlen_func",
+    "flash_attn_varlen_qkvpacked_func",
+    "flash_attn_varlen_kvpacked_func",
+    "flash_attn_with_kvcache",
+    "bert_padding",
+]
 
 
 __version__ = "0.0.0"

@@ -1407,6 +1407,64 @@ def test_flash_attn_with_kvcache_paged_with_cache_batch_idx_raises():
         )
 
 
+# bert_padding helpers — pad / unpad round-trip used with varlen.
+def test_bert_padding_unpad_pad_roundtrip():
+    """unpad_input → pad_input is identity on the valid tokens."""
+    from flash_attn_mojo.bert_padding import pad_input, unpad_input
+
+    batch, seqlen, hidden = 3, 8, 16
+    hidden_states = torch.randn(batch, seqlen, hidden)
+    # Valid lengths per batch: [5, 3, 8].
+    valid = torch.tensor([5, 3, 8], dtype=torch.int64)
+    attention_mask = (torch.arange(seqlen).unsqueeze(0) < valid.unsqueeze(1)).int()
+
+    unpadded, indices, cu_seqlens, max_seq = unpad_input(hidden_states, attention_mask)
+    assert unpadded.shape == (5 + 3 + 8, hidden)
+    assert tuple(cu_seqlens.tolist()) == (0, 5, 8, 16)
+    assert max_seq == 8
+
+    # Round-trip: padding rows in the rebuilt tensor are zero, valid
+    # rows match the original.
+    padded = pad_input(unpadded, indices, batch, seqlen)
+    assert padded.shape == hidden_states.shape
+    valid_mask = attention_mask.bool().unsqueeze(-1).expand_as(padded)
+    assert torch.equal(padded[valid_mask], hidden_states[valid_mask])
+    # Padding positions are zero.
+    assert (padded[~valid_mask] == 0).all()
+
+
+def test_bert_padding_unpad_then_varlen():
+    """unpad → flash_attn_varlen_func → pad gives the same per-token
+    output as dense flash_attn_func on the unpadded prefix of each row."""
+    from flash_attn_mojo.bert_padding import pad_input, unpad_input
+
+    batch, seqlen, nheads, headdim = 2, 8, 1, 64
+    valid = torch.tensor([5, 3], dtype=torch.int64)
+    attention_mask = (torch.arange(seqlen).unsqueeze(0) < valid.unsqueeze(1)).int()
+
+    q = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    q_un, q_idx, cu_q, mq = unpad_input(q, attention_mask)
+    k_un, _, cu_k, mk = unpad_input(k, attention_mask)
+    v_un, _, _, _ = unpad_input(v, attention_mask)
+
+    out_un = flash_attn_mojo.flash_attn_varlen_func(
+        q_un, k_un, v_un, cu_q, cu_k, mq, mk, causal=True
+    )
+    out_padded = pad_input(out_un, q_idx, batch, seqlen)
+
+    # Reference: dense flash_attn_func per-batch, on the unpadded slice.
+    for b in range(batch):
+        n = int(valid[b].item())
+        ref = flash_attn_mojo.flash_attn_func(
+            q[b : b + 1, :n], k[b : b + 1, :n], v[b : b + 1, :n], causal=True
+        )
+        diff = (out_padded[b, :n].float() - ref[0].float()).abs().max().item()
+        assert diff < 5e-3, f"batch {b}: max_diff={diff}"
+
+
 # Sanity: upstream flash_attn is importable in this env (non-fatal).
 def test_upstream_importable():
     _skip_if_no_upstream()
