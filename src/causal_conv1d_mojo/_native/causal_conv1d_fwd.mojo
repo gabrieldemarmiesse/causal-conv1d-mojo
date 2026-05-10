@@ -70,7 +70,7 @@ fn fwd_kernel[
     `initial_states[b, c, src_t + W - 1]` instead of treating the
     out-of-range position as zero. Mutually exclusive with `has_seq_idx`.
     """
-    alias accum_t = DType.float32
+    comptime accum_t = DType.float32
 
     var tidx: Int = thread_idx.x
     var batch_id: Int = block_idx.z
@@ -84,14 +84,12 @@ fn fwd_kernel[
 
     var weights = InlineArray[Scalar[accum_t], width](uninitialized=True)
 
-    @parameter
-    for k in range(width):
+    comptime for k in range(width):
         weights[k] = rebind[Scalar[dtype]](w_lt[channel_id, k]).cast[accum_t]()
 
     var cur_bias: Scalar[accum_t] = 0
 
-    @parameter
-    if has_bias:
+    comptime if has_bias:
         cur_bias = bias_ptr[channel_id].cast[accum_t]()
 
     var seq_start = chunk_id * kNThreads * kNElts + tidx * kNElts
@@ -104,8 +102,7 @@ fn fwd_kernel[
         + channel_id * initial_states_c_stride
     )
 
-    @parameter
-    for i in range(kNElts):
+    comptime for i in range(kNElts):
         var t = seq_start + i
         if t >= seqlen:
             break
@@ -113,12 +110,10 @@ fn fwd_kernel[
 
         var cur_id: Int32 = 0
 
-        @parameter
-        if has_seq_idx:
+        comptime if has_seq_idx:
             cur_id = seq_idx_ptr[seq_idx_base + t * seq_idx_l_stride]
 
-        @parameter
-        for k in range(width):
+        comptime for k in range(width):
             var src_t = t + k - (width - 1)
             var val: Scalar[accum_t] = 0
             if src_t >= 0:
@@ -126,8 +121,7 @@ fn fwd_kernel[
                     x_lt[batch_id, channel_id, src_t]
                 ).cast[accum_t]()
 
-                @parameter
-                if has_seq_idx:
+                comptime if has_seq_idx:
                     var src_id: Int32 = seq_idx_ptr[
                         seq_idx_base + src_t * seq_idx_l_stride
                     ]
@@ -135,8 +129,7 @@ fn fwd_kernel[
                         val = 0
             else:
 
-                @parameter
-                if has_initial_states:
+                comptime if has_initial_states:
                     # src_t in [-(W-1), 0); index 0..W-2 of initial_states.
                     var is_idx: Int = src_t + (width - 1)
                     val = initial_states_ptr[
@@ -144,15 +137,13 @@ fn fwd_kernel[
                     ].cast[accum_t]()
             acc += val * weights[k]
 
-        @parameter
-        if apply_silu:
+        comptime if apply_silu:
             acc = _silu_f32(Float32(acc))
 
         # Padding tokens (seq_idx[t] < 0): output is forced to 0,
         # mirroring upstream's behaviour. Done after activation so the
         # bias/silu don't leak into a "padding" row.
-        @parameter
-        if has_seq_idx:
+        comptime if has_seq_idx:
             if cur_id < 0:
                 acc = 0
 

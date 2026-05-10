@@ -59,7 +59,7 @@ fn fwd_kernel_cpu[
     When the gate is False, the corresponding pointer is never
     dereferenced — caller may pass null from the Python wrapper.
     """
-    alias accum_t = DType.float32
+    comptime accum_t = DType.float32
 
     @parameter
     fn process_bc(bc_idx: Int):
@@ -68,14 +68,12 @@ fn fwd_kernel_cpu[
 
         var bias_v: Scalar[accum_t] = 0
 
-        @parameter
-        if has_bias:
+        comptime if has_bias:
             bias_v = bias_ptr[d].cast[accum_t]()
 
         var weights = SIMD[accum_t, width](0)
 
-        @parameter
-        for k in range(width):
+        comptime for k in range(width):
             weights[k] = weight_ptr[
                 d * weight_c_stride + k * weight_w_stride
             ].cast[accum_t]()
@@ -92,18 +90,15 @@ fn fwd_kernel_cpu[
 
             var cur_id: Int32 = 0
 
-            @parameter
-            if has_seq_idx:
+            comptime if has_seq_idx:
                 cur_id = seq_idx_ptr[seq_idx_base + t * seq_idx_l_stride]
 
-            @parameter
-            for k in range(width):
+            comptime for k in range(width):
                 var src_t = t + k - (width - 1)
                 if src_t >= 0:
                     var include: Bool = True
 
-                    @parameter
-                    if has_seq_idx:
+                    comptime if has_seq_idx:
                         var src_id: Int32 = seq_idx_ptr[
                             seq_idx_base + src_t * seq_idx_l_stride
                         ]
@@ -115,8 +110,7 @@ fn fwd_kernel_cpu[
                         )
                 else:
 
-                    @parameter
-                    if has_initial_states:
+                    comptime if has_initial_states:
                         # src_t in [-(W-1), 0); index 0..W-2 of initial_states.
                         var is_idx: Int = src_t + (width - 1)
                         pre += (
@@ -129,14 +123,12 @@ fn fwd_kernel_cpu[
 
             var out_v: Scalar[accum_t]
 
-            @parameter
-            if apply_silu:
+            comptime if apply_silu:
                 out_v = _silu_f32(pre)
             else:
                 out_v = pre
 
-            @parameter
-            if has_seq_idx:
+            comptime if has_seq_idx:
                 if cur_id < 0:
                     out_v = 0
 

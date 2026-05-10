@@ -66,27 +66,23 @@ fn _cpu_dpre_at[
 
     var cur_id: Int32 = 0
 
-    @parameter
-    if has_seq_idx:
+    comptime if has_seq_idx:
         cur_id = seq_idx_ptr[seq_idx_base + t * seq_idx_l_stride]
         if cur_id < 0:
             # Padding: forward forced out=0, so dpre is zero too.
             return 0
 
-    @parameter
-    if not apply_silu:
+    comptime if not apply_silu:
         return dout_ptr[dout_base + t * dout_l_stride].cast[DType.float32]()
 
     var pre: Float32 = bias_v
 
-    @parameter
-    for k in range(width):
+    comptime for k in range(width):
         var src_t = t + k - (width - 1)
         if src_t >= 0:
             var include: Bool = True
 
-            @parameter
-            if has_seq_idx:
+            comptime if has_seq_idx:
                 var src_id: Int32 = seq_idx_ptr[
                     seq_idx_base + src_t * seq_idx_l_stride
                 ]
@@ -98,8 +94,7 @@ fn _cpu_dpre_at[
                 )
         else:
 
-            @parameter
-            if has_initial_states:
+            comptime if has_initial_states:
                 var is_idx: Int = src_t + (width - 1)
                 pre += (
                     weights[k]
@@ -164,7 +159,7 @@ fn bwd_kernel_cpu[
     Workers may share a `d` (across batches) so the per-channel
     `dweight` / `dbias` accumulators are atomic-added at the end.
     """
-    alias accum_t = DType.float32
+    comptime accum_t = DType.float32
 
     @parameter
     fn process_bc(bc_idx: Int):
@@ -173,14 +168,12 @@ fn bwd_kernel_cpu[
 
         var bias_v: Scalar[accum_t] = 0
 
-        @parameter
-        if has_bias:
+        comptime if has_bias:
             bias_v = bias_ptr[d].cast[accum_t]()
 
         var weights = SIMD[accum_t, width](0)
 
-        @parameter
-        for k in range(width):
+        comptime for k in range(width):
             weights[k] = weight_ptr[
                 d * weight_c_stride + k * weight_w_stride
             ].cast[accum_t]()
@@ -199,8 +192,7 @@ fn bwd_kernel_cpu[
         # Sliding window: dpre_win[k] = dpre[t + k]. Prefill with dpre[0..W-1].
         var dpre_win = SIMD[accum_t, width](0)
 
-        @parameter
-        for k in range(width):
+        comptime for k in range(width):
             dpre_win[k] = _cpu_dpre_at[
                 dtype, width, has_seq_idx, has_initial_states, apply_silu
             ](
@@ -231,18 +223,14 @@ fn bwd_kernel_cpu[
         # the "boundary" dweight terms (where the forward conv read
         # initial_states instead of x). Compute both before the main
         # loop slides the window away.
-        @parameter
-        if has_initial_states:
+        comptime if has_initial_states:
             # dinit[i] = sum_{k=0..i} weight[k] * dpre[i - k]   for i in [0, W-1)
-            @parameter
-            for i in range(width - 1):
+            comptime for i in range(width - 1):
                 var dinit_v: Scalar[accum_t] = 0
 
-                @parameter
-                for k in range(width):
+                comptime for k in range(width):
 
-                    @parameter
-                    if i - k >= 0:
+                    comptime if i - k >= 0:
                         dinit_v += weights[k] * dpre_win[i - k]
                 dinitial_states_ptr[
                     dinit_base + i * dinitial_states_l_stride
@@ -250,11 +238,9 @@ fn bwd_kernel_cpu[
 
             # dweight[k] += sum_{t=0..W-2-k} dpre[t] * initial_states[t + k]
             # — the part of the conv that read initial_states in the forward.
-            @parameter
-            for k in range(width):
+            comptime for k in range(width):
 
-                @parameter
-                for t in range(width - 1 - k):
+                comptime for t in range(width - 1 - k):
                     var is_v = initial_states_ptr[
                         init_base + (t + k) * initial_states_l_stride
                     ].cast[accum_t]()
@@ -263,8 +249,7 @@ fn bwd_kernel_cpu[
         for t in range(seqlen):
             var cur_id_t: Int32 = 0
 
-            @parameter
-            if has_seq_idx:
+            comptime if has_seq_idx:
                 cur_id_t = seq_idx_ptr[seq_idx_base + t * seq_idx_l_stride]
 
             # dx[t] = sum_k weights[W-1-k] * dpre_win[k]
@@ -273,12 +258,10 @@ fn bwd_kernel_cpu[
             # t+k's conv only when ids matched).
             var dx_v: Scalar[accum_t] = 0
 
-            @parameter
-            for k in range(width):
+            comptime for k in range(width):
                 var include: Bool = True
 
-                @parameter
-                if has_seq_idx:
+                comptime if has_seq_idx:
                     var pos_k = t + k
                     if pos_k < seqlen:
                         var sid: Int32 = seq_idx_ptr[
@@ -297,18 +280,15 @@ fn bwd_kernel_cpu[
             # `seq_idx[src_t] == seq_idx[t]` (= cur_id_t).
             var dpre_t: Scalar[accum_t] = dpre_win[0]
 
-            @parameter
-            if has_bias:
+            comptime if has_bias:
                 local_dbias += dpre_t
 
-            @parameter
-            for k in range(width):
+            comptime for k in range(width):
                 var src_t = t + k - (width - 1)
                 if src_t >= 0:
                     var include: Bool = True
 
-                    @parameter
-                    if has_seq_idx:
+                    comptime if has_seq_idx:
                         var sid: Int32 = seq_idx_ptr[
                             seq_idx_base + src_t * seq_idx_l_stride
                         ]
@@ -320,8 +300,7 @@ fn bwd_kernel_cpu[
                         local_dweight[k] += dpre_t * x_v
 
             # Slide window left, append dpre[t + W] (or 0 past seqlen).
-            @parameter
-            for k in range(width - 1):
+            comptime for k in range(width - 1):
                 dpre_win[k] = dpre_win[k + 1]
             dpre_win[width - 1] = _cpu_dpre_at[
                 dtype, width, has_seq_idx, has_initial_states, apply_silu
@@ -346,14 +325,12 @@ fn bwd_kernel_cpu[
 
         # Atomic-add the (b, d) block's contribution. Multiple parallel
         # workers may target the same `d` across different batches.
-        @parameter
-        for k in range(width):
+        comptime for k in range(width):
             _ = Atomic[DType.float32].fetch_add[ordering=Consistency.MONOTONIC](
                 dweight_acc_ptr + d * width + k, local_dweight[k]
             )
 
-        @parameter
-        if has_bias:
+        comptime if has_bias:
             _ = Atomic[DType.float32].fetch_add[ordering=Consistency.MONOTONIC](
                 dbias_acc_ptr + d, local_dbias
             )

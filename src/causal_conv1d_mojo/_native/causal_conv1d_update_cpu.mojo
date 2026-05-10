@@ -47,7 +47,7 @@ fn update_kernel_cpu[
     out_c_stride: Int,
     out_l_stride: Int,
 ):
-    alias accum_t = DType.float32
+    comptime accum_t = DType.float32
 
     @parameter
     fn process_bc(bc_idx: Int):
@@ -59,8 +59,7 @@ fn update_kernel_cpu[
 
         var state_batch_coord: Int = b
 
-        @parameter
-        if has_state_indices:
+        comptime if has_state_indices:
             var idx_val: Int = Int(state_indices_ptr[b])
             if idx_val < 0:
                 for i in range(seqlen):
@@ -74,22 +73,19 @@ fn update_kernel_cpu[
 
         var weights = SIMD[accum_t, width](0)
 
-        @parameter
-        for k in range(width):
+        comptime for k in range(width):
             weights[k] = weight_ptr[
                 d * weight_c_stride + k * weight_w_stride
             ].cast[accum_t]()
 
         var bias_v: Scalar[accum_t] = 0
 
-        @parameter
-        if has_bias:
+        comptime if has_bias:
             bias_v = bias_ptr[d].cast[accum_t]()
 
         var update_idx: Int = 0
 
-        @parameter
-        if is_circular:
+        comptime if is_circular:
             var cs: Int = Int(cache_seqlens_ptr[b]) % state_len
             update_idx = cs - (width - 1)
             if update_idx < 0:
@@ -98,8 +94,7 @@ fn update_kernel_cpu[
         var advance_len = seqlen
         var x_vals = SIMD[accum_t, width](0)
 
-        @parameter
-        if not is_circular:
+        comptime if not is_circular:
             # Phase 1 (linear): shift state left by `seqlen`.
             for i in range(state_len - advance_len - (width - 1)):
                 conv_state_ptr[
@@ -110,8 +105,7 @@ fn update_kernel_cpu[
 
             # Phase 2 (linear): read trailing W-1 history (with writeback
             # for the small-state_len edge case).
-            @parameter
-            for i in range(width - 1):
+            comptime for i in range(width - 1):
                 var read_idx: Int = state_len - (width - 1) + i
                 var state_val = conv_state_ptr[
                     state_base + read_idx * state_l_stride
@@ -124,8 +118,7 @@ fn update_kernel_cpu[
                 x_vals[i] = state_val.cast[accum_t]()
         else:
             # Circular: read W-1 history starting at update_idx (mod state_len).
-            @parameter
-            for i in range(width - 1):
+            comptime for i in range(width - 1):
                 var state_val = conv_state_ptr[
                     state_base + update_idx * state_l_stride
                 ]
@@ -138,8 +131,7 @@ fn update_kernel_cpu[
         for i in range(seqlen):
             var x_val = x_ptr[x_base + i * x_l_stride]
 
-            @parameter
-            if not is_circular:
+            comptime if not is_circular:
                 var write_idx: Int = state_len - advance_len + i
                 if i < advance_len and write_idx >= 0:
                     conv_state_ptr[
@@ -155,18 +147,15 @@ fn update_kernel_cpu[
 
             var out_val: Scalar[accum_t] = bias_v
 
-            @parameter
-            for k in range(width):
+            comptime for k in range(width):
                 out_val += weights[k] * x_vals[k]
 
-            @parameter
-            if apply_silu:
+            comptime if apply_silu:
                 out_val = _silu_f32(Float32(out_val))
 
             output_ptr[out_base + i * out_l_stride] = out_val.cast[dtype]()
 
-            @parameter
-            for k in range(width - 1):
+            comptime for k in range(width - 1):
                 x_vals[k] = x_vals[k + 1]
 
     sync_parallelize[process_bc](batch * dim)

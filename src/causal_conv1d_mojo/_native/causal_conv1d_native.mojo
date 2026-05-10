@@ -232,8 +232,7 @@ def causal_conv1d_fwd(
                     block_dim=(kNThreads,),
                 )
 
-            @parameter
-            if contig_inner:
+            comptime if contig_inner:
                 var x_tt = TileTensor(
                     x_ptr,
                     Layout(
