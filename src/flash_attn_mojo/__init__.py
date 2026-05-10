@@ -163,7 +163,7 @@ def _normalise_alibi(alibi_slopes, nheads_q, batch):
     )
 
 
-def _native_fwd_cpu(
+def _native_fwd(
     q,
     k,
     v,
@@ -178,6 +178,7 @@ def _native_fwd_cpu(
     softcap=0.0,
     cache_batch_idx=None,
 ):
+    """Forward dispatcher — routes to CPU or GPU kernel based on q.is_cuda."""
     alibi_t, alibi_stride = _normalise_alibi(alibi, q.shape[2], q.shape[0])
     alibi_addr = alibi_t.data_ptr() if alibi_t is not None else 0
     dropout_addr = dropout_mask.data_ptr() if dropout_mask is not None else 0
@@ -185,7 +186,7 @@ def _native_fwd_cpu(
     cache_batch_idx_addr = (
         cache_batch_idx.data_ptr() if cache_batch_idx is not None else 0
     )
-    _native_mod.flash_attn_fwd_cpu(
+    common_args = (
         q.data_ptr(),
         k.data_ptr(),
         v.data_ptr(),
@@ -213,6 +214,13 @@ def _native_fwd_cpu(
         float(softcap),
         cache_batch_idx_addr,
     )
+    if q.is_cuda:
+        _native_mod.flash_attn_fwd_gpu(
+            *common_args,
+            torch.cuda.current_stream().cuda_stream,
+        )
+    else:
+        _native_mod.flash_attn_fwd_cpu(*common_args)
 
 
 def _native_bwd_cpu(
@@ -357,7 +365,7 @@ class _FlashAttnFunc(torch.autograd.Function):
                 .bernoulli_(keep_prob)
                 .div_(keep_prob)
             )
-        _native_fwd_cpu(
+        _native_fwd(
             q,
             k,
             v,
@@ -502,10 +510,12 @@ def flash_attn_func(
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(headdim)
 
-    # CPU-only for now; GPU forward lands later in 1.x.
-    if q.is_cuda:
+    # GPU forward is wired up; backward is still CPU-only — fall back if
+    # the user wants gradients on CUDA tensors.
+    if q.is_cuda and (q.requires_grad or k.requires_grad or v.requires_grad):
         raise NotImplementedError(
-            "currently CPU-only; GPU forward lands in a later 1.x step"
+            "GPU backward is not implemented yet (phase 2.6+). Run "
+            "without requires_grad on CUDA, or move to CPU for backward."
         )
 
     if not isinstance(softcap, (int, float)) or softcap < 0:
@@ -879,9 +889,6 @@ def flash_attn_with_kvcache(
         raise NotImplementedError(
             f"headdim must be in [1, {_MAX_HEADDIM}]; got {headdim}"
         )
-    if q.is_cuda:
-        raise NotImplementedError("flash_attn_with_kvcache is CPU-only for now")
-
     # Resolve cache_seqlens to a contiguous int32 (B,) tensor.
     if cache_seqlens is None:
         cs = torch.zeros(batch, dtype=torch.int32, device=q.device)
@@ -978,7 +985,7 @@ def flash_attn_with_kvcache(
     # decode-time inference doesn't need gradients).
     out = torch.empty_like(q)
     lse = torch.empty(batch, nheads_q, seqlen_q, dtype=torch.float32, device=q.device)
-    _native_fwd_cpu(
+    _native_fwd(
         q_for_attn,
         k_for_attn,
         v_for_attn,

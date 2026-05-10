@@ -877,14 +877,34 @@ def test_mixed_dtype_raises():
         flash_attn_mojo.flash_attn_func(q, k, v)
 
 
-def test_gpu_raises():
-    """Phase 1.1 is CPU-only."""
+# Phase 2.1: GPU forward — basic correctness vs CPU.
+@pytest.mark.parametrize("causal", [False, True])
+def test_flash_attn_func_gpu_matches_cpu(causal):
     if not torch.cuda.is_available():
         pytest.skip("no GPU")
-    q = torch.randn(1, 4, 1, 64, dtype=torch.float16, device="cuda")
+    batch, seqlen, nheads, headdim = 2, 16, 2, 64
+    q = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    out_cpu = flash_attn_mojo.flash_attn_func(q, k, v, causal=causal)
+    out_gpu = flash_attn_mojo.flash_attn_func(
+        q.cuda(), k.cuda(), v.cuda(), causal=causal
+    )
+    assert out_gpu.is_cuda
+    diff = (out_cpu.float() - out_gpu.cpu().float()).abs().max().item()
+    # GPU and CPU both use fp32 accumulators; should agree up to fp16 roundoff.
+    assert diff < 5e-3, f"max_diff={diff}"
+
+
+def test_flash_attn_func_gpu_grad_raises():
+    """GPU backward isn't implemented; preemptive error when requires_grad."""
+    if not torch.cuda.is_available():
+        pytest.skip("no GPU")
+    q = torch.randn(1, 4, 1, 64, dtype=torch.float16, device="cuda", requires_grad=True)
     k = torch.randn(1, 4, 1, 64, dtype=torch.float16, device="cuda")
     v = torch.randn(1, 4, 1, 64, dtype=torch.float16, device="cuda")
-    with pytest.raises(NotImplementedError, match="CPU-only"):
+    with pytest.raises(NotImplementedError, match="GPU backward"):
         flash_attn_mojo.flash_attn_func(q, k, v)
 
 

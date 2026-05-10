@@ -6,23 +6,27 @@ build on first import and caches the resulting `.so` under
 `__mojocache__/`.
 
 This file is the dispatcher (mirrors upstream's `flash_api.cpp`):
-parses Python tuple args, builds a comptime dispatch tree on
-`(dtype, headdim, causal)`, forwards to the kernel implementations.
+parses Python tuple args, builds a comptime dispatch tree on `dtype`,
+forwards to the kernel implementations.
 
 Current entry points:
-- `flash_attn_fwd_cpu` — naive CPU forward (MHA / MQA / GQA, fp16,
-  headdim ∈ {64, 96, 128}; causal optional).
+- `flash_attn_fwd_cpu` — naive CPU forward.
 - `flash_attn_bwd_cpu` — matching CPU backward.
+- `flash_attn_fwd_gpu` — naive GPU forward (one thread per output row;
+  same algorithm as CPU). Optimisation passes ride on top of this.
 
-GPU forward / backward and other features land in subsequent phases.
+GPU backward lands in a later phase-2 step.
 """
 
+from std.gpu.host import DeviceContext
+from std.memory import OpaquePointer
 from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
 from flash_fwd_cpu import fwd_kernel_cpu
 from flash_bwd_cpu import bwd_kernel_cpu
+from flash_fwd_gpu import fwd_kernel_gpu
 
 
 # Must match the dispatch in the Python wrapper. Order is fixed
@@ -466,12 +470,188 @@ def flash_attn_bwd_cpu(
     return PythonObject(None)
 
 
+def flash_attn_fwd_gpu(
+    mut py_self: PythonObject,
+    mut args: PythonObject,
+) raises -> PythonObject:
+    """GPU forward for `flash_attn_func`.
+
+    Same Python tuple positional args 0..37 as `flash_attn_fwd_cpu`,
+    plus one trailing arg:
+        38 cuda_stream_handle (int) — torch.cuda.current_stream().cuda_stream
+
+    The kernel is launched on a (seqlen_q, nheads_q, batch) grid with
+    blockDim = 1 — one thread per output row.
+    """
+    var q_addr: Int = Int(py=args[0])
+    var k_addr: Int = Int(py=args[1])
+    var v_addr: Int = Int(py=args[2])
+    var o_addr: Int = Int(py=args[3])
+    var lse_addr: Int = Int(py=args[4])
+
+    var batch_int: Int = Int(py=args[5])
+    var seqlen_q_int: Int = Int(py=args[6])
+    var seqlen_k_int: Int = Int(py=args[7])
+    var nheads_q_int: Int = Int(py=args[8])
+    var nheads_kv_int: Int = Int(py=args[9])
+
+    var q_b_stride: Int = Int(py=args[10])
+    var q_s_stride: Int = Int(py=args[11])
+    var q_h_stride: Int = Int(py=args[12])
+    var q_d_stride: Int = Int(py=args[13])
+    var k_b_stride: Int = Int(py=args[14])
+    var k_s_stride: Int = Int(py=args[15])
+    var k_h_stride: Int = Int(py=args[16])
+    var k_d_stride: Int = Int(py=args[17])
+    var v_b_stride: Int = Int(py=args[18])
+    var v_s_stride: Int = Int(py=args[19])
+    var v_h_stride: Int = Int(py=args[20])
+    var v_d_stride: Int = Int(py=args[21])
+    var o_b_stride: Int = Int(py=args[22])
+    var o_s_stride: Int = Int(py=args[23])
+    var o_h_stride: Int = Int(py=args[24])
+    var o_d_stride: Int = Int(py=args[25])
+
+    var softmax_scale: Float32 = Float32(py=args[26])
+    var dtype_code: Int = Int(py=args[27])
+    var headdim_rt: Int = Int(py=args[28])
+    var causal_rt: Int = Int(py=args[29])
+    var window_left_rt: Int = Int(py=args[30])
+    var window_right_rt: Int = Int(py=args[31])
+    var alibi_addr: Int = Int(py=args[32])
+    var alibi_b_stride: Int = Int(py=args[33])
+    var dropout_addr: Int = Int(py=args[34])
+    var cache_seqlens_addr: Int = Int(py=args[35])
+    var softcap_rt: Float32 = Float32(py=args[36])
+    var cache_batch_idx_addr: Int = Int(py=args[37])
+    var stream_handle_addr: Int = Int(py=args[38])
+    var has_alibi: Bool = alibi_addr != 0
+    var has_dropout: Bool = dropout_addr != 0
+    var has_cache_seqlens: Bool = cache_seqlens_addr != 0
+    var has_cache_batch_idx: Bool = cache_batch_idx_addr != 0
+
+    if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
+        return PythonObject(None)
+
+    var ctx = DeviceContext()
+    var stream_opaque = OpaquePointer[MutAnyOrigin](
+        unsafe_from_address=stream_handle_addr
+    )
+    var stream = ctx.create_external_stream(stream_opaque)
+
+    @parameter
+    fn run[dtype: DType]() raises:
+        var q_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=q_addr
+        )
+        var k_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=k_addr
+        )
+        var v_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=v_addr
+        )
+        var o_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
+            unsafe_from_address=o_addr
+        )
+        var lse_ptr = UnsafePointer[Float32, MutAnyOrigin](
+            unsafe_from_address=lse_addr
+        )
+        # Dummy fp32 ptr (lse_ptr) reused when alibi/dropout disabled.
+        var alibi_ptr = lse_ptr
+        if has_alibi:
+            alibi_ptr = UnsafePointer[Float32, MutAnyOrigin](
+                unsafe_from_address=alibi_addr
+            )
+        var dropout_ptr = lse_ptr
+        if has_dropout:
+            dropout_ptr = UnsafePointer[Float32, MutAnyOrigin](
+                unsafe_from_address=dropout_addr
+            )
+        var cache_seqlens_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=cache_seqlens_addr
+        )
+        var cache_batch_idx_ptr = UnsafePointer[Int32, MutAnyOrigin](
+            unsafe_from_address=cache_batch_idx_addr
+        )
+
+        var compiled = ctx.compile_function[
+            fwd_kernel_gpu[dtype],
+            fwd_kernel_gpu[dtype],
+        ]()
+        stream.enqueue_function(
+            compiled,
+            batch_int,
+            seqlen_q_int,
+            seqlen_k_int,
+            nheads_q_int,
+            nheads_kv_int,
+            headdim_rt,
+            causal_rt,  # Int: 0 = no mask, 1 = causal
+            softmax_scale,
+            window_left_rt,
+            window_right_rt,
+            1 if has_alibi else 0,
+            alibi_b_stride,
+            alibi_ptr,
+            1 if has_dropout else 0,
+            dropout_ptr,
+            1 if has_cache_seqlens else 0,
+            cache_seqlens_ptr,
+            1 if has_cache_batch_idx else 0,
+            cache_batch_idx_ptr,
+            softcap_rt,
+            q_ptr,
+            k_ptr,
+            v_ptr,
+            o_ptr,
+            lse_ptr,
+            q_b_stride,
+            q_s_stride,
+            q_h_stride,
+            q_d_stride,
+            k_b_stride,
+            k_s_stride,
+            k_h_stride,
+            k_d_stride,
+            v_b_stride,
+            v_s_stride,
+            v_h_stride,
+            v_d_stride,
+            o_b_stride,
+            o_s_stride,
+            o_h_stride,
+            o_d_stride,
+            grid_dim=(seqlen_q_int, nheads_q_int, batch_int),
+            block_dim=(1, 1, 1),
+        )
+
+    alias N_DTYPES = len(_DTYPES)
+    if dtype_code < 0 or dtype_code >= N_DTYPES:
+        raise Error("invalid dtype_code")
+    if headdim_rt <= 0 or headdim_rt > 256:
+        raise Error("headdim must be in (0, 256]")
+    var dispatched: Bool = False
+
+    @parameter
+    for dt_idx in range(N_DTYPES):
+        alias dt = _DTYPES[dt_idx]
+        if dtype_code == dt_idx:
+            run[dt]()
+            dispatched = True
+
+    if not dispatched:
+        raise Error("unsupported dtype")
+
+    return PythonObject(None)
+
+
 @export
 def PyInit_flash_attn_native() -> PythonObject:
     try:
         var m = PythonModuleBuilder("flash_attn_native")
         m.def_py_function[flash_attn_fwd_cpu]("flash_attn_fwd_cpu")
         m.def_py_function[flash_attn_bwd_cpu]("flash_attn_bwd_cpu")
+        m.def_py_function[flash_attn_fwd_gpu]("flash_attn_fwd_gpu")
         return m.finalize()
     except e:
         abort(String("failed to create Python module: ", e))
