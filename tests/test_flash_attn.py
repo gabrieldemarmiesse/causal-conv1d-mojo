@@ -299,10 +299,26 @@ def test_gpu_raises():
         flash_attn_mojo.flash_attn_func(q, k, v)
 
 
-def test_flash_attn_qkvpacked_func_raises():
-    qkv = torch.randn(1, 4, 3, 2, 64, dtype=torch.float16)
-    with pytest.raises(NotImplementedError, match="phase 1"):
-        flash_attn_mojo.flash_attn_qkvpacked_func(qkv)
+# Phase 1.6: flash_attn_qkvpacked_func is a thin wrapper around
+# flash_attn_func — same correctness, plus shape validation.
+@pytest.mark.parametrize("causal", [False, True])
+def test_flash_attn_qkvpacked_func(causal):
+    """qkvpacked path matches the unpacked one."""
+    batch, seqlen, nheads, headdim = 2, 16, 2, 64
+    qkv = torch.randn(batch, seqlen, 3, nheads, headdim, dtype=torch.float16)
+    q, k, v = qkv.unbind(dim=2)
+
+    out_packed = flash_attn_mojo.flash_attn_qkvpacked_func(qkv, causal=causal)
+    out_unpacked = flash_attn_mojo.flash_attn_func(q, k, v, causal=causal)
+
+    assert torch.equal(out_packed, out_unpacked)
+
+
+def test_flash_attn_qkvpacked_func_bad_shape_raises():
+    """qkv must have a size-3 dim-2."""
+    bad = torch.randn(1, 4, 4, 2, 64, dtype=torch.float16)  # dim-2 = 4, not 3
+    with pytest.raises(ValueError, match="seqlen, 3, nheads"):
+        flash_attn_mojo.flash_attn_qkvpacked_func(bad)
 
 
 def test_flash_attn_with_kvcache_raises():

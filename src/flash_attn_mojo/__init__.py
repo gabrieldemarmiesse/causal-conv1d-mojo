@@ -172,15 +172,28 @@ def flash_attn_qkvpacked_func(
     deterministic=False,
 ):
     """Same as ``flash_attn_func`` but takes Q/K/V stacked into one
-    ``(batch, seqlen, 3, nheads, headdim)`` tensor. Backward avoids
-    explicit gradient concatenation.
+    ``(batch, seqlen, 3, nheads, headdim)`` tensor.
 
-    Will be implemented as a thin wrapper around ``flash_attn_func``
-    once that lands.
+    Forward is a thin wrapper around ``flash_attn_func``. Once we have
+    a backward, the qkvpacked variant will get its own custom backward
+    so gradients land back in qkv without an explicit concat.
     """
-    raise NotImplementedError(
-        "flash_attn_qkvpacked_func is not implemented yet — depends on"
-        " flash_attn_func (phase 1.6)."
+    if qkv.dim() != 5 or qkv.shape[2] != 3:
+        raise ValueError(
+            f"qkv must be (batch, seqlen, 3, nheads, headdim); "
+            f"got shape {tuple(qkv.shape)}"
+        )
+    q, k, v = qkv.unbind(dim=2)
+    return flash_attn_func(
+        q,
+        k,
+        v,
+        dropout_p=dropout_p,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        alibi_slopes=alibi_slopes,
+        deterministic=deterministic,
     )
 
 
