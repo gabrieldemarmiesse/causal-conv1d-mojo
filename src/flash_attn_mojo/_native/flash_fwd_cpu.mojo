@@ -44,6 +44,10 @@ fn fwd_kernel_cpu[
     nheads_q: Int,
     nheads_kv: Int,
     softmax_scale: Float32,
+    # Sliding-window bounds (raw upstream values: -1 means "infinite"
+    # on that side, 0+ means a finite window of that many tokens).
+    window_left: Int,
+    window_right: Int,
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -124,28 +128,46 @@ fn fwd_kernel_cpu[
         var l: Float32 = 0
         var o = SIMD[accum_t, headdim](0)
 
-        # Inclusive upper bound on k positions for this query row.
+        # Half-open k range for this query row: [kj_start, kj_end).
+        var kj_start: Int = 0
         var kj_end: Int = seqlen_k
+        var pos: Int = seq_offset + q_idx  # bottom-right query position
+
+        @parameter
+        if causal:
+            var k_max = pos
+            if k_max < 0:
+                k_max = -1  # ensures empty range below
+            if k_max + 1 < kj_end:
+                kj_end = k_max + 1
+
+        # Sliding window bounds (skipped at runtime when both are -1).
+        if window_left >= 0:
+            var lo = pos - window_left
+            if lo > kj_start:
+                kj_start = lo
+        if window_right >= 0:
+            var hi = pos + window_right + 1
+            if hi < kj_end:
+                kj_end = hi
+        if kj_start < 0:
+            kj_start = 0
+        if kj_end > seqlen_k:
+            kj_end = seqlen_k
 
         # lse output index: contiguous (b, h_q, q_idx).
         var lse_idx = (b * nheads_q + h_q) * seqlen_q + q_idx
 
-        @parameter
-        if causal:
-            var k_max = seq_offset + q_idx
-            if k_max < 0:
-                # Row attends to nothing — write zeros and lse=-inf
-                # (so the backward sees zero gradient through this row).
-                @parameter
-                for d in range(headdim):
-                    out_ptr[out_base + d * out_d_stride] = Scalar[dtype](0)
-                lse_ptr[lse_idx] = neg_inf
-                return
-            kj_end = k_max + 1
-            if kj_end > seqlen_k:
-                kj_end = seqlen_k
+        if kj_start >= kj_end:
+            # Row attends to nothing — write zeros and lse=-inf so the
+            # backward sees zero gradient through this row.
+            @parameter
+            for d in range(headdim):
+                out_ptr[out_base + d * out_d_stride] = Scalar[dtype](0)
+            lse_ptr[lse_idx] = neg_inf
+            return
 
-        for kj in range(kj_end):
+        for kj in range(kj_start, kj_end):
             var k_base = k_b_h_base + kj * k_s_stride
             var v_base = v_b_h_base + kj * v_s_stride
 

@@ -44,6 +44,8 @@ fn bwd_kernel_cpu[
     nheads_q: Int,
     nheads_kv: Int,
     softmax_scale: Float32,
+    window_left: Int,
+    window_right: Int,
     q_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     k_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     v_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -120,21 +122,34 @@ fn bwd_kernel_cpu[
 
         var lse = lse_ptr[lse_idx]
 
-        # k_max bound for this row.
+        # Half-open k range for this row: [kj_start, kj_end).
+        var kj_start: Int = 0
         var kj_end: Int = seqlen_k
+        var pos: Int = seq_offset + q_idx
 
         @parameter
         if causal:
-            var k_max = seq_offset + q_idx
-            if k_max < 0:
-                # Row attends to nothing — dQ stays zero.
-                @parameter
-                for d in range(headdim):
-                    dq_ptr[dq_base + d * dq_d_stride] = Scalar[dtype](0)
-                return
-            kj_end = k_max + 1
-            if kj_end > seqlen_k:
-                kj_end = seqlen_k
+            if pos + 1 < kj_end:
+                kj_end = pos + 1
+        if window_left >= 0:
+            var lo = pos - window_left
+            if lo > kj_start:
+                kj_start = lo
+        if window_right >= 0:
+            var hi = pos + window_right + 1
+            if hi < kj_end:
+                kj_end = hi
+        if kj_start < 0:
+            kj_start = 0
+        if kj_end > seqlen_k:
+            kj_end = seqlen_k
+
+        if kj_start >= kj_end:
+            # Row attends to nothing — dQ stays zero.
+            @parameter
+            for d in range(headdim):
+                dq_ptr[dq_base + d * dq_d_stride] = Scalar[dtype](0)
+            return
 
         # Load q, dO, O into fp32 registers once.
         var q_vec = SIMD[accum_t, headdim](0)
@@ -157,7 +172,7 @@ fn bwd_kernel_cpu[
         # Accumulate dQ row.
         var dq_acc = SIMD[accum_t, headdim](0)
 
-        for kj in range(kj_end):
+        for kj in range(kj_start, kj_end):
             var k_base = k_b_h_base + kj * k_s_stride
             var v_base = v_b_h_base + kj * v_s_stride
 
@@ -225,20 +240,37 @@ fn bwd_kernel_cpu[
         var dk_acc = SIMD[accum_t, headdim](0)
         var dv_acc = SIMD[accum_t, headdim](0)
 
-        # Sweep over all q heads sharing this kv head, then all q positions.
+        # Range of q rows that include this k_idx in their allowed window.
+        # Inverting the per-row bounds:
+        #   causal:        q >= k_idx - seq_offset
+        #   window_right:  q >= k_idx - window_right - seq_offset
+        #   window_left:   q <= k_idx + window_left  - seq_offset
+        var q_lo: Int = 0
+        var q_hi: Int = seqlen_q  # exclusive
+
+        @parameter
+        if causal:
+            var lo_c = k_idx - seq_offset
+            if lo_c > q_lo:
+                q_lo = lo_c
+        if window_right >= 0:
+            var lo_w = k_idx - window_right - seq_offset
+            if lo_w > q_lo:
+                q_lo = lo_w
+        if window_left >= 0:
+            var hi_w = k_idx + window_left - seq_offset + 1
+            if hi_w < q_hi:
+                q_hi = hi_w
+        if q_lo < 0:
+            q_lo = 0
+        if q_hi > seqlen_q:
+            q_hi = seqlen_q
+
+        # Sweep over all q heads sharing this kv head, then valid q positions.
         for h_off in range(heads_per_kv):
             var h_q = h_kv * heads_per_kv + h_off
 
-            for q_idx in range(seqlen_q):
-                # Skip rows masked out by causal.
-                @parameter
-                if causal:
-                    var k_max = seq_offset + q_idx
-                    if k_idx > k_max:
-                        continue
-                    if k_max < 0:
-                        # Row contributes nothing for this q (and all earlier).
-                        continue
+            for q_idx in range(q_lo, q_hi):
 
                 var q_base = (
                     b * q_b_stride + q_idx * q_s_stride + h_q * q_h_stride

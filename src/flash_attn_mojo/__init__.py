@@ -44,7 +44,7 @@ def _strides_4d(t):
     return (t.stride(0), t.stride(1), t.stride(2), t.stride(3))
 
 
-def _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal):
+def _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window):
     _native_mod.flash_attn_fwd_cpu(
         q.data_ptr(),
         k.data_ptr(),
@@ -64,10 +64,12 @@ def _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal):
         _DTYPE_CODE[q.dtype],
         q.shape[3],  # headdim
         1 if causal else 0,
+        int(window[0]),
+        int(window[1]),
     )
 
 
-def _native_bwd_cpu(q, k, v, out, dout, lse, dq, dk, dv, softmax_scale, causal):
+def _native_bwd_cpu(q, k, v, out, dout, lse, dq, dk, dv, softmax_scale, causal, window):
     _native_mod.flash_attn_bwd_cpu(
         q.data_ptr(),
         k.data_ptr(),
@@ -95,6 +97,8 @@ def _native_bwd_cpu(q, k, v, out, dout, lse, dq, dk, dv, softmax_scale, causal):
         _DTYPE_CODE[q.dtype],
         q.shape[3],  # headdim
         1 if causal else 0,
+        int(window[0]),
+        int(window[1]),
     )
 
 
@@ -102,16 +106,17 @@ class _FlashAttnFunc(torch.autograd.Function):
     """torch.autograd.Function wrapping the native fwd/bwd calls."""
 
     @staticmethod
-    def forward(ctx, q, k, v, softmax_scale, causal):
+    def forward(ctx, q, k, v, softmax_scale, causal, window):
         out = torch.empty_like(q)
         # lse is fp32, shape (batch, nheads_q, seqlen_q), contiguous.
         lse = torch.empty(
             q.shape[0], q.shape[2], q.shape[1], dtype=torch.float32, device=q.device
         )
-        _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal)
+        _native_fwd_cpu(q, k, v, out, lse, softmax_scale, causal, window)
         ctx.save_for_backward(q, k, v, out, lse)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
+        ctx.window = window
         return out
 
     @staticmethod
@@ -121,16 +126,24 @@ class _FlashAttnFunc(torch.autograd.Function):
         dq = torch.empty_like(q)
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
-        # Caller of bwd kernel expects contiguous dout (it does per-row dot
-        # products with arbitrary strides, so non-contig is fine — but
-        # gradcheck-style noisy strides should still work).
         dout = dout.contiguous() if not dout.is_contiguous() else dout
         _native_bwd_cpu(
-            q, k, v, out, dout, lse, dq, dk, dv, ctx.softmax_scale, ctx.causal
+            q,
+            k,
+            v,
+            out,
+            dout,
+            lse,
+            dq,
+            dk,
+            dv,
+            ctx.softmax_scale,
+            ctx.causal,
+            ctx.window,
         )
-        # 5 forward inputs: q, k, v, softmax_scale, causal — gradients only
-        # flow through the first three.
-        return dq, dk, dv, None, None
+        # 6 forward inputs: q, k, v, softmax_scale, causal, window —
+        # gradients only flow through the first three.
+        return dq, dk, dv, None, None, None
 
 
 def flash_attn_func(
@@ -157,10 +170,12 @@ def flash_attn_func(
     # ---- feature gates ----
     if dropout_p != 0.0:
         raise NotImplementedError("dropout_p is not implemented yet — phase 1.8")
-    if window_size != (-1, -1):
-        raise NotImplementedError(
-            "window_size (sliding-window/local) is not implemented yet — phase 1.9"
-        )
+    if (
+        not isinstance(window_size, tuple)
+        or len(window_size) != 2
+        or not all(isinstance(w, int) for w in window_size)
+    ):
+        raise ValueError(f"window_size must be a 2-tuple of ints; got {window_size!r}")
     if alibi_slopes is not None:
         raise NotImplementedError("alibi_slopes is not implemented yet — phase 1.10")
     # `deterministic` is a no-op: the CPU backward already writes dQ/dK/dV
@@ -222,7 +237,7 @@ def flash_attn_func(
             "currently CPU-only; GPU forward lands in a later 1.x step"
         )
 
-    return _FlashAttnFunc.apply(q, k, v, softmax_scale, causal)
+    return _FlashAttnFunc.apply(q, k, v, softmax_scale, causal, window_size)
 
 
 def flash_attn_qkvpacked_func(

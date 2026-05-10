@@ -59,7 +59,7 @@ def dtype(request):
     return request.param
 
 
-def _ref_attention(q, k, v, softmax_scale=None, causal=False):
+def _ref_attention(q, k, v, softmax_scale=None, causal=False, window=(-1, -1)):
     """Reference scaled-dot-product attention computed in fp32.
 
     q/k/v are (B, S, H, D) — the same layout flash_attn_func uses.
@@ -67,6 +67,9 @@ def _ref_attention(q, k, v, softmax_scale=None, causal=False):
 
     Causal mask uses bottom-right alignment, matching upstream
     `flash_attn_func`: q_i attends to k_j iff j <= (Sk - Sq) + i.
+    Sliding window: q_i attends to k_j iff j ∈ [pos-left, pos+right]
+    where pos = (Sk - Sq) + i. left/right < 0 means "no bound" on
+    that side.
     """
     import math
 
@@ -77,12 +80,18 @@ def _ref_attention(q, k, v, softmax_scale=None, causal=False):
     k32 = k.transpose(1, 2).to(torch.float32)
     v32 = v.transpose(1, 2).to(torch.float32)
     scores = torch.matmul(q32, k32.transpose(-2, -1)) * softmax_scale
+    sq, sk = q.shape[1], k.shape[1]
+    i = torch.arange(sq).unsqueeze(1)
+    j = torch.arange(sk).unsqueeze(0)
+    pos = (sk - sq) + i
+    allowed = torch.ones_like(scores[0, 0], dtype=torch.bool)
     if causal:
-        sq, sk = q.shape[1], k.shape[1]
-        # mask[i, j] = True where attention is allowed.
-        i = torch.arange(sq).unsqueeze(1)
-        j = torch.arange(sk).unsqueeze(0)
-        allowed = j <= (sk - sq) + i
+        allowed = allowed & (j <= pos)
+    if window[0] >= 0:
+        allowed = allowed & (j >= pos - window[0])
+    if window[1] >= 0:
+        allowed = allowed & (j <= pos + window[1])
+    if not allowed.all():
         scores = scores.masked_fill(~allowed, float("-inf"))
     probs = torch.softmax(scores, dim=-1)
     # All-masked rows become NaN under softmax — mirror our kernel's
@@ -397,12 +406,79 @@ def test_dropout_raises():
         flash_attn_mojo.flash_attn_func(q, k, v, dropout_p=0.1)
 
 
-def test_window_size_raises():
+# Phase 1.9: sliding window (local) attention.
+@pytest.mark.parametrize(
+    "window,causal",
+    [
+        ((4, 4), False),  # symmetric window
+        ((2, 0), False),  # left-only (no future) but not causal-named
+        ((0, 2), False),  # right-only — peek into the future
+        ((4, -1), False),  # left bound only
+        ((-1, 4), False),  # right bound only
+        ((3, 0), True),  # causal + sliding ("local")
+        ((4, 4), True),  # causal still wins on the right
+    ],
+)
+def test_flash_attn_func_window(window, causal):
+    """Forward + backward correctness with sliding-window masks."""
+    batch, seqlen, nheads, headdim = 1, 16, 2, 64
+    q = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    k = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    v = torch.randn(
+        batch, seqlen, nheads, headdim, dtype=torch.float16, requires_grad=True
+    )
+    dout = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v, causal=causal, window_size=window)
+    ref = _ref_attention(
+        q.detach(), k.detach(), v.detach(), causal=causal, window=window
+    )
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < 5e-3, f"fwd max_diff={diff} (window={window}, causal={causal})"
+
+    out.backward(dout)
+
+    # Reference grad with window applied via masked softmax.
+    qg = q.detach().clone().to(torch.float32).requires_grad_(True)
+    kg = k.detach().clone().to(torch.float32).requires_grad_(True)
+    vg = v.detach().clone().to(torch.float32).requires_grad_(True)
+    out_ref = _ref_attention(
+        qg.to(q.dtype),
+        kg.to(k.dtype),
+        vg.to(v.dtype),
+        causal=causal,
+        window=window,
+    )
+    out_ref.float().backward(dout.float())
+    for name, got, ref in [
+        ("dq", q.grad, qg.grad),
+        ("dk", k.grad, kg.grad),
+        ("dv", v.grad, vg.grad),
+    ]:
+        diff = (got.float() - ref.float()).abs().max().item()
+        assert diff < 1e-2, f"{name} max_diff={diff} (window={window}, causal={causal})"
+
+
+def test_flash_attn_func_window_zero_zero():
+    """window_size=(0, 0) keeps only the diagonal — output equals scaled v."""
+    batch, seqlen, nheads, headdim = 1, 8, 1, 64
+    q = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    k = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    v = torch.randn(batch, seqlen, nheads, headdim, dtype=torch.float16)
+    out = flash_attn_mojo.flash_attn_func(q, k, v, window_size=(0, 0))
+    ref = _ref_attention(q, k, v, window=(0, 0))
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < 5e-3
+
+
+def test_window_size_bad_shape_raises():
     q = torch.randn(1, 4, 1, 64, dtype=torch.float16)
-    k = torch.randn(1, 4, 1, 64, dtype=torch.float16)
-    v = torch.randn(1, 4, 1, 64, dtype=torch.float16)
-    with pytest.raises(NotImplementedError, match="phase 1.9"):
-        flash_attn_mojo.flash_attn_func(q, k, v, window_size=(2, 2))
+    with pytest.raises(ValueError, match="window_size"):
+        flash_attn_mojo.flash_attn_func(q, q, q, window_size=(1, 2, 3))
 
 
 def test_alibi_raises():

@@ -69,6 +69,8 @@ def flash_attn_fwd_cpu(
         27 dtype_code  (int) — 0=fp16, 1=bf16, 2=fp32
         28 headdim     (int) — supported: 64, 96, 128
         29 causal      (int) — 0 = no mask, 1 = causal (bottom-right)
+        30 window_left  (int) — -1 = unbounded, ≥0 = num keys to the left
+        31 window_right (int) — -1 = unbounded, ≥0 = num keys to the right
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -105,6 +107,8 @@ def flash_attn_fwd_cpu(
     var dtype_code: Int = Int(py=args[27])
     var headdim_rt: Int = Int(py=args[28])
     var causal_rt: Int = Int(py=args[29])
+    var window_left_rt: Int = Int(py=args[30])
+    var window_right_rt: Int = Int(py=args[31])
 
     if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
         return PythonObject(None)
@@ -133,6 +137,8 @@ def flash_attn_fwd_cpu(
             nheads_q_int,
             nheads_kv_int,
             softmax_scale,
+            window_left_rt,
+            window_right_rt,
             q_ptr,
             k_ptr,
             v_ptr,
@@ -220,6 +226,8 @@ def flash_attn_bwd_cpu(
         47 dtype_code (int)
         48 headdim    (int)
         49 causal     (int)
+        50 window_left  (int)
+        51 window_right (int)
     """
     var q_addr: Int = Int(py=args[0])
     var k_addr: Int = Int(py=args[1])
@@ -274,6 +282,8 @@ def flash_attn_bwd_cpu(
     var dtype_code: Int = Int(py=args[47])
     var headdim_rt: Int = Int(py=args[48])
     var causal_rt: Int = Int(py=args[49])
+    var window_left_rt: Int = Int(py=args[50])
+    var window_right_rt: Int = Int(py=args[51])
 
     if batch_int == 0 or seqlen_q_int == 0 or nheads_q_int == 0:
         return PythonObject(None)
@@ -314,6 +324,8 @@ def flash_attn_bwd_cpu(
             nheads_q_int,
             nheads_kv_int,
             softmax_scale,
+            window_left_rt,
+            window_right_rt,
             q_ptr,
             k_ptr,
             v_ptr,
