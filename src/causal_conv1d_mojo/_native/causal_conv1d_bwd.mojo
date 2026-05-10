@@ -15,6 +15,7 @@ from std.math import ceildiv, exp
 from std.memory import stack_allocation
 from std.os.atomic import Atomic, Consistency
 from std.sys import llvm_intrinsic
+from layout import TileTensor, TensorLayout, Idx, Coord
 
 from causal_conv1d_common import kNEltsBwd, kNThreads
 
@@ -102,37 +103,38 @@ fn bwd_full_kernel[
     apply_silu: Bool,
     contig_inner: Bool,
     aligned_seq: Bool,
+    XLayoutType: TensorLayout,
+    WLayoutType: TensorLayout,
+    DoutLayoutType: TensorLayout,
+    DxLayoutType: TensorLayout,
 ](
     seqlen: Int,
-    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
+    weight: TileTensor[dtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    dout_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    dout: TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin],
     seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
     initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    dx_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    dx: TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin],
     dweight_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
     dbias_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
     dinitial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    x_batch_stride: Int,
-    x_c_stride: Int,
-    x_l_stride: Int,
-    weight_c_stride: Int,
-    weight_w_stride: Int,
-    dout_batch_stride: Int,
-    dout_c_stride: Int,
-    dout_l_stride: Int,
     seq_idx_b_stride: Int,
     seq_idx_l_stride: Int,
     initial_states_batch_stride: Int,
     initial_states_c_stride: Int,
     initial_states_l_stride: Int,
-    dx_batch_stride: Int,
-    dx_c_stride: Int,
-    dx_l_stride: Int,
     dinitial_states_batch_stride: Int,
     dinitial_states_c_stride: Int,
     dinitial_states_l_stride: Int,
+) where (
+    TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
+    and TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin].flat_rank == 3
+    and TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank >= 3
+    and TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin].flat_rank >= 3
+    and TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin].flat_rank >= 3
 ):
     """Fused backward: dx + dweight + dbias, one block per (B, D).
 
@@ -177,16 +179,9 @@ fn bwd_full_kernel[
 
     # Load weights into per-block fp32 registers.
     var weights = SIMD[accum_t, width](0)
-    var weight_base = channel_id * weight_c_stride
 
     comptime for k in range(width):
-
-        comptime if contig_inner:
-            weights[k] = weight_ptr[weight_base + k].cast[accum_t]()
-        else:
-            weights[k] = weight_ptr[weight_base + k * weight_w_stride].cast[
-                accum_t
-            ]()
+        weights[k] = weight[channel_id, k].cast[accum_t]()
 
     var cur_bias: Scalar[accum_t] = 0
 
@@ -203,9 +198,6 @@ fn bwd_full_kernel[
         kChunkSize, accum_t, address_space=AddressSpace.SHARED
     ]()
 
-    var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
-    var dout_base = batch_id * dout_batch_stride + channel_id * dout_c_stride
-    var dx_base = batch_id * dx_batch_stride + channel_id * dx_c_stride
     var seq_idx_base: Int = batch_id * seq_idx_b_stride
     var init_base: Int = (
         batch_id * initial_states_batch_stride
@@ -279,34 +271,36 @@ fn bwd_full_kernel[
         var dout_curr = SIMD[accum_t, kNElts](0)
 
         comptime if contig_inner and aligned_seq:
-            x_curr = x_ptr.load[width=kNElts, alignment=16](
-                x_base + seq_start
+            x_curr = x.load[width=kNElts, alignment=16](
+                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
             ).cast[accum_t]()
-            dout_curr = dout_ptr.load[width=kNElts, alignment=16](
-                dout_base + seq_start
+            dout_curr = dout.load[width=kNElts, alignment=16](
+                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
             ).cast[accum_t]()
         elif contig_inner:
             if chunk_start + kChunkSize <= seqlen:
-                x_curr = x_ptr.load[width=kNElts, alignment=16](
-                    x_base + seq_start
+                x_curr = x.load[width=kNElts, alignment=16](
+                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
                 ).cast[accum_t]()
-                dout_curr = dout_ptr.load[width=kNElts, alignment=16](
-                    dout_base + seq_start
+                dout_curr = dout.load[width=kNElts, alignment=16](
+                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
                 ).cast[accum_t]()
             else:
 
                 comptime for i in range(kNElts):
                     var t = seq_start + i
                     if t < seqlen:
-                        x_curr[i] = x_ptr[x_base + t].cast[accum_t]()
-                        dout_curr[i] = dout_ptr[dout_base + t].cast[accum_t]()
+                        x_curr[i] = x[batch_id, channel_id, t].cast[accum_t]()
+                        dout_curr[i] = dout[batch_id, channel_id, t].cast[
+                            accum_t
+                        ]()
         else:
 
             comptime for i in range(kNElts):
                 var t = seq_start + i
                 if t < seqlen:
-                    x_curr[i] = x_ptr[x_base + t * x_l_stride].cast[accum_t]()
-                    dout_curr[i] = dout_ptr[dout_base + t * dout_l_stride].cast[
+                    x_curr[i] = x[batch_id, channel_id, t].cast[accum_t]()
+                    dout_curr[i] = dout[batch_id, channel_id, t].cast[
                         accum_t
                     ]()
 
@@ -319,13 +313,7 @@ fn bwd_full_kernel[
             comptime for i in range(kNElts):
                 var t = chunk_start - kNElts + i
                 if t >= 0:
-
-                    comptime if contig_inner:
-                        x_prev[i] = x_ptr[x_base + t].cast[accum_t]()
-                    else:
-                        x_prev[i] = x_ptr[x_base + t * x_l_stride].cast[
-                            accum_t
-                        ]()
+                    x_prev[i] = x[batch_id, channel_id, t].cast[accum_t]()
 
         # When `has_initial_states`, chunk 0 / tidx 0 reads the trailing
         # `W-1` x_prev positions (which correspond to t in [-(W-1), 0))
@@ -507,26 +495,28 @@ fn bwd_full_kernel[
                         dx_vals[i] += weights[k] * dout_halo[halo_idx - kNElts]
 
         comptime if contig_inner and aligned_seq:
-            dx_ptr.store[alignment=16](
-                dx_base + seq_start, dx_vals.cast[dtype]()
+            dx.store[alignment=16](
+                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
+                dx_vals.cast[dtype](),
             )
         elif contig_inner:
             if chunk_start + kChunkSize <= seqlen:
-                dx_ptr.store[alignment=16](
-                    dx_base + seq_start, dx_vals.cast[dtype]()
+                dx.store[alignment=16](
+                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
+                    dx_vals.cast[dtype](),
                 )
             else:
 
                 comptime for i in range(kNElts):
                     var t = seq_start + i
                     if t < seqlen:
-                        dx_ptr[dx_base + t] = dx_vals[i].cast[dtype]()
+                        dx[batch_id, channel_id, t] = dx_vals[i].cast[dtype]()
         else:
 
             comptime for i in range(kNElts):
                 var t = seq_start + i
                 if t < seqlen:
-                    dx_ptr[dx_base + t * dx_l_stride] = dx_vals[i].cast[dtype]()
+                    dx[batch_id, channel_id, t] = dx_vals[i].cast[dtype]()
 
         # ---- [P6] dweight[w] += sum_i x_curr[i] * combined[i + (W-1-w)] ----
         # With has_seq_idx: gate each i-term on

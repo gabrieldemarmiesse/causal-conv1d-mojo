@@ -37,6 +37,7 @@ from std.gpu import (
     block_idx_int as block_idx,
     thread_idx_int as thread_idx,
 )
+from layout import TileTensor, TensorLayout
 
 from causal_conv1d_common import _silu_f32
 
@@ -54,29 +55,25 @@ fn update_kernel[
     apply_silu: Bool,
     has_state_indices: Bool,
     is_circular: Bool,
+    XLayoutType: TensorLayout,
+    WLayoutType: TensorLayout,
+    SLayoutType: TensorLayout,
+    OLayoutType: TensorLayout,
 ](
-    batch: Int,
-    dim: Int,
     seqlen: Int,
     state_len: Int,
-    x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    weight_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
+    weight: TileTensor[dtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    conv_state_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    conv_state: TileTensor[mut=True, dtype, SLayoutType, MutAnyOrigin],
     state_indices_ptr: UnsafePointer[Int32, MutAnyOrigin],
     cache_seqlens_ptr: UnsafePointer[Int32, MutAnyOrigin],
-    output_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    x_batch_stride: Int,
-    x_c_stride: Int,
-    x_l_stride: Int,
-    weight_c_stride: Int,
-    weight_w_stride: Int,
-    state_batch_stride: Int,
-    state_c_stride: Int,
-    state_l_stride: Int,
-    out_batch_stride: Int,
-    out_c_stride: Int,
-    out_l_stride: Int,
+    output: TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin],
+) where (
+    TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
+    and TileTensor[mut=True, dtype, SLayoutType, MutAnyOrigin].flat_rank == 3
+    and TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin].flat_rank == 3
 ):
     """Causal conv1d single-step update, GPU.
 
@@ -92,12 +89,8 @@ fn update_kernel[
 
     var batch_id: Int = block_idx.x
     var channel_id: Int = block_idx.y * kNThreadsUpdate + thread_idx.x
-    if channel_id >= dim:
+    if channel_id >= Int(output.dim[1]()):
         return
-
-    var x_base = batch_id * x_batch_stride + channel_id * x_c_stride
-    var out_base = batch_id * out_batch_stride + channel_id * out_c_stride
-    var weight_base = channel_id * weight_c_stride
 
     # Resolve the state-row coordinate. With has_state_indices=False this
     # is just batch_id; otherwise we look it up. A negative index marks
@@ -108,20 +101,14 @@ fn update_kernel[
         var idx_val: Int = Int(state_indices_ptr[batch_id])
         if idx_val < 0:
             for i in range(seqlen):
-                output_ptr[out_base + i * out_l_stride] = Scalar[dtype](0)
+                output[batch_id, channel_id, i] = Scalar[dtype](0)
             return
         state_batch_coord = idx_val
-
-    var state_base = (
-        state_batch_coord * state_batch_stride + channel_id * state_c_stride
-    )
 
     var weights = SIMD[accum_t, width](0)
 
     comptime for k in range(width):
-        weights[k] = weight_ptr[weight_base + k * weight_w_stride].cast[
-            accum_t
-        ]()
+        weights[k] = weight[channel_id, k].cast[accum_t]()
 
     var bias_v: Scalar[accum_t] = 0
 
@@ -145,21 +132,21 @@ fn update_kernel[
     comptime if not is_circular:
         # Phase 1 (linear): shift state left by `seqlen`.
         for i in range(state_len - advance_len - (width - 1)):
-            conv_state_ptr[state_base + i * state_l_stride] = conv_state_ptr[
-                state_base + (i + advance_len) * state_l_stride
+            conv_state[state_batch_coord, channel_id, i] = conv_state[
+                state_batch_coord, channel_id, i + advance_len
             ]
 
         # Phase 2 (linear): read trailing W-1 history into x_vals (with
         # writeback for the small-state_len edge case).
         comptime for i in range(width - 1):
             var read_idx: Int = state_len - (width - 1) + i
-            var state_val = conv_state_ptr[
-                state_base + read_idx * state_l_stride
+            var state_val = conv_state[
+                state_batch_coord, channel_id, read_idx
             ]
             var write_idx: Int = state_len - advance_len - (width - 1) + i
             if i < advance_len + (width - 1) and write_idx >= 0:
-                conv_state_ptr[
-                    state_base + write_idx * state_l_stride
+                conv_state[
+                    state_batch_coord, channel_id, write_idx
                 ] = state_val
             x_vals[i] = state_val.cast[accum_t]()
     else:
@@ -167,8 +154,8 @@ fn update_kernel[
         # advancing with wrap. After this, update_idx = cache_seqlen %
         # state_len — the position where the new x[0] will be written.
         comptime for i in range(width - 1):
-            var state_val = conv_state_ptr[
-                state_base + update_idx * state_l_stride
+            var state_val = conv_state[
+                state_batch_coord, channel_id, update_idx
             ]
             x_vals[i] = state_val.cast[accum_t]()
             update_idx += 1
@@ -177,14 +164,18 @@ fn update_kernel[
 
     # Phase 3: walk new x, write into state, emit output.
     for i in range(seqlen):
-        var x_val = x_ptr[x_base + i * x_l_stride]
+        var x_val = x[batch_id, channel_id, i]
 
         comptime if not is_circular:
             var write_idx: Int = state_len - advance_len + i
             if i < advance_len and write_idx >= 0:
-                conv_state_ptr[state_base + write_idx * state_l_stride] = x_val
+                conv_state[
+                    state_batch_coord, channel_id, write_idx
+                ] = x_val
         else:
-            conv_state_ptr[state_base + update_idx * state_l_stride] = x_val
+            conv_state[
+                state_batch_coord, channel_id, update_idx
+            ] = x_val
             update_idx += 1
             if update_idx >= state_len:
                 update_idx -= state_len
@@ -199,7 +190,7 @@ fn update_kernel[
         comptime if apply_silu:
             out_val = _silu_f32(Float32(out_val))
 
-        output_ptr[out_base + i * out_l_stride] = out_val.cast[dtype]()
+        output[batch_id, channel_id, i] = out_val.cast[dtype]()
 
         # Slide x_vals left by 1 for the next output position.
         comptime for k in range(width - 1):

@@ -479,63 +479,139 @@ def causal_conv1d_bwd_full(
             contig_inner: Bool,
             aligned_seq: Bool,
         ]() raises:
-            var compiled = ctx.compile_function[
-                bwd_full_kernel[
-                    dtype,
-                    width,
-                    has_bias,
-                    has_seq_idx,
-                    has_initial_states,
-                    apply_silu,
-                    contig_inner,
-                    aligned_seq,
-                ],
-                bwd_full_kernel[
-                    dtype,
-                    width,
-                    has_bias,
-                    has_seq_idx,
-                    has_initial_states,
-                    apply_silu,
-                    contig_inner,
-                    aligned_seq,
-                ],
-            ]()
-            stream.enqueue_function(
-                compiled,
-                seqlen_int,
-                x_ptr,
-                w_ptr,
-                b_ptr,
-                dout_ptr,
-                seq_idx_ptr,
-                initial_states_ptr,
-                dx_ptr,
-                dweight_acc_ptr,
-                dbias_acc_ptr,
-                dinitial_states_ptr,
-                x_b_stride,
-                x_c_stride,
-                x_l_stride,
-                w_c_stride,
-                w_w_stride,
-                dout_b_stride,
-                dout_c_stride,
-                dout_l_stride,
-                seq_idx_b_stride,
-                seq_idx_l_stride,
-                initial_states_b_stride,
-                initial_states_c_stride,
-                initial_states_l_stride,
-                dx_b_stride,
-                dx_c_stride,
-                dx_l_stride,
-                dinitial_states_b_stride,
-                dinitial_states_c_stride,
-                dinitial_states_l_stride,
-                grid_dim=grid,
-                block_dim=(kNThreads,),
-            )
+            # Identical to fwd's pattern: when `contig_inner` is True, bake
+            # `Idx[1]()` into the inner stride slot of every Layout so the
+            # innermost-stride multiply folds out at comptime. Width slot
+            # of the weight Layout is also comptime (`Idx[width]()`). The
+            # compile+enqueue block is identical in both arms and lives in
+            # `launch` below.
+            @parameter
+            fn launch[
+                XLT: TensorLayout,
+                WLT: TensorLayout,
+                DoutLT: TensorLayout,
+                DxLT: TensorLayout,
+            ](
+                x_tt: TileTensor[dtype, XLT, ImmutAnyOrigin],
+                w_tt: TileTensor[dtype, WLT, ImmutAnyOrigin],
+                dout_tt: TileTensor[dtype, DoutLT, ImmutAnyOrigin],
+                dx_tt: TileTensor[mut=True, dtype, DxLT, MutAnyOrigin],
+            ) raises:
+                var compiled = ctx.compile_function[
+                    bwd_full_kernel[
+                        dtype,
+                        width,
+                        has_bias,
+                        has_seq_idx,
+                        has_initial_states,
+                        apply_silu,
+                        contig_inner,
+                        aligned_seq,
+                        XLT,
+                        WLT,
+                        DoutLT,
+                        DxLT,
+                    ],
+                    bwd_full_kernel[
+                        dtype,
+                        width,
+                        has_bias,
+                        has_seq_idx,
+                        has_initial_states,
+                        apply_silu,
+                        contig_inner,
+                        aligned_seq,
+                        XLT,
+                        WLT,
+                        DoutLT,
+                        DxLT,
+                    ],
+                ]()
+                stream.enqueue_function(
+                    compiled,
+                    seqlen_int,
+                    x_tt,
+                    w_tt,
+                    b_ptr,
+                    dout_tt,
+                    seq_idx_ptr,
+                    initial_states_ptr,
+                    dx_tt,
+                    dweight_acc_ptr,
+                    dbias_acc_ptr,
+                    dinitial_states_ptr,
+                    seq_idx_b_stride,
+                    seq_idx_l_stride,
+                    initial_states_b_stride,
+                    initial_states_c_stride,
+                    initial_states_l_stride,
+                    dinitial_states_b_stride,
+                    dinitial_states_c_stride,
+                    dinitial_states_l_stride,
+                    grid_dim=grid,
+                    block_dim=(kNThreads,),
+                )
+
+            comptime if contig_inner:
+                var x_tt = TileTensor(
+                    x_ptr,
+                    Layout(
+                        (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                        (Idx(x_b_stride), Idx(x_c_stride), Idx[1]()),
+                    ),
+                )
+                var w_tt = TileTensor(
+                    w_ptr,
+                    Layout(
+                        (Idx(dim_int), Idx[width]()),
+                        (Idx(w_c_stride), Idx[1]()),
+                    ),
+                )
+                var dout_tt = TileTensor(
+                    dout_ptr,
+                    Layout(
+                        (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                        (Idx(dout_b_stride), Idx(dout_c_stride), Idx[1]()),
+                    ),
+                )
+                var dx_tt = TileTensor(
+                    dx_ptr,
+                    Layout(
+                        (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                        (Idx(dx_b_stride), Idx(dx_c_stride), Idx[1]()),
+                    ),
+                )
+                launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)
+            else:
+                var x_tt = TileTensor(
+                    x_ptr,
+                    Layout(
+                        (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                        (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+                    ),
+                )
+                var w_tt = TileTensor(
+                    w_ptr,
+                    Layout(
+                        (Idx(dim_int), Idx[width]()),
+                        (Idx(w_c_stride), Idx(w_w_stride)),
+                    ),
+                )
+                var dout_tt = TileTensor(
+                    dout_ptr,
+                    Layout(
+                        (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                        (Idx(dout_b_stride), Idx(dout_c_stride), Idx(dout_l_stride)),
+                    ),
+                )
+                var dx_tt = TileTensor(
+                    dx_ptr,
+                    Layout(
+                        (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                        (Idx(dx_b_stride), Idx(dx_c_stride), Idx(dx_l_stride)),
+                    ),
+                )
+                launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)
 
         # 6-flag comptime sweep across (has_bias, has_seq_idx,
         # has_initial_states, apply_silu, contig_inner, aligned_seq).
@@ -1066,6 +1142,38 @@ def causal_conv1d_update(
             has_state_indices: Bool,
             is_circular: Bool,
         ]() raises:
+            var x_tt = TileTensor(
+                x_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                    (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+                ),
+            )
+            var w_tt = TileTensor(
+                w_ptr,
+                Layout(
+                    (Idx(dim_int), Idx[width]()),
+                    (Idx(w_c_stride), Idx(w_w_stride)),
+                ),
+            )
+            # State's batch dim is a no-op when has_state_indices=True
+            # (kernel trusts state_indices[b] verbatim, no bounds check),
+            # so just pass `batch_int` — it's never read for the indexed
+            # case anyway.
+            var state_tt = TileTensor(
+                state_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(state_len_int)),
+                    (Idx(state_b_stride), Idx(state_c_stride), Idx(state_l_stride)),
+                ),
+            )
+            var o_tt = TileTensor(
+                o_ptr,
+                Layout(
+                    (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                    (Idx(o_b_stride), Idx(o_c_stride), Idx(o_l_stride)),
+                ),
+            )
             var compiled = ctx.compile_function[
                 update_kernel[
                     dtype,
@@ -1074,6 +1182,10 @@ def causal_conv1d_update(
                     apply_silu,
                     has_state_indices,
                     is_circular,
+                    type_of(x_tt).LayoutType,
+                    type_of(w_tt).LayoutType,
+                    type_of(state_tt).LayoutType,
+                    type_of(o_tt).LayoutType,
                 ],
                 update_kernel[
                     dtype,
@@ -1082,32 +1194,23 @@ def causal_conv1d_update(
                     apply_silu,
                     has_state_indices,
                     is_circular,
+                    type_of(x_tt).LayoutType,
+                    type_of(w_tt).LayoutType,
+                    type_of(state_tt).LayoutType,
+                    type_of(o_tt).LayoutType,
                 ],
             ]()
             stream.enqueue_function(
                 compiled,
-                batch_int,
-                dim_int,
                 seqlen_int,
                 state_len_int,
-                x_ptr,
-                w_ptr,
+                x_tt.as_immut(),
+                w_tt.as_immut(),
                 b_ptr,
-                state_ptr,
+                state_tt,
                 state_indices_ptr,
                 cache_seqlens_ptr,
-                o_ptr,
-                x_b_stride,
-                x_c_stride,
-                x_l_stride,
-                w_c_stride,
-                w_w_stride,
-                state_b_stride,
-                state_c_stride,
-                state_l_stride,
-                o_b_stride,
-                o_c_stride,
-                o_l_stride,
+                o_tt,
                 grid_dim=grid,
                 block_dim=(kNThreadsUpdate,),
             )
