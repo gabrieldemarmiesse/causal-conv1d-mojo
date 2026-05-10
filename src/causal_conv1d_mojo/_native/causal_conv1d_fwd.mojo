@@ -49,6 +49,10 @@ fn fwd_kernel[
     initial_states_b_stride: Int,
     initial_states_c_stride: Int,
     initial_states_l_stride: Int,
+) where (
+    TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
+    and TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin].flat_rank == 3
 ):
     """Causal conv1d forward, GPU.
 
@@ -77,15 +81,10 @@ fn fwd_kernel[
     var channel_id: Int = block_idx.y
     var chunk_id: Int = block_idx.x
 
-    # LayoutTensor views for indexed access (read in the inner loop).
-    var x_lt = x.to_layout_tensor()
-    var w_lt = weight.to_layout_tensor()
-    var o_lt = output.to_layout_tensor()
-
     var weights = InlineArray[Scalar[accum_t], width](uninitialized=True)
 
     comptime for k in range(width):
-        weights[k] = rebind[Scalar[dtype]](w_lt[channel_id, k]).cast[accum_t]()
+        weights[k] = weight[channel_id, k].cast[accum_t]()
 
     var cur_bias: Scalar[accum_t] = 0
 
@@ -117,9 +116,7 @@ fn fwd_kernel[
             var src_t = t + k - (width - 1)
             var val: Scalar[accum_t] = 0
             if src_t >= 0:
-                val = rebind[Scalar[dtype]](
-                    x_lt[batch_id, channel_id, src_t]
-                ).cast[accum_t]()
+                val = x[batch_id, channel_id, src_t].cast[accum_t]()
 
                 comptime if has_seq_idx:
                     var src_id: Int32 = seq_idx_ptr[
@@ -147,4 +144,4 @@ fn fwd_kernel[
             if cur_id < 0:
                 acc = 0
 
-        o_lt[batch_id, channel_id, t] = acc.cast[dtype]()
+        output[batch_id, channel_id, t] = acc.cast[dtype]()
