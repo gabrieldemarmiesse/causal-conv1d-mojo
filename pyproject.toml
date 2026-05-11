@@ -53,9 +53,19 @@ pytest = "*"
 matplotlib = "*"
 ruff = "*"
 pre-commit = "*"
+# System libstdc++ is too old for the Mojo compiler (needs GLIBCXX_3.4.30+).
+libstdcxx-ng = ">=13"
 
 [tool.pixi.system-requirements]
 libc = "2.34"
+
+# The Mojo compiler binary links against GLIBCXX_3.4.30+, which the host's
+# system libstdc++ (in /lib64) may not provide. We installed libstdcxx-ng to
+# get a newer libstdc++ into the conda env, but the loader still finds the
+# system one first; prepend the env's lib dir to LD_LIBRARY_PATH so mojo
+# resolves to the conda-provided libstdc++.so.6 instead.
+[tool.pixi.activation.env]
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
 [tool.pixi.pypi-dependencies]
 causal-conv1d-mojo = { path = ".", editable = true }
