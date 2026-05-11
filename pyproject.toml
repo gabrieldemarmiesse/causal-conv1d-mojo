@@ -49,10 +49,6 @@ platforms = ["linux-64"]
 
 [tool.pixi.dependencies]
 cuda-nvcc = "12.8.*"
-pytest = "*"
-matplotlib = "*"
-ruff = "*"
-pre-commit = "*"
 # System libstdc++ is too old for the Mojo compiler (needs GLIBCXX_3.4.30+).
 libstdcxx-ng = ">=13"
 
@@ -69,6 +65,10 @@ LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
 [tool.pixi.pypi-dependencies]
 causal-conv1d-mojo = { path = ".", editable = true }
+matplotlib = "*"
+pytest = "*"
+ruff = "*"
+pre-commit = "*"
 
 [tool.pixi.tasks]
 # The Mojo source is compiled lazily on first `import causal_conv1d_mojo` --
