@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from _reference import causal_conv1d_ref
+from causal_conv1d_mojo import causal_conv1d_ref
 
 
 # Per-dtype tolerances reused by every test file.

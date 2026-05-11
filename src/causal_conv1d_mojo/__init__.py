@@ -21,8 +21,17 @@ import mojo.importer  # noqa: F401  (registers the import hook)
 
 from causal_conv1d_mojo._fn import causal_conv1d_fn
 from causal_conv1d_mojo._update import causal_conv1d_update
+from causal_conv1d_mojo.reference import (
+    causal_conv1d_ref,
+    causal_conv1d_update_ref,
+)
 
 
 __version__ = "1.6.1"
 
-__all__ = ["causal_conv1d_fn", "causal_conv1d_update"]
+__all__ = [
+    "causal_conv1d_fn",
+    "causal_conv1d_update",
+    "causal_conv1d_ref",
+    "causal_conv1d_update_ref",
+]

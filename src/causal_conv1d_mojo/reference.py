@@ -1,15 +1,15 @@
-"""Pure-pytorch reference for causal_conv1d (forward) and
-causal_conv1d_update.
+"""Pure-pytorch reference for the two public APIs:
 
-Copied verbatim from upstream `causal_conv1d/causal_conv1d_interface.py`
-(Tri Dao, 2024 — BSD-3-Clause), so the test suite no longer needs the
-`causal-conv1d` pip package installed. The upstream package is a C++
-extension that compiles against torch; removing the runtime dependency
-on it drops a multi-minute first-install cost.
+  - `causal_conv1d_ref`        — pytorch fallback for `causal_conv1d_fn`
+  - `causal_conv1d_update_ref` — pytorch fallback for `causal_conv1d_update`
 
-Only the two `*_ref` pure-pytorch helpers are inlined here — the
-fused-CUDA implementations live in the Mojo kernels under
-`causal_conv1d_mojo/`.
+Both are exposed at the top level (`from causal_conv1d_mojo import
+causal_conv1d_ref`) so callers can validate their own kernels or use
+the pure-pytorch path on hardware where the Mojo kernels don't apply.
+
+Implementations are copied verbatim from upstream `causal_conv1d`
+(Tri Dao, 2024 — BSD-3-Clause); inlining them here removes the runtime
+dependency on the upstream C++ extension (multi-minute source build).
 """
 
 from __future__ import annotations
