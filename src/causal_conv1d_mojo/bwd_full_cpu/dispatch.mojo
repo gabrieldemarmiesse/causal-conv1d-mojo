@@ -113,7 +113,7 @@ def causal_conv1d_bwd_full_cpu(
     )
 
     @parameter
-    fn run[dtype: DType]() raises:
+    def run[dtype: DType]() raises:
         var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=x_addr
         )
@@ -140,7 +140,7 @@ def causal_conv1d_bwd_full_cpu(
         )
 
         @parameter
-        fn dispatch[
+        def dispatch[
             width: Int,
             has_bias: Bool,
             has_seq_idx: Bool,
@@ -211,7 +211,7 @@ def causal_conv1d_bwd_full_cpu(
             )
 
         @parameter
-        fn dispatch_w[width: Int]() raises:
+        def dispatch_w[width: Int]() raises:
             comptime for hb, hs, hi, silu in product(
                 _BOOLS, _BOOLS, _BOOLS, _BOOLS
             ):

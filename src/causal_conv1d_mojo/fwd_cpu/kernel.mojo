@@ -18,7 +18,7 @@ from layout import TileTensor, TensorLayout
 from common import _silu_f32
 
 
-fn fwd_kernel_cpu[
+def fwd_kernel_cpu[
     dtype: DType,
     width: Int,
     has_bias: Bool,
@@ -62,7 +62,7 @@ fn fwd_kernel_cpu[
     comptime accum_t = DType.float32
 
     @parameter
-    fn process_bc(bc_idx: Int):
+    def process_bc(bc_idx: Int):
         var b = bc_idx // dim
         var d = bc_idx % dim
 

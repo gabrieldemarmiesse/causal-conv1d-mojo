@@ -5,15 +5,11 @@ Mirrors upstream's `causal_conv1d_bwd.cu`. The launcher lives in
 block reduction helpers it depends on.
 """
 
-from std.gpu import (
-    block_idx_int as block_idx,
-    thread_idx_int as thread_idx,
-    barrier,
-)
+from std.gpu import block_idx, thread_idx, barrier
 from std.gpu.memory import AddressSpace
 from std.math import ceildiv, exp
 from std.memory import stack_allocation
-from std.os.atomic import Atomic, Consistency
+from std.atomic import Atomic, Ordering
 from std.sys import llvm_intrinsic
 from layout import TileTensor, TensorLayout, Idx, Coord
 
@@ -21,7 +17,7 @@ from common import kNEltsBwd, kNThreads
 
 
 @always_inline
-fn _shfl_xor_f32(val: Float32, offset: UInt32) -> Float32:
+def _shfl_xor_f32(val: Float32, offset: UInt32) -> Float32:
     """One inlined `shfl.sync.bfly.b32`, fp32.
 
     Why: the stdlib chain `block.sum -> warp.sum -> shuffle_xor -> _shuffle`
@@ -38,7 +34,7 @@ fn _shfl_xor_f32(val: Float32, offset: UInt32) -> Float32:
 
 
 @always_inline
-fn _warp_sum_f32(val: Float32) -> Float32:
+def _warp_sum_f32(val: Float32) -> Float32:
     """5-step butterfly warp reduction, fp32. All lanes hold the warp's sum."""
     var v = val
     v += _shfl_xor_f32(v, UInt32(16))
@@ -50,7 +46,7 @@ fn _warp_sum_f32(val: Float32) -> Float32:
 
 
 @always_inline
-fn _block_sum_f32[block_size: Int](val: Float32) -> Float32:
+def _block_sum_f32[block_size: Int](val: Float32) -> Float32:
     """Block-level fp32 sum specialised for our backward kernel.
 
     Equivalent to `gpu_block.sum[block_size=block_size, broadcast=False]` for
@@ -94,7 +90,7 @@ fn _block_sum_f32[block_size: Int](val: Float32) -> Float32:
     return block_val
 
 
-fn bwd_full_kernel[
+def bwd_full_kernel[
     dtype: DType,
     width: Int,
     has_bias: Bool,
@@ -592,7 +588,7 @@ fn bwd_full_kernel[
         var block_dw_k = _block_sum_f32[block_size=kNThreads](local_dweight[k])
         if tidx == 0:
             _ = Atomic[DType.float32, scope="device"].fetch_add[
-                ordering=Consistency.MONOTONIC
+                ordering=Ordering.RELAXED
             ](
                 dweight_acc_ptr + channel_id * width + k,
                 block_dw_k,
@@ -602,5 +598,5 @@ fn bwd_full_kernel[
         var block_dbias = _block_sum_f32[block_size=kNThreads](local_dbias)
         if tidx == 0:
             _ = Atomic[DType.float32, scope="device"].fetch_add[
-                ordering=Consistency.MONOTONIC
+                ordering=Ordering.RELAXED
             ](dbias_acc_ptr + channel_id, block_dbias)

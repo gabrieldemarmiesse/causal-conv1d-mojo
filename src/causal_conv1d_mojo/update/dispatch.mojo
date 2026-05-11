@@ -107,7 +107,7 @@ def causal_conv1d_update(
     )
 
     @parameter
-    fn run[dtype: DType]() raises:
+    def run[dtype: DType]() raises:
         var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=x_addr
         )
@@ -131,7 +131,7 @@ def causal_conv1d_update(
         )
 
         @parameter
-        fn enqueue_update[
+        def enqueue_update[
             width: Int,
             has_bias: Bool,
             apply_silu: Bool,
@@ -212,7 +212,7 @@ def causal_conv1d_update(
             )
 
         @parameter
-        fn dispatch_w[width: Int]() raises:
+        def dispatch_w[width: Int]() raises:
             comptime for hb, silu, hi, circ in product(
                 _BOOLS, _BOOLS, _BOOLS, _BOOLS
             ):

@@ -63,10 +63,11 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/sysroot_linux-64-2.34-h087de78_3.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - pypi: .
-      - pypi: https://files.pythonhosted.org/packages/00/bb/d9b579cbbe8262e442e2d19b83f7981c3c50301010354e9b2ffb70edd768/max_mojo_mogg_libs-26.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/05/6b/32f747947df2da6994e999492ab306a903659555dddc0fbdeb9d71f75e52/nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/0d/9b/a997b638fcd068ad6e4d53b8551a7d30fe8b404d6f1804abf1df69838932/nvidia_cuda_runtime_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/11/30/2f681ca221c030dd4e1d016c3ddaf80062a8d31e99fb0290ccd7b17b6d0e/max-26.3.0-cp313-cp313-manylinux_2_34_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/11/9f/cb605aa7c83bf6d5731a0562e91980835e596dde385b8c4863e53dc5443c/max_mojo_mogg_libs-26.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/16/82/3948e54c01b2109238357c6f86242e6ecbf0c63a1af46906772902f82057/torch-2.8.0-cp313-cp313-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/1f/13/ee4e00f30e676b66ae65b4f08cb5bcbb8392c03f54f2d5413ea99a5d1c80/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
@@ -76,12 +77,16 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/33/6b/e0547afaf41bf2c42e52430072fa5658766e3d65bd4b03a563d1b6336f57/distlib-0.4.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/4b/32/e0f13a1c5b0f8572d0ec6ae2f6c677b7991fafd95da523159c19eff0696a/contourpy-1.3.3-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/51/52/f870c9bd97af4a4fe819fc41f6033ea2e4763eec5741d4ead4efb9b9e743/max_mojo_libs-26.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/56/79/12978b96bd44274fe38b5dde5cfb660b1d114f70a65ef962bcbbed99b549/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/57/65/3292b19e928e6b6e7ae8ce91266c44ee19df094b37e3b98e1679368780e1/mojo_compiler-1.0.0b1-py3-none-manylinux_2_34_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5c/5b/4e4fff7bad39adf89f735f2bc87248c81db71205b62bcc0d5ca5b606b3c3/nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/61/37/f9ff239e42c0ce48ddcc4679cb21ba40cdf98ff846cb4317b71cf96dd889/max_core-26.2.0-py3-none-manylinux_2_34_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/64/91/fff509a7f05abaad72f8988b64face4ffc96192880f3720e0e71d1e982da/mojo_compiler_mojo_libs-1.0.0b1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/66/ea/b05d6e66eb67b29f76f9303626f62529d066197bc8677460780845e7d4ee/max_shmem_libs-26.3.0-py3-none-manylinux_2_34_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/67/ee/21d4e8536afd1a328f01b359b4d3997b291ffd35a237c877b331c1c3b71c/pillow-12.2.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/6e/16/7c18227c6ab8bf1eb273be2cca3e21aab9779ac7e925359d99fbfed4ac3e/max_core-26.3.0-py3-none-manylinux_2_34_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/74/27/e5b8f34d02d9995b80abcef563ea1f8b56d20134d8f4e5e81733b1feceb2/pyyaml-6.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/75/a6/a0a304dc33b49145b21f4808d763822111e67d1c3a32b524a1baf947b6e1/platformdirs-4.9.6-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/80/6e/4b28b62ecb6aae56769c34a8ff1d661473ec1e9519e2d5f8b2c150086b26/pre_commit-4.6.0-py2.py3-none-any.whl
@@ -91,13 +96,11 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/87/1b/9e33c09813d65e248f7f773119148a612516a4bea93e9c6f545f78455b7c/wheel-0.47.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/88/b2/d0896bdcdc8d28a7fc5717c305f1a861c26e18c05047949fb371034d98bd/nodeenv-1.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8a/17/4402d0d14ccf1dfc70932600b68097fbbf9c898a4871d2cbbe79c7801a32/matplotlib-3.10.9-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/93/a5/8125e0025a9cc0d562c7b814bcb073bf80d55e41398bf74b58a2965c7c0a/mojo_compiler-0.26.2.0-py3-none-manylinux_2_34_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/94/84/d9273cd09688070a6523c4aee4663a8538721b2b755c4962aafae0011e72/identify-2.6.19-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9d/76/f789f7a86709c6b087c5a2f52f911838cad707cc613162401badc665acfe/setuptools-82.0.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/eb/86626c1bbc2edb86323022371c39aa48df6fd8b0a1647bc274577f72e90b/nvidia_nvtx_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/a4/09/ca9d3c5169aa726cba782de20e1c3db2a9694de476b8e107b03b1a19cccf/max_shmem_libs-26.2.0-py3-none-manylinux_2_34_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/a9/21/9b05698b46f218fc0e118e1f8168395c65c8a2c750ae2bab54fc4bd4e0e8/markupsafe-3.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/b1/4f/f71e641e504111a5a74e3a20bc52d01bd86788b22699dd3fee1c63253cf6/virtualenv-21.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl
@@ -105,14 +108,11 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ba/51/e123d997aa098c61d029f76663dedbfb9bc8dcf8c60cbd6adbe42f76d049/nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/bb/fe/1bcba1dfbfb8d01be8d93f07bfc502c93fa23afa6fd5ab3fc7c1df71038a/nvidia_cufile_cu12-1.13.1.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/bf/db/ef741e589787d5ea5503a51ced4992285d83c40afd39b3511e1e8631e286/mojo_compiler_mojo_libs-0.26.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c2/f5/e1854cb2f2bcd4280c44736c93550cc300ff4b8c95ebe370d0aa7d2b473d/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d1/73/a9d864e42a01896bb5974475438f16086be9ba1f0d19d0bb7a07427c4a8b/numpy-2.4.4-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/d2/82/23a73dfb36504da48e33b907eeb3dc3c2402d81916f170d567a59644e1ff/max_mojo_libs-26.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d4/24/a372aaf5c9b7208e7112038812994107bc65a84cd00e0354a88c2c77a617/pytest-9.0.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d5/0c/043d5e551459da400957a1395e0febbf771446ff34291afcbe3d8be2a279/fsspec-2026.4.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/d9/0b/7eced3406b113483af2f09a0691a3b9ff409fed546ad23029a54e0431799/max-26.2.0-cp313-cp313-manylinux_2_34_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/db/3c/33bac158f8ab7f89b2e59426d5fe2e4f63f7ed25df84c036890172b412b5/cfgv-3.5.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dc/61/e24b560ab2e2eaeb3c839129175fb330dfcfc29e5203196e5541a4c44682/nvidia_cublas_cu12-12.8.4.1-py3-none-manylinux_2_27_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl
@@ -761,17 +761,15 @@ packages:
   name: causal-conv1d-mojo
   requires_dist:
   - torch==2.8.0
-  - max
+  - max==26.3.0
+  - mojo-compiler==1.0.0b1
+  - mojo-compiler-mojo-libs==1.0.0b1
   - setuptools>=70
   - wheel
   - packaging
   - causal-conv1d==1.6.1 ; extra == 'bench'
   - ninja ; extra == 'bench'
   requires_python: '>=3.13,<3.14'
-- pypi: https://files.pythonhosted.org/packages/00/bb/d9b579cbbe8262e442e2d19b83f7981c3c50301010354e9b2ffb70edd768/max_mojo_mogg_libs-26.2.0-py3-none-any.whl
-  name: max-mojo-mogg-libs
-  version: 26.2.0
-  sha256: cc63416794435a85ad77b1b2ba8d748a5949b078b412eabfc4518ec991f29ef2
 - pypi: https://files.pythonhosted.org/packages/05/6b/32f747947df2da6994e999492ab306a903659555dddc0fbdeb9d71f75e52/nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl
   name: nvidia-cuda-nvrtc-cu12
   version: 12.8.93
@@ -790,6 +788,149 @@ packages:
   - railroad-diagrams ; extra == 'diagrams'
   - jinja2 ; extra == 'diagrams'
   requires_python: '>=3.9'
+- pypi: https://files.pythonhosted.org/packages/11/30/2f681ca221c030dd4e1d016c3ddaf80062a8d31e99fb0290ccd7b17b6d0e/max-26.3.0-cp313-cp313-manylinux_2_34_x86_64.whl
+  name: max
+  version: 26.3.0
+  sha256: 27d7175dda600a85d7740474383ab289e537c15a68ad95685affb7eb98445bb5
+  requires_dist:
+  - max-core==26.3.0
+  - numpy>=1.18
+  - typing-extensions>=4.12.2
+  - rich>=13.0.1
+  - av>=14.0.0 ; extra == 'benchmark'
+  - click>=8.0.0 ; extra == 'benchmark'
+  - exceptiongroup>=0.2.2 ; extra == 'benchmark'
+  - gguf>=0.17.1 ; extra == 'benchmark'
+  - hf-transfer>=0.1.9 ; extra == 'benchmark'
+  - huggingface-hub>=0.28.0 ; extra == 'benchmark'
+  - llguidance>=0.7.30 ; extra == 'benchmark'
+  - jinja2>=3.1.0 ; extra == 'benchmark'
+  - pillow>=11.0.0 ; extra == 'benchmark'
+  - psutil>=7.0.0 ; extra == 'benchmark'
+  - pydantic-settings>=2.7.1 ; extra == 'benchmark'
+  - pydantic ; extra == 'benchmark'
+  - pydantic-core ; extra == 'benchmark'
+  - pyyaml>=6.0.1 ; extra == 'benchmark'
+  - requests>=2.32.3 ; extra == 'benchmark'
+  - sentencepiece>=0.2.0 ; extra == 'benchmark'
+  - taskgroup>=0.2.2 ; extra == 'benchmark'
+  - tiktoken>=0.5.0 ; extra == 'benchmark'
+  - tqdm>=4.67.1 ; extra == 'benchmark'
+  - transformers>=5.0.0,<5.3.0 ; extra == 'benchmark'
+  - uvicorn>=0.34.0 ; extra == 'benchmark'
+  - uvloop>=0.21.0 ; extra == 'benchmark'
+  - aiohttp>=3.10.5 ; extra == 'benchmark'
+  - cyclopts>=4.2.5 ; extra == 'benchmark'
+  - datasets>=2.21.0 ; extra == 'benchmark'
+  - msgspec>=0.19.0 ; extra == 'benchmark'
+  - av>=14.0.0 ; extra == 'lmcache'
+  - click>=8.0.0 ; extra == 'lmcache'
+  - exceptiongroup>=0.2.2 ; extra == 'lmcache'
+  - gguf>=0.17.1 ; extra == 'lmcache'
+  - hf-transfer>=0.1.9 ; extra == 'lmcache'
+  - huggingface-hub>=0.28.0 ; extra == 'lmcache'
+  - llguidance>=0.7.30 ; extra == 'lmcache'
+  - jinja2>=3.1.0 ; extra == 'lmcache'
+  - pillow>=11.0.0 ; extra == 'lmcache'
+  - psutil>=6.1.1 ; extra == 'lmcache'
+  - pydantic-settings>=2.7.1 ; extra == 'lmcache'
+  - pydantic ; extra == 'lmcache'
+  - pydantic-core ; extra == 'lmcache'
+  - pyyaml>=6.0.1 ; extra == 'lmcache'
+  - requests>=2.32.3 ; extra == 'lmcache'
+  - sentencepiece>=0.2.0 ; extra == 'lmcache'
+  - taskgroup>=0.2.2 ; extra == 'lmcache'
+  - tiktoken>=0.5.0 ; extra == 'lmcache'
+  - tqdm>=4.67.1 ; extra == 'lmcache'
+  - transformers>=5.0.0,<5.3.0 ; extra == 'lmcache'
+  - uvicorn>=0.34.0 ; extra == 'lmcache'
+  - uvloop>=0.21.0 ; extra == 'lmcache'
+  - aiofiles>=24.1.0 ; extra == 'lmcache'
+  - asgiref>=3.8.1 ; extra == 'lmcache'
+  - fastapi>=0.115.3 ; extra == 'lmcache'
+  - httpx>=0.28.1,<0.29 ; extra == 'lmcache'
+  - msgspec>=0.19.0 ; extra == 'lmcache'
+  - openai>=2.11.0 ; extra == 'lmcache'
+  - opentelemetry-api>=1.29.0 ; extra == 'lmcache'
+  - opentelemetry-exporter-otlp-proto-http>=1.27.0 ; extra == 'lmcache'
+  - opentelemetry-exporter-prometheus>=0.50b0 ; extra == 'lmcache'
+  - opentelemetry-sdk>=1.29.0,<1.36.0 ; extra == 'lmcache'
+  - prometheus-client>=0.21.0 ; extra == 'lmcache'
+  - pyinstrument>=5.0.1 ; extra == 'lmcache'
+  - python-json-logger>=2.0.7 ; extra == 'lmcache'
+  - pyzmq>=26.3.0 ; extra == 'lmcache'
+  - regex>=2024.11.6 ; extra == 'lmcache'
+  - scipy>=1.13.0 ; extra == 'lmcache'
+  - sse-starlette>=2.1.2 ; extra == 'lmcache'
+  - starlette>=0.47.2 ; extra == 'lmcache'
+  - lmcache>=0.3.13 ; platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'lmcache'
+  - av>=14.0.0 ; extra == 'pipelines'
+  - click>=8.0.0 ; extra == 'pipelines'
+  - exceptiongroup>=0.2.2 ; extra == 'pipelines'
+  - gguf>=0.17.1 ; extra == 'pipelines'
+  - hf-transfer>=0.1.9 ; extra == 'pipelines'
+  - huggingface-hub>=0.28.0 ; extra == 'pipelines'
+  - llguidance>=0.7.30 ; extra == 'pipelines'
+  - jinja2>=3.1.0 ; extra == 'pipelines'
+  - pillow>=11.0.0 ; extra == 'pipelines'
+  - psutil>=6.1.1 ; extra == 'pipelines'
+  - pydantic-settings>=2.7.1 ; extra == 'pipelines'
+  - pydantic ; extra == 'pipelines'
+  - pydantic-core ; extra == 'pipelines'
+  - pyyaml>=6.0.1 ; extra == 'pipelines'
+  - requests>=2.32.3 ; extra == 'pipelines'
+  - sentencepiece>=0.2.0 ; extra == 'pipelines'
+  - taskgroup>=0.2.2 ; extra == 'pipelines'
+  - tiktoken>=0.5.0 ; extra == 'pipelines'
+  - tqdm>=4.67.1 ; extra == 'pipelines'
+  - transformers>=5.0.0,<5.3.0 ; extra == 'pipelines'
+  - uvicorn>=0.34.0 ; extra == 'pipelines'
+  - uvloop>=0.21.0 ; extra == 'pipelines'
+  - av>=14.0.0 ; extra == 'serve'
+  - click>=8.0.0 ; extra == 'serve'
+  - exceptiongroup>=0.2.2 ; extra == 'serve'
+  - gguf>=0.17.1 ; extra == 'serve'
+  - hf-transfer>=0.1.9 ; extra == 'serve'
+  - huggingface-hub>=0.28.0 ; extra == 'serve'
+  - llguidance>=0.7.30 ; extra == 'serve'
+  - jinja2>=3.1.0 ; extra == 'serve'
+  - pillow>=11.0.0 ; extra == 'serve'
+  - psutil>=6.1.1 ; extra == 'serve'
+  - pydantic-settings>=2.7.1 ; extra == 'serve'
+  - pydantic ; extra == 'serve'
+  - pydantic-core ; extra == 'serve'
+  - pyyaml>=6.0.1 ; extra == 'serve'
+  - requests>=2.32.3 ; extra == 'serve'
+  - sentencepiece>=0.2.0 ; extra == 'serve'
+  - taskgroup>=0.2.2 ; extra == 'serve'
+  - tiktoken>=0.5.0 ; extra == 'serve'
+  - tqdm>=4.67.1 ; extra == 'serve'
+  - transformers>=5.0.0,<5.3.0 ; extra == 'serve'
+  - uvicorn>=0.34.0 ; extra == 'serve'
+  - uvloop>=0.21.0 ; extra == 'serve'
+  - aiofiles>=24.1.0 ; extra == 'serve'
+  - asgiref>=3.8.1 ; extra == 'serve'
+  - fastapi>=0.115.3 ; extra == 'serve'
+  - httpx>=0.28.1,<0.29 ; extra == 'serve'
+  - msgspec>=0.19.0 ; extra == 'serve'
+  - openai>=2.11.0 ; extra == 'serve'
+  - opentelemetry-api>=1.29.0 ; extra == 'serve'
+  - opentelemetry-exporter-otlp-proto-http>=1.27.0 ; extra == 'serve'
+  - opentelemetry-exporter-prometheus>=0.50b0 ; extra == 'serve'
+  - opentelemetry-sdk>=1.29.0,<1.36.0 ; extra == 'serve'
+  - prometheus-client>=0.21.0 ; extra == 'serve'
+  - pyinstrument>=5.0.1 ; extra == 'serve'
+  - python-json-logger>=2.0.7 ; extra == 'serve'
+  - pyzmq>=26.3.0 ; extra == 'serve'
+  - regex>=2024.11.6 ; extra == 'serve'
+  - scipy>=1.13.0 ; extra == 'serve'
+  - sse-starlette>=2.1.2 ; extra == 'serve'
+  - starlette>=0.47.2 ; extra == 'serve'
+  requires_python: '>=3.10,<3.15'
+- pypi: https://files.pythonhosted.org/packages/11/9f/cb605aa7c83bf6d5731a0562e91980835e596dde385b8c4863e53dc5443c/max_mojo_mogg_libs-26.3.0-py3-none-any.whl
+  name: max-mojo-mogg-libs
+  version: 26.3.0
+  sha256: 04ae4efe97b37ae55308626980109d52310206c553a2bbedfd1182e0944d3f83
 - pypi: https://files.pythonhosted.org/packages/16/82/3948e54c01b2109238357c6f86242e6ecbf0c63a1af46906772902f82057/torch-2.8.0-cp313-cp313-manylinux_2_28_x86_64.whl
   name: torch
   version: 2.8.0
@@ -918,6 +1059,10 @@ packages:
   - pytest-xdist ; extra == 'test-no-images'
   - wurlitzer ; extra == 'test-no-images'
   requires_python: '>=3.11'
+- pypi: https://files.pythonhosted.org/packages/51/52/f870c9bd97af4a4fe819fc41f6033ea2e4763eec5741d4ead4efb9b9e743/max_mojo_libs-26.3.0-py3-none-any.whl
+  name: max-mojo-libs
+  version: 26.3.0
+  sha256: 3b942489b8574c917ffed800a25917859894fc3bf3a6822aa2d6b7d0ac679297
 - pypi: https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl
   name: pluggy
   version: 1.6.0
@@ -933,20 +1078,17 @@ packages:
   name: nvidia-cusparselt-cu12
   version: 0.7.1
   sha256: f1bb701d6b930d5a7cea44c19ceb973311500847f81b634d802b7b539dc55623
+- pypi: https://files.pythonhosted.org/packages/57/65/3292b19e928e6b6e7ae8ce91266c44ee19df094b37e3b98e1679368780e1/mojo_compiler-1.0.0b1-py3-none-manylinux_2_34_x86_64.whl
+  name: mojo-compiler
+  version: 1.0.0b1
+  sha256: 44ad5acdd1e52bfa0d3c45ddc552b5200f36956b25b8ae2e4f25dc1e70937a7d
+  requires_dist:
+  - mojo-compiler-mojo-libs==1.0.0b1
 - pypi: https://files.pythonhosted.org/packages/5c/5b/4e4fff7bad39adf89f735f2bc87248c81db71205b62bcc0d5ca5b606b3c3/nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
   name: nvidia-nccl-cu12
   version: 2.27.3
   sha256: adf27ccf4238253e0b826bce3ff5fa532d65fc42322c8bfdfaf28024c0fbe039
   requires_python: '>=3'
-- pypi: https://files.pythonhosted.org/packages/61/37/f9ff239e42c0ce48ddcc4679cb21ba40cdf98ff846cb4317b71cf96dd889/max_core-26.2.0-py3-none-manylinux_2_34_x86_64.whl
-  name: max-core
-  version: 26.2.0
-  sha256: 3f702416ab8de9183cf7b67608d74717dacf775e8e37a336e3b544cb91a009ad
-  requires_dist:
-  - mojo-compiler==0.26.2.0
-  - max-mojo-libs==26.2.0
-  - max-mojo-mogg-libs==26.2.0
-  - max-shmem-libs==26.2.0
 - pypi: https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
   name: jinja2
   version: 3.1.6
@@ -955,6 +1097,14 @@ packages:
   - markupsafe>=2.0
   - babel>=2.7 ; extra == 'i18n'
   requires_python: '>=3.7'
+- pypi: https://files.pythonhosted.org/packages/64/91/fff509a7f05abaad72f8988b64face4ffc96192880f3720e0e71d1e982da/mojo_compiler_mojo_libs-1.0.0b1-py3-none-any.whl
+  name: mojo-compiler-mojo-libs
+  version: 1.0.0b1
+  sha256: 7fad6aa2910fba067da6def8015ae3bcf97ce82f8710fea806926ae5d3aa2298
+- pypi: https://files.pythonhosted.org/packages/66/ea/b05d6e66eb67b29f76f9303626f62529d066197bc8677460780845e7d4ee/max_shmem_libs-26.3.0-py3-none-manylinux_2_34_x86_64.whl
+  name: max-shmem-libs
+  version: 26.3.0
+  sha256: 2628e3f191bacb5209fd9142a0d69ca461267733b769cb0afcaa2eeb3fe9a320
 - pypi: https://files.pythonhosted.org/packages/67/ee/21d4e8536afd1a328f01b359b4d3997b291ffd35a237c877b331c1c3b71c/pillow-12.2.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
   name: pillow
   version: 12.2.0
@@ -987,6 +1137,15 @@ packages:
   - trove-classifiers>=2024.10.12 ; extra == 'tests'
   - defusedxml ; extra == 'xmp'
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/6e/16/7c18227c6ab8bf1eb273be2cca3e21aab9779ac7e925359d99fbfed4ac3e/max_core-26.3.0-py3-none-manylinux_2_34_x86_64.whl
+  name: max-core
+  version: 26.3.0
+  sha256: db843b7c5847e2c70958d8314fac75073369fc3845f287b7b5000900bd400019
+  requires_dist:
+  - mojo-compiler==1.0.0b1
+  - max-mojo-libs==26.3.0
+  - max-mojo-mogg-libs==26.3.0
+  - max-shmem-libs==26.3.0
 - pypi: https://files.pythonhosted.org/packages/74/27/e5b8f34d02d9995b80abcef563ea1f8b56d20134d8f4e5e81733b1feceb2/pyyaml-6.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
   name: pyyaml
   version: 6.0.3
@@ -1062,12 +1221,6 @@ packages:
   - setuptools-scm>=7,<10 ; extra == 'dev'
   - setuptools>=64 ; extra == 'dev'
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/93/a5/8125e0025a9cc0d562c7b814bcb073bf80d55e41398bf74b58a2965c7c0a/mojo_compiler-0.26.2.0-py3-none-manylinux_2_34_x86_64.whl
-  name: mojo-compiler
-  version: 0.26.2.0
-  sha256: afb81f9146369bbef7f05899b95ce3897e598be69e0109694a85278613e84e1f
-  requires_dist:
-  - mojo-compiler-mojo-libs==0.26.2.0
 - pypi: https://files.pythonhosted.org/packages/94/84/d9273cd09688070a6523c4aee4663a8538721b2b755c4962aafae0011e72/identify-2.6.19-py2.py3-none-any.whl
   name: identify
   version: 2.6.19
@@ -1188,10 +1341,6 @@ packages:
   version: 12.8.90
   sha256: 5b17e2001cc0d751a5bc2c6ec6d26ad95913324a4adb86788c944f8ce9ba441f
   requires_python: '>=3'
-- pypi: https://files.pythonhosted.org/packages/a4/09/ca9d3c5169aa726cba782de20e1c3db2a9694de476b8e107b03b1a19cccf/max_shmem_libs-26.2.0-py3-none-manylinux_2_34_x86_64.whl
-  name: max-shmem-libs
-  version: 26.2.0
-  sha256: 45386512ff024f9e7d1ca3776d48929b09562246b2b5557cc29507eedff9b1ae
 - pypi: https://files.pythonhosted.org/packages/a9/21/9b05698b46f218fc0e118e1f8168395c65c8a2c750ae2bab54fc4bd4e0e8/markupsafe-3.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
   name: markupsafe
   version: 3.0.3
@@ -1266,10 +1415,6 @@ packages:
   version: 1.13.1.3
   sha256: 1d069003be650e131b21c932ec3d8969c1715379251f8d23a1860554b1cb24fc
   requires_python: '>=3'
-- pypi: https://files.pythonhosted.org/packages/bf/db/ef741e589787d5ea5503a51ced4992285d83c40afd39b3511e1e8631e286/mojo_compiler_mojo_libs-0.26.2.0-py3-none-any.whl
-  name: mojo-compiler-mojo-libs
-  version: 0.26.2.0
-  sha256: e4419e4b744e88fc187a552d0e9cb4145c5b1ad1a3a4efff1301e13e7c70b55c
 - pypi: https://files.pythonhosted.org/packages/c2/f5/e1854cb2f2bcd4280c44736c93550cc300ff4b8c95ebe370d0aa7d2b473d/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
   name: nvidia-cusparse-cu12
   version: 12.5.8.93
@@ -1287,10 +1432,6 @@ packages:
   version: 2.4.4
   sha256: c901b15172510173f5cb310eae652908340f8dede90fff9e3bf6c0d8dfd92f83
   requires_python: '>=3.11'
-- pypi: https://files.pythonhosted.org/packages/d2/82/23a73dfb36504da48e33b907eeb3dc3c2402d81916f170d567a59644e1ff/max_mojo_libs-26.2.0-py3-none-any.whl
-  name: max-mojo-libs
-  version: 26.2.0
-  sha256: d295f13322fb9ecd449ebcff9799ec5d84ed522da57542edf8627f15bf6973f9
 - pypi: https://files.pythonhosted.org/packages/d4/24/a372aaf5c9b7208e7112038812994107bc65a84cd00e0354a88c2c77a617/pytest-9.0.3-py3-none-any.whl
   name: pytest
   version: 9.0.3
@@ -1419,143 +1560,6 @@ packages:
   - zstandard ; python_full_version < '3.14' and extra == 'test-full'
   - tqdm ; extra == 'tqdm'
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/d9/0b/7eced3406b113483af2f09a0691a3b9ff409fed546ad23029a54e0431799/max-26.2.0-cp313-cp313-manylinux_2_34_x86_64.whl
-  name: max
-  version: 26.2.0
-  sha256: 9e537bf0519a4b2f0cbdf3c72489cccb448028a54e8174414c739d6564baa4ca
-  requires_dist:
-  - max-core==26.2.0
-  - numpy>=1.18
-  - typing-extensions>=4.12.2
-  - pyyaml>=6.0.1
-  - rich>=13.0.1
-  - av>=14.0.0 ; extra == 'benchmark'
-  - click>=8.0.0 ; extra == 'benchmark'
-  - exceptiongroup>=0.2.2 ; extra == 'benchmark'
-  - gguf>=0.17.1 ; extra == 'benchmark'
-  - hf-transfer>=0.1.9 ; extra == 'benchmark'
-  - huggingface-hub>=0.28.0 ; extra == 'benchmark'
-  - llguidance>=0.7.30 ; extra == 'benchmark'
-  - jinja2>=3.1.0 ; extra == 'benchmark'
-  - pillow>=11.0.0 ; extra == 'benchmark'
-  - psutil>=7.0.0 ; extra == 'benchmark'
-  - pydantic-settings>=2.7.1 ; extra == 'benchmark'
-  - pydantic ; extra == 'benchmark'
-  - pydantic-core ; extra == 'benchmark'
-  - requests>=2.32.3 ; extra == 'benchmark'
-  - sentencepiece>=0.2.0 ; extra == 'benchmark'
-  - taskgroup>=0.2.2 ; extra == 'benchmark'
-  - tiktoken>=0.5.0 ; extra == 'benchmark'
-  - tqdm>=4.67.1 ; extra == 'benchmark'
-  - transformers>=4.57.0,<5.0.0 ; extra == 'benchmark'
-  - uvicorn>=0.34.0 ; extra == 'benchmark'
-  - uvloop>=0.21.0 ; extra == 'benchmark'
-  - aiohttp>=3.10.5 ; extra == 'benchmark'
-  - datasets>=2.21.0 ; extra == 'benchmark'
-  - msgspec>=0.19.0 ; extra == 'benchmark'
-  - av>=14.0.0 ; extra == 'lmcache'
-  - click>=8.0.0 ; extra == 'lmcache'
-  - exceptiongroup>=0.2.2 ; extra == 'lmcache'
-  - gguf>=0.17.1 ; extra == 'lmcache'
-  - hf-transfer>=0.1.9 ; extra == 'lmcache'
-  - huggingface-hub>=0.28.0 ; extra == 'lmcache'
-  - llguidance>=0.7.30 ; extra == 'lmcache'
-  - jinja2>=3.1.0 ; extra == 'lmcache'
-  - pillow>=11.0.0 ; extra == 'lmcache'
-  - psutil>=6.1.1 ; extra == 'lmcache'
-  - pydantic-settings>=2.7.1 ; extra == 'lmcache'
-  - pydantic ; extra == 'lmcache'
-  - pydantic-core ; extra == 'lmcache'
-  - requests>=2.32.3 ; extra == 'lmcache'
-  - sentencepiece>=0.2.0 ; extra == 'lmcache'
-  - taskgroup>=0.2.2 ; extra == 'lmcache'
-  - tiktoken>=0.5.0 ; extra == 'lmcache'
-  - tqdm>=4.67.1 ; extra == 'lmcache'
-  - transformers>=4.57.0,<5.0.0 ; extra == 'lmcache'
-  - uvicorn>=0.34.0 ; extra == 'lmcache'
-  - uvloop>=0.21.0 ; extra == 'lmcache'
-  - aiofiles>=24.1.0 ; extra == 'lmcache'
-  - asgiref>=3.8.1 ; extra == 'lmcache'
-  - fastapi>=0.115.3 ; extra == 'lmcache'
-  - grpcio>=1.68.0 ; extra == 'lmcache'
-  - httpx>=0.28.1,<0.29 ; extra == 'lmcache'
-  - msgspec>=0.19.0 ; extra == 'lmcache'
-  - opentelemetry-api>=1.29.0 ; extra == 'lmcache'
-  - opentelemetry-exporter-otlp-proto-http>=1.27.0 ; extra == 'lmcache'
-  - opentelemetry-exporter-prometheus>=0.50b0 ; extra == 'lmcache'
-  - opentelemetry-sdk>=1.29.0,<1.36.0 ; extra == 'lmcache'
-  - prometheus-client>=0.21.0 ; extra == 'lmcache'
-  - protobuf>=6.33.5,<6.34.0 ; extra == 'lmcache'
-  - pyinstrument>=5.0.1 ; extra == 'lmcache'
-  - python-json-logger>=2.0.7 ; extra == 'lmcache'
-  - pyzmq>=26.3.0 ; extra == 'lmcache'
-  - regex>=2024.11.6 ; extra == 'lmcache'
-  - scipy>=1.13.0 ; extra == 'lmcache'
-  - sse-starlette>=2.1.2 ; extra == 'lmcache'
-  - starlette>=0.47.2 ; extra == 'lmcache'
-  - lmcache>=0.3.13 ; platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'lmcache'
-  - av>=14.0.0 ; extra == 'pipelines'
-  - click>=8.0.0 ; extra == 'pipelines'
-  - exceptiongroup>=0.2.2 ; extra == 'pipelines'
-  - gguf>=0.17.1 ; extra == 'pipelines'
-  - hf-transfer>=0.1.9 ; extra == 'pipelines'
-  - huggingface-hub>=0.28.0 ; extra == 'pipelines'
-  - llguidance>=0.7.30 ; extra == 'pipelines'
-  - jinja2>=3.1.0 ; extra == 'pipelines'
-  - pillow>=11.0.0 ; extra == 'pipelines'
-  - psutil>=6.1.1 ; extra == 'pipelines'
-  - pydantic-settings>=2.7.1 ; extra == 'pipelines'
-  - pydantic ; extra == 'pipelines'
-  - pydantic-core ; extra == 'pipelines'
-  - requests>=2.32.3 ; extra == 'pipelines'
-  - sentencepiece>=0.2.0 ; extra == 'pipelines'
-  - taskgroup>=0.2.2 ; extra == 'pipelines'
-  - tiktoken>=0.5.0 ; extra == 'pipelines'
-  - tqdm>=4.67.1 ; extra == 'pipelines'
-  - transformers>=4.57.0,<5.0.0 ; extra == 'pipelines'
-  - uvicorn>=0.34.0 ; extra == 'pipelines'
-  - uvloop>=0.21.0 ; extra == 'pipelines'
-  - av>=14.0.0 ; extra == 'serve'
-  - click>=8.0.0 ; extra == 'serve'
-  - exceptiongroup>=0.2.2 ; extra == 'serve'
-  - gguf>=0.17.1 ; extra == 'serve'
-  - hf-transfer>=0.1.9 ; extra == 'serve'
-  - huggingface-hub>=0.28.0 ; extra == 'serve'
-  - llguidance>=0.7.30 ; extra == 'serve'
-  - jinja2>=3.1.0 ; extra == 'serve'
-  - pillow>=11.0.0 ; extra == 'serve'
-  - psutil>=6.1.1 ; extra == 'serve'
-  - pydantic-settings>=2.7.1 ; extra == 'serve'
-  - pydantic ; extra == 'serve'
-  - pydantic-core ; extra == 'serve'
-  - requests>=2.32.3 ; extra == 'serve'
-  - sentencepiece>=0.2.0 ; extra == 'serve'
-  - taskgroup>=0.2.2 ; extra == 'serve'
-  - tiktoken>=0.5.0 ; extra == 'serve'
-  - tqdm>=4.67.1 ; extra == 'serve'
-  - transformers>=4.57.0,<5.0.0 ; extra == 'serve'
-  - uvicorn>=0.34.0 ; extra == 'serve'
-  - uvloop>=0.21.0 ; extra == 'serve'
-  - aiofiles>=24.1.0 ; extra == 'serve'
-  - asgiref>=3.8.1 ; extra == 'serve'
-  - fastapi>=0.115.3 ; extra == 'serve'
-  - grpcio>=1.68.0 ; extra == 'serve'
-  - httpx>=0.28.1,<0.29 ; extra == 'serve'
-  - msgspec>=0.19.0 ; extra == 'serve'
-  - opentelemetry-api>=1.29.0 ; extra == 'serve'
-  - opentelemetry-exporter-otlp-proto-http>=1.27.0 ; extra == 'serve'
-  - opentelemetry-exporter-prometheus>=0.50b0 ; extra == 'serve'
-  - opentelemetry-sdk>=1.29.0,<1.36.0 ; extra == 'serve'
-  - prometheus-client>=0.21.0 ; extra == 'serve'
-  - protobuf>=6.33.5,<6.34.0 ; extra == 'serve'
-  - pyinstrument>=5.0.1 ; extra == 'serve'
-  - python-json-logger>=2.0.7 ; extra == 'serve'
-  - pyzmq>=26.3.0 ; extra == 'serve'
-  - regex>=2024.11.6 ; extra == 'serve'
-  - scipy>=1.13.0 ; extra == 'serve'
-  - sse-starlette>=2.1.2 ; extra == 'serve'
-  - starlette>=0.47.2 ; extra == 'serve'
-  requires_python: '>=3.10,<3.15'
 - pypi: https://files.pythonhosted.org/packages/db/3c/33bac158f8ab7f89b2e59426d5fe2e4f63f7ed25df84c036890172b412b5/cfgv-3.5.0-py2.py3-none-any.whl
   name: cfgv
   version: 3.5.0

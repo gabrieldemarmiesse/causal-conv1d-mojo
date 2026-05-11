@@ -11,7 +11,11 @@ dependencies = [
     # 'max' here only ships the Mojo compiler + runtime libs that our
     # native .so links against (libKGENCompilerRTShared, libAsyncRTMojoBindings,
     # etc.). We do not use the MAX framework / CustomOpLibrary at runtime.
-    "max",
+    # 26.3.0 transitively requires the pre-release mojo-compiler==1.0.0b1;
+    # we pin it explicitly so the resolver accepts the pre-release.
+    "max==26.3.0",
+    "mojo-compiler==1.0.0b1",
+    "mojo-compiler-mojo-libs==1.0.0b1",
     "setuptools>=70",
     "wheel",
     "packaging",
@@ -60,8 +64,15 @@ libc = "2.34"
 # get a newer libstdc++ into the conda env, but the loader still finds the
 # system one first; prepend the env's lib dir to LD_LIBRARY_PATH so mojo
 # resolves to the conda-provided libstdc++.so.6 instead.
+#
+# MAX 26.3+ links against CUDA-13's internal libnvptxcompiler and refuses
+# to load on NVIDIA driver <580 (CUDA <13). Pointing MAX at the env's
+# CUDA-12.8 ptxas via this env var disables the driver-version guard and
+# routes final PTX -> cubin through the external compiler instead.
+# See: https://modul.ar/gpu-requirements.
 [tool.pixi.activation.env]
 LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+MODULAR_NVPTX_COMPILER_PATH = "$CONDA_PREFIX/bin/ptxas"
 
 [tool.pixi.pypi-dependencies]
 causal-conv1d-mojo = { path = ".", editable = true }

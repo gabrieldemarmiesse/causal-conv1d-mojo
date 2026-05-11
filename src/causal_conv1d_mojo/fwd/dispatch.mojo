@@ -117,7 +117,7 @@ def causal_conv1d_fwd(
     # `compile_function[]()` just hands the prebuilt cubin to the CUDA
     # driver to load (cached per-context after first call).
     @parameter
-    fn run[dtype: DType]() raises:
+    def run[dtype: DType]() raises:
         var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=x_addr
         )
@@ -142,7 +142,7 @@ def causal_conv1d_fwd(
         # initial_states are mutually exclusive at the public API; we only
         # emit cubins for the 3 reachable (seq_idx, init) combinations.
         @parameter
-        fn enqueue_fwd[
+        def enqueue_fwd[
             width: Int,
             has_bias: Bool,
             has_seq_idx: Bool,
@@ -159,7 +159,7 @@ def causal_conv1d_fwd(
             # the comptime if. The compile+enqueue is identical in both
             # arms — hoisted into `launch` below.
             @parameter
-            fn launch[
+            def launch[
                 XLT: TensorLayout, WLT: TensorLayout, OLT: TensorLayout
             ](
                 x_tt: TileTensor[dtype, XLT, ImmutAnyOrigin],
@@ -261,7 +261,7 @@ def causal_conv1d_fwd(
         # the public API rules out as mutually exclusive — so we don't
         # waste a cubin on a code path that will never be hit at runtime.
         @parameter
-        fn dispatch_w[width: Int]() raises:
+        def dispatch_w[width: Int]() raises:
             comptime for hb in _BOOLS:
                 comptime for hs, hi, silu, contig in product(
                     _BOOLS, _BOOLS, _BOOLS, _BOOLS

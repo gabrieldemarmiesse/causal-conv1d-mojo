@@ -82,7 +82,7 @@ def causal_conv1d_fwd_cpu(
     var initial_states_l_stride: Int = Int(py=args[27])
 
     @parameter
-    fn run[dtype: DType]() raises:
+    def run[dtype: DType]() raises:
         var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=x_addr
         )
@@ -103,7 +103,7 @@ def causal_conv1d_fwd_cpu(
         )
 
         @parameter
-        fn dispatch[
+        def dispatch[
             width: Int,
             has_bias: Bool,
             has_seq_idx: Bool,
@@ -163,7 +163,7 @@ def causal_conv1d_fwd_cpu(
         # API; the `comptime if` drops that combo so we don't waste a CPU
         # specialisation on it.
         @parameter
-        fn dispatch_w[width: Int]() raises:
+        def dispatch_w[width: Int]() raises:
             comptime for hb in _BOOLS:
                 comptime for hs, hi, silu in product(_BOOLS, _BOOLS, _BOOLS):
                     comptime if not (hs and hi):

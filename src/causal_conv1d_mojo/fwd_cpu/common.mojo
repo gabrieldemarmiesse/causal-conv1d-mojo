@@ -21,5 +21,5 @@ comptime kNElts: Int = 4
 comptime kNEltsBwd: Int = 4
 
 
-fn _silu_f32(x: Float32) -> Float32:
+def _silu_f32(x: Float32) -> Float32:
     return x / (Float32(1) + exp(-x))

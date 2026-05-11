@@ -33,10 +33,7 @@ Each thread handles one (batch, channel). One block covers
 `kNThreadsUpdate=64` channels for a given batch.
 """
 
-from std.gpu import (
-    block_idx_int as block_idx,
-    thread_idx_int as thread_idx,
-)
+from std.gpu import block_idx, thread_idx
 from layout import TileTensor, TensorLayout
 
 from common import _silu_f32
@@ -48,7 +45,7 @@ from common import _silu_f32
 comptime kNThreadsUpdate: Int = 64
 
 
-fn update_kernel[
+def update_kernel[
     dtype: DType,
     width: Int,
     has_bias: Bool,

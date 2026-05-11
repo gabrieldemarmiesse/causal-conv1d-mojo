@@ -17,16 +17,13 @@ Bias / seq_idx / initial_states stay as raw pointers — bias is 1-D
 used in the perf-critical path.
 """
 
-from std.gpu import (
-    block_idx_int as block_idx,
-    thread_idx_int as thread_idx,
-)
+from std.gpu import block_idx, thread_idx
 from layout import TileTensor, TensorLayout
 
 from common import _silu_f32, kNElts, kNThreads
 
 
-fn fwd_kernel[
+def fwd_kernel[
     dtype: DType,
     width: Int,
     has_bias: Bool,

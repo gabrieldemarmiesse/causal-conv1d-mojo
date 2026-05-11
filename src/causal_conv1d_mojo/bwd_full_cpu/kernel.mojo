@@ -18,12 +18,12 @@ where `dpre[t] = silu'(pre[t]) * dout[t]`.
 
 from std.algorithm import sync_parallelize
 from std.math import exp
-from std.os.atomic import Atomic, Consistency
+from std.atomic import Atomic, Ordering
 from layout import TileTensor, TensorLayout
 
 
 @always_inline
-fn _cpu_dpre_at[
+def _cpu_dpre_at[
     dtype: DType,
     width: Int,
     has_seq_idx: Bool,
@@ -109,7 +109,7 @@ fn _cpu_dpre_at[
     return dout_v * silu_grad
 
 
-fn bwd_kernel_cpu[
+def bwd_kernel_cpu[
     dtype: DType,
     width: Int,
     has_bias: Bool,
@@ -161,7 +161,7 @@ fn bwd_kernel_cpu[
     comptime accum_t = DType.float32
 
     @parameter
-    fn process_bc(bc_idx: Int):
+    def process_bc(bc_idx: Int):
         var b = bc_idx // dim
         var d = bc_idx % dim
 
@@ -326,12 +326,12 @@ fn bwd_kernel_cpu[
         # Atomic-add the (b, d) block's contribution. Multiple parallel
         # workers may target the same `d` across different batches.
         comptime for k in range(width):
-            _ = Atomic[DType.float32].fetch_add[ordering=Consistency.MONOTONIC](
+            _ = Atomic[DType.float32].fetch_add[ordering=Ordering.RELAXED](
                 dweight_acc_ptr + d * width + k, local_dweight[k]
             )
 
         comptime if has_bias:
-            _ = Atomic[DType.float32].fetch_add[ordering=Consistency.MONOTONIC](
+            _ = Atomic[DType.float32].fetch_add[ordering=Ordering.RELAXED](
                 dbias_acc_ptr + d, local_dbias
             )
 

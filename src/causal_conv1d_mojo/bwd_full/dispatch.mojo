@@ -140,7 +140,7 @@ def causal_conv1d_bwd_full(
     # has_bias/apply_silu/contig/aligned dispatch tree below it. The
     # dweight_acc / dbias_acc accumulators stay fp32 regardless of dtype.
     @parameter
-    fn run[dtype: DType]() raises:
+    def run[dtype: DType]() raises:
         var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=x_addr
         )
@@ -173,7 +173,7 @@ def causal_conv1d_bwd_full(
         )
 
         @parameter
-        fn enqueue_bwd[
+        def enqueue_bwd[
             width: Int,
             has_bias: Bool,
             has_seq_idx: Bool,
@@ -189,7 +189,7 @@ def causal_conv1d_bwd_full(
             # compile+enqueue block is identical in both arms and lives in
             # `launch` below.
             @parameter
-            fn launch[
+            def launch[
                 XLT: TensorLayout,
                 WLT: TensorLayout,
                 DoutLT: TensorLayout,
@@ -327,7 +327,7 @@ def causal_conv1d_bwd_full(
         # symmetric and the `comptime if` filter only catches the
         # aligned/contig invariant.
         @parameter
-        fn dispatch_w[width: Int]() raises:
+        def dispatch_w[width: Int]() raises:
             comptime for hs in _BOOLS:
                 comptime for hi in _BOOLS:
                     comptime for hb, silu, contig, aligned in product(
