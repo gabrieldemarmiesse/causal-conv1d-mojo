@@ -1,4 +1,51 @@
+import pytest
 import torch
+
+
+# Devices to run every test against. CPU is always available; CUDA is
+# parametrised in but skipped per-test if the box has no GPU. fp16/bf16
+# on CPU are supported on PyTorch 2.x — the native CPU kernel computes
+# everything in fp32 internally and casts back at the boundary.
+_DEVICES = ["cpu"]
+if torch.cuda.is_available():
+    _DEVICES.append("cuda")
+
+
+@pytest.fixture(params=_DEVICES)
+def device(request):
+    return request.param
+
+
+# Activations the public API accepts. silu and swish are the same op; None
+# is the bias-only forward (no activation). Tests run all three.
+@pytest.fixture(params=[None, "silu", "swish"])
+def activation(request):
+    return request.param
+
+
+# `bias=None` is the bias-free forward. The kernel's `has_bias` comptime
+# parameter selects the path.
+@pytest.fixture(params=[True, False], ids=["with_bias", "no_bias"])
+def bias_present(request):
+    return request.param
+
+
+# Dtypes supported by both the GPU and CPU paths. bf16 has only 7
+# mantissa bits (vs fp16's 10), so reduction error on the backward pass
+# is the loosest of the three; fp32 is the tightest.
+@pytest.fixture(
+    params=[torch.float16, torch.bfloat16, torch.float32],
+    ids=["fp16", "bf16", "fp32"],
+)
+def dtype(request):
+    return request.param
+
+
+# Width sweep used by the cross-cutting `test_width_*` tests + by the
+# update tests (which test all three widths since `state_len >= W-1`).
+@pytest.fixture(params=[2, 3, 4], ids=["w2", "w3", "w4"])
+def width(request):
+    return request.param
 
 
 _DTYPE_TOL = {
