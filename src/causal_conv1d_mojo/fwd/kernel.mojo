@@ -23,7 +23,7 @@ from std.gpu import (
 )
 from layout import TileTensor, TensorLayout
 
-from causal_conv1d_common import _silu_f32, kNElts, kNThreads
+from common import _silu_f32, kNElts, kNThreads
 
 
 fn fwd_kernel[

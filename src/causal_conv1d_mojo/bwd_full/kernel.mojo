@@ -17,7 +17,7 @@ from std.os.atomic import Atomic, Consistency
 from std.sys import llvm_intrinsic
 from layout import TileTensor, TensorLayout, Idx, Coord
 
-from causal_conv1d_common import kNEltsBwd, kNThreads
+from common import kNEltsBwd, kNThreads
 
 
 @always_inline

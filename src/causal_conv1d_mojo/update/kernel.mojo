@@ -39,7 +39,7 @@ from std.gpu import (
 )
 from layout import TileTensor, TensorLayout
 
-from causal_conv1d_common import _silu_f32
+from common import _silu_f32
 
 
 # Threads per block for the update kernel. Smaller than the 128 used by

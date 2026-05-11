@@ -1,5 +1,5 @@
-"""causal_conv1d, fused into Mojo kernels and called via a direct
-Python <-> Mojo CPython extension (no MAX framework).
+"""causal_conv1d, fused into Mojo kernels and called via direct
+Python <-> Mojo CPython extensions (no MAX framework).
 
 Both forward and backward go through native Mojo kernels. On CUDA the
 backward is a single fused kernel: dx + dweight + dbias accumulation
@@ -7,6 +7,14 @@ in one launch (mirrors upstream's `causal_conv1d_bwd_kernel`). On CPU
 there's a parallel-over-(B,D) implementation that exists so the
 package works on a GPU-less machine without users needing to
 `pip install causal-conv1d` (which requires a C++ toolchain).
+
+Layout: each of the six Python entry points lives in its own
+subpackage (`fwd/`, `bwd_full/`, `fwd_cpu/`, `bwd_full_cpu/`,
+`update/`, `update_cpu/`). Every subpackage bundles its Mojo kernel,
+Mojo dispatcher, and Python wrapper. First-time use of one of the
+public APIs lazily imports — and therefore lazily compiles via
+`mojo.importer` — only the subpackages it needs, instead of paying
+for all six dispatch trees upfront.
 """
 
 from __future__ import annotations
@@ -14,209 +22,22 @@ from __future__ import annotations
 import torch
 
 # `mojo.importer` registers a Python import hook so that
-#   from causal_conv1d_mojo._native import causal_conv1d_native
+#   from causal_conv1d_mojo.<subpkg> import dispatch
 # triggers a one-time `mojo build --emit shared-lib` of the matching
 # .mojo source on first import, caching the resulting .so under
-# __mojocache__/. No manual `pixi run build-native` needed.
+# `<subpkg>/__mojocache__/`. No manual build step needed.
 import mojo.importer  # noqa: F401  (registers the import hook)
 
-from causal_conv1d_mojo._native import causal_conv1d_native as _native_mod
+from causal_conv1d_mojo._dtype import _DTYPE_CODE
+from causal_conv1d_mojo.bwd_full import native_bwd_full
+from causal_conv1d_mojo.bwd_full_cpu import native_bwd_full_cpu
+from causal_conv1d_mojo.fwd import native_fwd
+from causal_conv1d_mojo.fwd_cpu import native_fwd_cpu
+from causal_conv1d_mojo.update import native_update
+from causal_conv1d_mojo.update_cpu import native_update_cpu
 
 
 __version__ = "1.6.1"
-
-
-# `bias` and `dbias_acc` may be None when the user omits bias; in that
-# case we pass 0 for the data pointer. The Mojo kernels never
-# dereference these pointers when the comptime `has_bias=False`.
-def _ptr(t):
-    return 0 if t is None else t.data_ptr()
-
-
-# Must match the dispatch in the Mojo entry points.
-_DTYPE_CODE = {
-    torch.float16: 0,
-    torch.bfloat16: 1,
-    torch.float32: 2,
-}
-
-
-def _native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu):
-    _native_mod.causal_conv1d_fwd(
-        x.data_ptr(),
-        weight.data_ptr(),
-        _ptr(bias),
-        out.data_ptr(),
-        x.shape[0],
-        x.shape[1],
-        x.shape[2],
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        int(bias is not None),
-        int(apply_silu),
-        _DTYPE_CODE[x.dtype],
-        torch.cuda.current_stream().cuda_stream,
-        int(seq_idx is not None),
-        _ptr(seq_idx),
-        seq_idx.stride(0) if seq_idx is not None else 0,
-        seq_idx.stride(1) if seq_idx is not None else 0,
-        weight.shape[1],
-        int(initial_states is not None),
-        _ptr(initial_states),
-        initial_states.stride(0) if initial_states is not None else 0,
-        initial_states.stride(1) if initial_states is not None else 0,
-        initial_states.stride(2) if initial_states is not None else 0,
-    )
-
-
-def _native_bwd_full(
-    x,
-    weight,
-    bias,
-    dout,
-    seq_idx,
-    initial_states,
-    dx,
-    dweight_acc,
-    dbias_acc,
-    dinitial_states,
-    apply_silu,
-):
-    _native_mod.causal_conv1d_bwd_full(
-        x.data_ptr(),
-        weight.data_ptr(),
-        _ptr(bias),
-        dout.data_ptr(),
-        dx.data_ptr(),
-        dweight_acc.data_ptr(),
-        _ptr(dbias_acc),
-        x.shape[0],
-        x.shape[1],
-        x.shape[2],
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        dout.stride(0),
-        dout.stride(1),
-        dout.stride(2),
-        dx.stride(0),
-        dx.stride(1),
-        dx.stride(2),
-        int(bias is not None),
-        int(apply_silu),
-        _DTYPE_CODE[x.dtype],
-        torch.cuda.current_stream().cuda_stream,
-        weight.shape[1],
-        int(seq_idx is not None),
-        _ptr(seq_idx),
-        seq_idx.stride(0) if seq_idx is not None else 0,
-        seq_idx.stride(1) if seq_idx is not None else 0,
-        int(initial_states is not None),
-        _ptr(initial_states),
-        initial_states.stride(0) if initial_states is not None else 0,
-        initial_states.stride(1) if initial_states is not None else 0,
-        initial_states.stride(2) if initial_states is not None else 0,
-        _ptr(dinitial_states),
-        dinitial_states.stride(0) if dinitial_states is not None else 0,
-        dinitial_states.stride(1) if dinitial_states is not None else 0,
-        dinitial_states.stride(2) if dinitial_states is not None else 0,
-    )
-
-
-def _native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu):
-    _native_mod.causal_conv1d_fwd_cpu(
-        x.data_ptr(),
-        weight.data_ptr(),
-        _ptr(bias),
-        out.data_ptr(),
-        x.shape[0],
-        x.shape[1],
-        x.shape[2],
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        int(bias is not None),
-        int(apply_silu),
-        _DTYPE_CODE[x.dtype],
-        int(seq_idx is not None),
-        _ptr(seq_idx),
-        seq_idx.stride(0) if seq_idx is not None else 0,
-        seq_idx.stride(1) if seq_idx is not None else 0,
-        weight.shape[1],
-        int(initial_states is not None),
-        _ptr(initial_states),
-        initial_states.stride(0) if initial_states is not None else 0,
-        initial_states.stride(1) if initial_states is not None else 0,
-        initial_states.stride(2) if initial_states is not None else 0,
-    )
-
-
-def _native_bwd_full_cpu(
-    x,
-    weight,
-    bias,
-    dout,
-    seq_idx,
-    initial_states,
-    dx,
-    dweight_acc,
-    dbias_acc,
-    dinitial_states,
-    apply_silu,
-):
-    _native_mod.causal_conv1d_bwd_full_cpu(
-        x.data_ptr(),
-        weight.data_ptr(),
-        _ptr(bias),
-        dout.data_ptr(),
-        dx.data_ptr(),
-        dweight_acc.data_ptr(),
-        _ptr(dbias_acc),
-        x.shape[0],
-        x.shape[1],
-        x.shape[2],
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        dout.stride(0),
-        dout.stride(1),
-        dout.stride(2),
-        dx.stride(0),
-        dx.stride(1),
-        dx.stride(2),
-        int(bias is not None),
-        int(apply_silu),
-        _DTYPE_CODE[x.dtype],
-        weight.shape[1],
-        int(seq_idx is not None),
-        _ptr(seq_idx),
-        seq_idx.stride(0) if seq_idx is not None else 0,
-        seq_idx.stride(1) if seq_idx is not None else 0,
-        int(initial_states is not None),
-        _ptr(initial_states),
-        initial_states.stride(0) if initial_states is not None else 0,
-        initial_states.stride(1) if initial_states is not None else 0,
-        initial_states.stride(2) if initial_states is not None else 0,
-        _ptr(dinitial_states),
-        dinitial_states.stride(0) if dinitial_states is not None else 0,
-        dinitial_states.stride(1) if dinitial_states is not None else 0,
-        dinitial_states.stride(2) if dinitial_states is not None else 0,
-    )
 
 
 def _write_final_states(x, final_states_out, width):
@@ -259,9 +80,9 @@ class _CausalConv1dFn(torch.autograd.Function):
     ):
         out = torch.empty_like(x)
         if x.is_cuda:
-            _native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu)
+            native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu)
         else:
-            _native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu)
+            native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu)
         if final_states_out is not None:
             _write_final_states(x, final_states_out, weight.shape[1])
         # `save_for_backward` accepts None — the slot just won't have a
@@ -310,7 +131,7 @@ class _CausalConv1dFn(torch.autograd.Function):
         )
 
         if x.is_cuda:
-            _native_bwd_full(
+            native_bwd_full(
                 x,
                 weight,
                 bias,
@@ -324,7 +145,7 @@ class _CausalConv1dFn(torch.autograd.Function):
                 apply_silu,
             )
         else:
-            _native_bwd_full_cpu(
+            native_bwd_full_cpu(
                 x,
                 weight,
                 bias,
@@ -508,77 +329,6 @@ def causal_conv1d_fn(
 # ===---------- causal_conv1d_update (single-step / KV-cache decode) ----------=== #
 
 
-def _native_update(
-    x, weight, bias, conv_state, state_indices, cache_seqlens, out, apply_silu
-):
-    _native_mod.causal_conv1d_update(
-        x.data_ptr(),
-        weight.data_ptr(),
-        _ptr(bias),
-        conv_state.data_ptr(),
-        out.data_ptr(),
-        x.shape[0],
-        x.shape[1],
-        x.shape[2],
-        conv_state.shape[2],
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        conv_state.stride(0),
-        conv_state.stride(1),
-        conv_state.stride(2),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        int(bias is not None),
-        int(apply_silu),
-        _DTYPE_CODE[x.dtype],
-        torch.cuda.current_stream().cuda_stream,
-        weight.shape[1],
-        int(state_indices is not None),
-        _ptr(state_indices),
-        int(cache_seqlens is not None),
-        _ptr(cache_seqlens),
-    )
-
-
-def _native_update_cpu(
-    x, weight, bias, conv_state, state_indices, cache_seqlens, out, apply_silu
-):
-    _native_mod.causal_conv1d_update_cpu(
-        x.data_ptr(),
-        weight.data_ptr(),
-        _ptr(bias),
-        conv_state.data_ptr(),
-        out.data_ptr(),
-        x.shape[0],
-        x.shape[1],
-        x.shape[2],
-        conv_state.shape[2],
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        weight.stride(0),
-        weight.stride(1),
-        conv_state.stride(0),
-        conv_state.stride(1),
-        conv_state.stride(2),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        int(bias is not None),
-        int(apply_silu),
-        _DTYPE_CODE[x.dtype],
-        weight.shape[1],
-        int(state_indices is not None),
-        _ptr(state_indices),
-        int(cache_seqlens is not None),
-        _ptr(cache_seqlens),
-    )
-
-
 def causal_conv1d_update(
     x,
     conv_state,
@@ -718,7 +468,7 @@ def causal_conv1d_update(
     apply_silu = activation in ("silu", "swish")
 
     if x.is_cuda:
-        _native_update(
+        native_update(
             x,
             weight,
             bias,
@@ -729,7 +479,7 @@ def causal_conv1d_update(
             apply_silu,
         )
     else:
-        _native_update_cpu(
+        native_update_cpu(
             x,
             weight,
             bias,
