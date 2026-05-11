@@ -150,7 +150,7 @@ def test_initial_states_backward(device, dtype, width, bias_present):
     accumulates the boundary dweight contribution; dinitial_states is
     derived from dpre[0..W-2] with the anti-causal weight kernel.
     """
-    from causal_conv1d.causal_conv1d_interface import causal_conv1d_ref
+    from _reference import causal_conv1d_ref
 
     B, D, L = 2, 16, 64
     x = torch.randn(B, D, L, dtype=dtype, device=device, requires_grad=True)

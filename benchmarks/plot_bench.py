@@ -13,8 +13,19 @@ import torch
 import torch.nn.functional as F
 
 import causal_conv1d_mojo
-from causal_conv1d import causal_conv1d_fn as upstream_fn
-from causal_conv1d import causal_conv1d_update as upstream_update_fn
+
+# Optional dep — install with `pip install causal-conv1d==1.6.1` (or
+# `pixi run pip install -e .[bench]`). The package is a C++ extension
+# whose source-build takes minutes; we only need it for upstream-vs-Mojo
+# benchmark comparisons.
+try:
+    from causal_conv1d import causal_conv1d_fn as upstream_fn
+    from causal_conv1d import causal_conv1d_update as upstream_update_fn
+except ImportError as e:
+    raise SystemExit(
+        "this benchmark compares against upstream causal-conv1d; "
+        'run `pip install causal-conv1d==1.6.1` (or `pixi run pip install -e ".[bench]"`) first'
+    ) from e
 
 
 SHAPES = [

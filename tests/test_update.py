@@ -13,7 +13,7 @@ import pytest
 import torch
 
 import causal_conv1d_mojo
-from causal_conv1d.causal_conv1d_interface import causal_conv1d_update_ref
+from _reference import causal_conv1d_update_ref
 
 from _helpers import _FWD_TOL, _make_bias, _max_diff
 

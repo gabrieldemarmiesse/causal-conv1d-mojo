@@ -3,23 +3,27 @@ name = "causal-conv1d-mojo"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-# Pinned to 3.13: torch 2.8.0 + causal-conv1d 1.6.1 ship prebuilt
-# cp313 wheels but not cp314. Bump once those land.
+# Pinned to 3.13: torch 2.8.0 ships prebuilt cp313 wheels but not cp314.
+# Bump once those land.
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "torch==2.8.0",
-    "causal-conv1d==1.6.1",
     # 'max' here only ships the Mojo compiler + runtime libs that our
     # native .so links against (libKGENCompilerRTShared, libAsyncRTMojoBindings,
     # etc.). We do not use the MAX framework / CustomOpLibrary at runtime.
     "max",
-    # build-time deps for causal-conv1d (we disable build isolation so it
-    # compiles against our pinned torch instead of pulling latest)
     "setuptools>=70",
     "wheel",
     "packaging",
-    "ninja",
 ]
+
+# Upstream `causal-conv1d` (Tri Dao's CUDA op) is a C++ extension whose
+# build-from-source takes several minutes; we don't need it for correctness
+# (tests use the pure-pytorch reference in `tests/_reference.py`). It's only
+# pulled in when benchmarking us against the upstream kernel:
+#   pip install causal-conv1d==1.6.1
+[project.optional-dependencies]
+bench = ["causal-conv1d==1.6.1", "ninja"]
 
 [build-system]
 requires = ["setuptools>=70"]
@@ -52,9 +56,6 @@ pre-commit = "*"
 
 [tool.pixi.system-requirements]
 libc = "2.34"
-
-[tool.pixi.pypi-options]
-no-build-isolation = ["causal-conv1d"]
 
 [tool.pixi.pypi-dependencies]
 causal-conv1d-mojo = { path = ".", editable = true }
