@@ -18,6 +18,7 @@ from torch.profiler import ProfilerActivity, profile
 import causal_conv1d_mojo
 
 from causal_conv1d import causal_conv1d_fn as upstream_fn
+from causal_conv1d import causal_conv1d_update as upstream_update_fn
 from _baseline import BaselineCache
 
 
@@ -33,6 +34,22 @@ SHAPES = [
 ]
 ITERS = 100
 
+# (batch, dim) shapes for the single-step update kernel. seqlen=1,
+# state_len = width-1 = 3 (default Mamba decode).
+UPDATE_SHAPES = [
+    (1, 256),
+    (1, 512),
+    (1, 1024),
+    (1, 2048),
+    (1, 4096),
+    (4, 1024),
+    (4, 2048),
+    (4, 4096),
+    (16, 2048),
+    (32, 4096),
+]
+UPDATE_ITERS = 500
+
 
 def _is_mojo(name: str) -> bool:
     """Return True if `name` looks like a Mojo-emitted CUDA kernel.
@@ -41,6 +58,26 @@ def _is_mojo(name: str) -> bool:
     backend mangles the comptime parameters into the name).
     """
     return "fwd_kernel" in name and not name.startswith("void")
+
+
+def _is_mojo_update(name: str) -> bool:
+    """Return True if `name` looks like a Mojo-emitted update kernel."""
+    return "update_kernel" in name and not name.startswith("void")
+
+
+def _bench_update_kernel(fn) -> float:
+    """Mean per-call GPU kernel time for update, μs, via torch.profiler."""
+    for _ in range(50):
+        fn()
+    torch.cuda.synchronize()
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=False,
+    ) as prof:
+        for _ in range(UPDATE_ITERS):
+            fn()
+        torch.cuda.synchronize()
+    return _sum_cuda_us(prof) / UPDATE_ITERS
 
 
 def _sum_cuda_us(prof) -> float:
@@ -150,6 +187,90 @@ def main() -> None:
         ratio = mojo_us / up_us if up_us else float("inf")
         print(
             f"{shape!s:>22} | {mojo_us:15.1f} | {up_us:19.1f} | {ratio:6.2f}x"
+        )
+
+    # ------------------------- update kernel bench -------------------------
+    print()
+    print(
+        f"UPDATE kernel: dtype=fp16 | activation=silu | bias=True | "
+        f"seqlen=1 | state_len=3 | iters={UPDATE_ITERS}\n"
+    )
+    header_u = f"{'shape (B,D)':>14} | {'mojo (us/call)':>15} | {'upstream (us/call)':>19} | {'ratio':>7}"
+    print(header_u)
+    print("-" * len(header_u))
+
+    cfg_upd = {
+        "dtype": "fp16",
+        "activation": activation,
+        "bias": True,
+        "iters": UPDATE_ITERS,
+        "mode": "update",
+        "width": 4,
+        "state_len": 3,
+    }
+    dumped_debug_u = False
+    for b, d in UPDATE_SHAPES:
+        W = 4
+        state_len = W - 1
+        x = torch.randn(b, d, generator=g).to(device=device, dtype=dtype)
+        weight = torch.randn(d, W, generator=g).to(device=device, dtype=dtype)
+        bias = torch.randn(d, generator=g).to(device=device, dtype=dtype)
+
+        def make_step_mojo():
+            state = torch.randn(b, d, state_len, generator=g).to(
+                device=device, dtype=dtype
+            )
+            return lambda: causal_conv1d_mojo.causal_conv1d_update(
+                x, state, weight, bias=bias, activation=activation
+            )
+
+        def make_step_upstream():
+            state = torch.randn(b, d, state_len, generator=g).to(
+                device=device, dtype=dtype
+            )
+            return lambda: upstream_update_fn(
+                x, state, weight, bias=bias, activation=activation
+            )
+
+        if not dumped_debug_u:
+            step = make_step_mojo()
+            for _ in range(50):
+                step()
+            torch.cuda.synchronize()
+            with profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                record_shapes=False,
+            ) as prof:
+                for _ in range(UPDATE_ITERS):
+                    step()
+                torch.cuda.synchronize()
+            counts_u: dict[str, int] = defaultdict(int)
+            mojo_total_u = 0.0
+            for evt in prof.events():
+                if evt.device_type != torch.autograd.DeviceType.CUDA:
+                    continue
+                counts_u[evt.name] += 1
+                if _is_mojo_update(evt.name):
+                    mojo_total_u += evt.self_device_time_total
+            print("DEBUG mojo update kernels on first update shape (counts over ITERS):")
+            for n, c in sorted(counts_u.items()):
+                print(f"  {c:5d}  {n}")
+            print()
+            mojo_us_u = mojo_total_u / UPDATE_ITERS
+            dumped_debug_u = True
+        else:
+            mojo_us_u = _bench_update_kernel(make_step_mojo())
+
+        up_us_u = cache.get_or_run(
+            impl="upstream_update",
+            shape=(b, d),
+            config=cfg_upd,
+            run=lambda: _bench_update_kernel(make_step_upstream()),
+        )
+
+        ratio_u = mojo_us_u / up_us_u if up_us_u else float("inf")
+        print(
+            f"{(b, d)!s:>14} | {mojo_us_u:15.2f} | {up_us_u:19.2f} | {ratio_u:6.2f}x"
         )
 
 
