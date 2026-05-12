@@ -497,14 +497,22 @@ def bwd_full_kernel[
             local_dbias += dpre.reduce_add()
 
         # ---- [P4] dout halo from next chunk (already in smem_dout) ----
-        # Three-barrier dance, mirroring upstream:
+        # Two-barrier dance:
         #   1. tidx>0 writes its dpre to smem_dout[tidx*kNElts..]
         #      (slot 0 still holds NEXT chunk's thread-0 dpre, which thread
         #       kNThreads-1 will read for its halo).
         #   2. all threads read smem_dout[((tidx+1) % kNThreads)*kNElts..]
         #   3. thread 0 writes its dpre to slot 0 for the next iteration.
-        barrier()  # all reads of smem_x done; safe to reuse smem_dout
-
+        # Note: upstream's bwd has an extra `__syncthreads()` here just
+        # before the tidx>0 writes. It's redundant on our control flow
+        # because (a) smem_x and smem_dout are *separate* shared buffers
+        # so the smem_x reads above don't race with the smem_dout writes
+        # below, and (b) every smem_dout slot tidx>0 was last *read* in
+        # the *previous* chunk iter and protected by that iter's
+        # `barrier()  # all halo reads done` — which any subsequent
+        # barrier (including this iter's smem_x barrier above) covers
+        # transitively. Dropping it saves one block-wide sync per chunk.
+        #
         # Vector stores/loads on smem_dout: same story as smem_x — one
         # v4.b32 per 16 bytes. For fp16/bf16 with kNElts=8 the dpre is
         # 8 fp32 = 32 bytes, so the compiler emits two v4.b32 (still
