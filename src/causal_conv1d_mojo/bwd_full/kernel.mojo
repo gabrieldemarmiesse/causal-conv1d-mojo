@@ -220,9 +220,7 @@ def bwd_full_kernel[
     # chunk) thread kNThreads-1 reads smem_dout[0] for its halo; for the
     # last chunk that halo is past the seqlen end and must be zero.
     if tidx == 0:
-
-        comptime for i in range(kNElts):
-            smem_dout[i] = 0
+        smem_dout.store[alignment=16](SIMD[accum_t, kNElts](0))
 
     barrier()
 
@@ -331,15 +329,20 @@ def bwd_full_kernel[
                     ].cast[accum_t]()
 
         # Publish x_curr to smem so the next thread can pick it up as halo.
-        comptime for i in range(kNElts):
-            smem_x[tidx * kNElts + i] = x_curr[i].cast[dtype]()
+        # Single vector store: tidx*kNElts*sizeof(dtype) is 16-byte aligned
+        # (kNElts*sizeof(dtype) = 16 for both fp16 kNElts=8 and fp32 kNElts=4),
+        # so the compiler emits one st.shared.v4.b32 rather than kNElts scalar
+        # stores. Same for the load on the read-back side.
+        (smem_x + tidx * kNElts).store[alignment=16](x_curr.cast[dtype]())
 
         barrier()  # smem_x writes visible
 
         if tidx > 0:
-
-            comptime for i in range(kNElts):
-                x_prev[i] = smem_x[(tidx - 1) * kNElts + i].cast[accum_t]()
+            x_prev = (
+                (smem_x + (tidx - 1) * kNElts)
+                .load[width=kNElts, alignment=16]()
+                .cast[accum_t]()
+            )
 
         # ---- [P3] derive dpre from dout (and silu' if activation was silu) ----
         # When apply_silu, dpre = dout * silu'(pre); otherwise dpre = dout
@@ -446,25 +449,25 @@ def bwd_full_kernel[
         #   3. thread 0 writes its dpre to slot 0 for the next iteration.
         barrier()  # all reads of smem_x done; safe to reuse smem_dout
 
+        # Vector stores/loads on smem_dout: same story as smem_x — one
+        # v4.b32 per 16 bytes. For fp16/bf16 with kNElts=8 the dpre is
+        # 8 fp32 = 32 bytes, so the compiler emits two v4.b32 (still
+        # better than 8 scalars). For fp32 with kNElts=4 it's a single
+        # v4.b32.
         if tidx > 0:
-
-            comptime for i in range(kNElts):
-                smem_dout[tidx * kNElts + i] = dpre[i]
+            (smem_dout + tidx * kNElts).store[alignment=16](dpre)
 
         barrier()  # tidx>0 writes visible; slot 0 still holds NEXT chunk's data
 
         var halo_thread = tidx + 1 if tidx < kNThreads - 1 else 0
-        var dout_halo = SIMD[accum_t, kNElts](0)
-
-        comptime for i in range(kNElts):
-            dout_halo[i] = smem_dout[halo_thread * kNElts + i]
+        var dout_halo = (smem_dout + halo_thread * kNElts).load[
+            width=kNElts, alignment=16
+        ]()
 
         barrier()  # all halo reads done; thread 0 may now stomp slot 0
 
         if tidx == 0:
-
-            comptime for i in range(kNElts):
-                smem_dout[i] = dpre[i]
+            smem_dout.store[alignment=16](dpre)
 
         # ---- [P5] dx = anti-causal conv on dpre || dout_halo ----
         # dx[i] = sum_w weights[w] * combined[i + (W-1-w)]
