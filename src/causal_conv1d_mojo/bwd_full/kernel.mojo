@@ -17,6 +17,23 @@ from common import kNThreads
 
 
 @always_inline
+def _rcp_approx_f32(x: Float32) -> Float32:
+    """Single-instruction `rcp.approx.ftz.f32`, fp32 reciprocal.
+
+    The default `1.0 / x` lowers to `div.rn.f32` (IEEE-accurate, several
+    cycles latency on H100). The bwd's silu' computation chains a
+    reciprocal onto `1.0 + exp(-pre)` per element — kNElts of them per
+    chunk-iter per thread. Swapping the IEEE-accurate divide for the
+    `rcp.approx.ftz` PTX intrinsic gets us a single-cycle reciprocal
+    at fp16-ish precision (more than enough for the silu sigmoid
+    backward, whose result is then multiplied by an fp16/bf16 dout).
+    On the fwd kernel this was the largest single perf win (1.25x →
+    1.00x ratio).
+    """
+    return llvm_intrinsic["llvm.nvvm.rcp.approx.ftz.f", Float32](x)
+
+
+@always_inline
 def _shfl_xor_f32(val: Float32, offset: UInt32) -> Float32:
     """One inlined `shfl.sync.bfly.b32`, fp32.
 
@@ -440,7 +457,9 @@ def bwd_full_kernel[
                                     x_prev[kNElts + i + offset_w] * weights[k]
                                 )
 
-                    var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+                    var sig: Scalar[accum_t] = _rcp_approx_f32(
+                        1.0 + exp(-pre)
+                    )
                     var silu_grad: Scalar[accum_t] = sig * (
                         1.0 + pre * (1.0 - sig)
                     )
@@ -469,7 +488,9 @@ def bwd_full_kernel[
                                         * weights[k]
                                     )
 
-                        var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+                        var sig: Scalar[accum_t] = _rcp_approx_f32(
+                        1.0 + exp(-pre)
+                    )
                         var silu_grad: Scalar[accum_t] = sig * (
                             1.0 + pre * (1.0 - sig)
                         )
