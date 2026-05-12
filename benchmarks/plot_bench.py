@@ -12,30 +12,20 @@ wall-clock measurement at small shapes.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 from torch.profiler import ProfilerActivity, profile
-
 import causal_conv1d_mojo
-from causal_conv1d_mojo.reference import causal_conv1d_update_ref
+from causal_conv1d_mojo.reference import causal_conv1d_ref, causal_conv1d_update_ref
 from _baseline import BaselineCache
 
-# Optional dep — install with `pip install causal-conv1d==1.6.1` (or
-# `pixi run pip install -e .[bench]`). The package is a C++ extension
-# whose source-build takes minutes; we only need it for upstream-vs-Mojo
-# benchmark comparisons.
-try:
-    from causal_conv1d import causal_conv1d_fn as upstream_fn
-    from causal_conv1d import causal_conv1d_update as upstream_update_fn
-except ImportError as e:
-    raise SystemExit(
-        "this benchmark compares against upstream causal-conv1d; "
-        'run `pip install causal-conv1d==1.6.1` (or `pixi run pip install -e ".[bench]"`) first'
-    ) from e
-
+# pixi run -e bench ...
+from causal_conv1d import causal_conv1d_fn as upstream_fn
+from causal_conv1d import causal_conv1d_update as upstream_update_fn
 
 SHAPES = [
     # Tiny / low-occupancy: kChunkSize=1024 (fp16) so L<=1024 → 1 chunk,
@@ -77,6 +67,29 @@ WARMUP_BWD = 20
 ITERS_BWD = 100
 WARMUP_UPDATE = 50
 ITERS_UPDATE = 500
+
+# CPU bench: same shape grid would take minutes per call at the top
+# end, so use a smaller grid (matches benchmarks/bench_cpu.py) and
+# fewer iters. CPU calls are synchronous, no profiler needed — wall
+# time around the call is the kernel time.
+CPU_SHAPES = [
+    (1, 256, 256, 4),
+    (1, 256, 1024, 4),
+    (1, 1024, 256, 4),
+    (1, 1024, 1024, 4),
+    (1, 1024, 2048, 4),
+    (1, 2048, 1024, 4),
+    (1, 2048, 2048, 4),
+    (4, 1024, 1024, 4),
+    (4, 2048, 1024, 4),
+    (8, 1024, 1024, 4),
+]
+WARMUP_FWD_CPU = 5
+ITERS_FWD_CPU = 50
+WARMUP_BWD_CPU = 5
+ITERS_BWD_CPU = 25
+WARMUP_UPDATE_CPU = 20
+ITERS_UPDATE_CPU = 100
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 
 
@@ -127,6 +140,24 @@ def bench_kernel(fn, warmup: int, iters: int) -> float:
         if evt.device_type == torch.autograd.DeviceType.CUDA:
             total_us += evt.self_device_time_total
     return total_us / iters
+
+
+def bench_kernel_cpu(fn, warmup: int, iters: int) -> float:
+    """Min wall-clock CPU time per call, μs.
+
+    CPU calls are synchronous, so perf_counter_ns around the call
+    is the kernel time (no async launch overhead like CUDA). Min
+    over samples — CPU benches are noisier (other processes,
+    allocator jitter) and min picks the cleanest run.
+    """
+    for _ in range(warmup):
+        fn()
+    samples = []
+    for _ in range(iters):
+        t0 = time.perf_counter_ns()
+        fn()
+        samples.append(time.perf_counter_ns() - t0)
+    return min(samples) / 1_000.0
 
 
 def grouped_bar(labels, groups, *, title, out_path):
@@ -394,6 +425,241 @@ def main() -> None:
             f"{ITERS_UPDATE} iters, GPU kernel time via torch.profiler"
         ),
         out_path=DOCS / "bench_update.png",
+    )
+
+    run_cpu_benches(g, cache)
+
+
+def run_cpu_benches(g, cache) -> None:
+    """CPU equivalents of the three GPU plots.
+
+    Upstream's `causal_conv1d_fn` is CUDA-only; the analog on CPU is
+    the pure-pytorch `causal_conv1d_ref` (and same for the update op).
+    """
+    cpu_threads = torch.get_num_threads()
+    labels = [f"({b},{d},{l},{w})" for b, d, l, w in CPU_SHAPES]
+
+    fwd_mojo, fwd_ref, fwd_pt, fwd_pt_c = [], [], [], []
+    bwd_mojo, bwd_ref, bwd_pt, bwd_pt_c = [], [], [], []
+
+    for b, d, l, w in CPU_SHAPES:
+        x = torch.randn(b, d, l, generator=g).to(torch.float16)
+        weight = torch.randn(d, w, generator=g).to(torch.float16)
+        bias = torch.randn(d, generator=g).to(torch.float16)
+        kw = dict(bias=bias, activation="silu")
+        cfg_fwd = {
+            "dtype": "fp16",
+            "activation": "silu",
+            "bias": True,
+            "iters": ITERS_FWD_CPU,
+            "mode": "fwd",
+            "device": "cpu",
+        }
+        m_f = bench_kernel_cpu(
+            lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw),
+            WARMUP_FWD_CPU,
+            ITERS_FWD_CPU,
+        )
+        r_f = cache.get_or_run(
+            impl="causal_conv1d_ref",
+            shape=(b, d, l, w),
+            config=cfg_fwd,
+            run=lambda: bench_kernel_cpu(
+                lambda: causal_conv1d_ref(x, weight, **kw),
+                WARMUP_FWD_CPU,
+                ITERS_FWD_CPU,
+            ),
+        )
+        p_f = cache.get_or_run(
+            impl="pytorch",
+            shape=(b, d, l, w),
+            config=cfg_fwd,
+            run=lambda: bench_kernel_cpu(
+                lambda: pytorch_fwd(x, weight, bias),
+                WARMUP_FWD_CPU,
+                ITERS_FWD_CPU,
+            ),
+        )
+        pc_f = cache.get_or_run(
+            impl="pytorch_compiled",
+            shape=(b, d, l, w),
+            config=cfg_fwd,
+            run=lambda: bench_kernel_cpu(
+                lambda: pytorch_fwd_compiled(x, weight, bias),
+                WARMUP_FWD_CPU,
+                ITERS_FWD_CPU,
+            ),
+        )
+        fwd_mojo.append(m_f)
+        fwd_ref.append(r_f)
+        fwd_pt.append(p_f)
+        fwd_pt_c.append(pc_f)
+
+        # ------- forward + backward -------
+        dout = torch.randn(b, d, l, generator=g).to(torch.float16)
+        cfg_bwd = {**cfg_fwd, "iters": ITERS_BWD_CPU, "mode": "fwd+bwd"}
+
+        def make_fwd_bwd_cpu(impl):
+            def step():
+                x_g = x.detach().requires_grad_()
+                w_g = weight.detach().requires_grad_()
+                b_g = bias.detach().requires_grad_()
+                if impl == "mojo":
+                    out = causal_conv1d_mojo.causal_conv1d_fn(
+                        x_g, w_g, bias=b_g, activation="silu"
+                    )
+                elif impl == "ref":
+                    out = causal_conv1d_ref(x_g, w_g, bias=b_g, activation="silu")
+                elif impl == "pytorch_compiled":
+                    out = pytorch_fwd_compiled(x_g, w_g, b_g)
+                else:
+                    out = pytorch_fwd(x_g, w_g, b_g)
+                out.backward(dout)
+
+            return step
+
+        m_b = bench_kernel_cpu(
+            make_fwd_bwd_cpu("mojo"), WARMUP_BWD_CPU, ITERS_BWD_CPU
+        )
+        r_b = cache.get_or_run(
+            impl="causal_conv1d_ref",
+            shape=(b, d, l, w),
+            config=cfg_bwd,
+            run=lambda: bench_kernel_cpu(
+                make_fwd_bwd_cpu("ref"), WARMUP_BWD_CPU, ITERS_BWD_CPU
+            ),
+        )
+        p_b = cache.get_or_run(
+            impl="pytorch",
+            shape=(b, d, l, w),
+            config=cfg_bwd,
+            run=lambda: bench_kernel_cpu(
+                make_fwd_bwd_cpu("pytorch"), WARMUP_BWD_CPU, ITERS_BWD_CPU
+            ),
+        )
+        pc_b = cache.get_or_run(
+            impl="pytorch_compiled",
+            shape=(b, d, l, w),
+            config=cfg_bwd,
+            run=lambda: bench_kernel_cpu(
+                make_fwd_bwd_cpu("pytorch_compiled"),
+                WARMUP_BWD_CPU,
+                ITERS_BWD_CPU,
+            ),
+        )
+        bwd_mojo.append(m_b)
+        bwd_ref.append(r_b)
+        bwd_pt.append(p_b)
+        bwd_pt_c.append(pc_b)
+
+        print(
+            f"{(b, d, l, w)!s:>22} CPU  "
+            f"fwd: mojo={m_f:8.1f} ref={r_f:8.1f} pt={p_f:8.1f} pt-c={pc_f:8.1f} | "
+            f"fwd+bwd: mojo={m_b:8.1f} ref={r_b:8.1f} pt={p_b:8.1f} pt-c={pc_b:8.1f}"
+        )
+
+    grouped_bar(
+        labels,
+        [
+            ("pure PyTorch (F.conv1d + F.silu)", "#bbbbbb", fwd_pt),
+            ("torch.compile(pure PyTorch)", "#88c070", fwd_pt_c),
+            ("causal_conv1d_ref (PyTorch reference)", "#3a78c2", fwd_ref),
+            ("mojo (this repo)", "#d05050", fwd_mojo),
+        ],
+        title=(
+            f"causal_conv1d FORWARD — CPU ({cpu_threads} threads)\n"
+            f"fp16, bias, silu, {ITERS_FWD_CPU} iters, min wall-clock time"
+        ),
+        out_path=DOCS / "bench_forward_cpu.png",
+    )
+    grouped_bar(
+        labels,
+        [
+            ("pure PyTorch (F.conv1d + F.silu)", "#bbbbbb", bwd_pt),
+            ("torch.compile(pure PyTorch)", "#88c070", bwd_pt_c),
+            ("causal_conv1d_ref (PyTorch reference)", "#3a78c2", bwd_ref),
+            ("mojo (this repo)", "#d05050", bwd_mojo),
+        ],
+        title=(
+            f"causal_conv1d FORWARD + BACKWARD — CPU ({cpu_threads} threads)\n"
+            f"fp16, bias, silu, {ITERS_BWD_CPU} iters, min wall-clock time"
+        ),
+        out_path=DOCS / "bench_backward_cpu.png",
+    )
+
+    # ---- single-step update bench (CPU) ----
+    update_labels = [f"({b},{d})" for b, d in UPDATE_SHAPES]
+    update_mojo, update_ref_l, update_ref_c = [], [], []
+    W = 4
+    state_len = W - 1
+    cfg_upd = {
+        "dtype": "fp16",
+        "activation": "silu",
+        "bias": True,
+        "iters": ITERS_UPDATE_CPU,
+        "mode": "update",
+        "width": W,
+        "state_len": state_len,
+        "device": "cpu",
+    }
+    for b, d in UPDATE_SHAPES:
+        x = torch.randn(b, d, generator=g).to(torch.float16)
+        weight = torch.randn(d, W, generator=g).to(torch.float16)
+        bias = torch.randn(d, generator=g).to(torch.float16)
+
+        def make_step_cpu(impl, x=x, weight=weight, bias=bias):
+            state = torch.randn(b, d, state_len, generator=g).to(torch.float16)
+            if impl == "mojo":
+                fn = causal_conv1d_mojo.causal_conv1d_update
+            elif impl == "ref_compiled":
+                fn = update_ref_compiled
+            else:
+                fn = causal_conv1d_update_ref
+
+            def step():
+                fn(x, state, weight, bias=bias, activation="silu")
+
+            return step
+
+        m_u = bench_kernel_cpu(
+            make_step_cpu("mojo"), WARMUP_UPDATE_CPU, ITERS_UPDATE_CPU
+        )
+        r_u = cache.get_or_run(
+            impl="ref",
+            shape=(b, d),
+            config=cfg_upd,
+            run=lambda: bench_kernel_cpu(
+                make_step_cpu("ref"), WARMUP_UPDATE_CPU, ITERS_UPDATE_CPU
+            ),
+        )
+        rc_u = cache.get_or_run(
+            impl="ref_compiled",
+            shape=(b, d),
+            config=cfg_upd,
+            run=lambda: bench_kernel_cpu(
+                make_step_cpu("ref_compiled"), WARMUP_UPDATE_CPU, ITERS_UPDATE_CPU
+            ),
+        )
+        update_mojo.append(m_u)
+        update_ref_l.append(r_u)
+        update_ref_c.append(rc_u)
+        print(
+            f"{(b, d)!s:>14} CPU  update: mojo={m_u:8.1f} ref={r_u:8.1f} ref-c={rc_u:8.1f}"
+        )
+
+    grouped_bar(
+        update_labels,
+        [
+            ("causal_conv1d_update_ref (PyTorch)", "#bbbbbb", update_ref_l),
+            ("torch.compile(causal_conv1d_update_ref)", "#88c070", update_ref_c),
+            ("mojo (this repo)", "#d05050", update_mojo),
+        ],
+        title=(
+            f"causal_conv1d_update (single-step decode) — CPU ({cpu_threads} threads)\n"
+            f"fp16, bias, silu, seqlen=1, state_len=3, "
+            f"{ITERS_UPDATE_CPU} iters, min wall-clock time"
+        ),
+        out_path=DOCS / "bench_update_cpu.png",
     )
 
 

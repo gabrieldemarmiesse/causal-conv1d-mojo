@@ -1,0 +1,3314 @@
+{
+  "records": [
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        256,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:04Z",
+      "value_us": 2.009859999999967
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        256,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:05Z",
+      "value_us": 8.085734999999993
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        256,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:06Z",
+      "value_us": 3.366744999999885
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        256,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:06Z",
+      "value_us": 10.690620000000287
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        256,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:07Z",
+      "value_us": 24.21745999999973
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        256,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:07Z",
+      "value_us": 11.75169000000024
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:08Z",
+      "value_us": 2.5732950000000105
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:08Z",
+      "value_us": 8.770534999999956
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:53Z",
+      "value_us": 3.9141249999999035
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:54Z",
+      "value_us": 12.073430000000013
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:54Z",
+      "value_us": 26.319200000000027
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        64,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:55Z",
+      "value_us": 13.517379999999728
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        128,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:55Z",
+      "value_us": 2.52788000000003
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        128,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:55Z",
+      "value_us": 8.758684999999993
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        128,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:56Z",
+      "value_us": 4.272275000000029
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        128,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:56Z",
+      "value_us": 12.0975099999997
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        128,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:57Z",
+      "value_us": 27.077210000000314
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        128,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:57Z",
+      "value_us": 15.080570000000264
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:57Z",
+      "value_us": 2.5211249999999836
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:58Z",
+      "value_us": 9.462884999999995
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:58Z",
+      "value_us": 5.055069999999947
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:59Z",
+      "value_us": 12.09048000000024
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:17:59Z",
+      "value_us": 28.510099999999916
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:00Z",
+      "value_us": 17.491519999999568
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        512,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:00Z",
+      "value_us": 2.5429349999999955
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        512,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:00Z",
+      "value_us": 10.603044999999943
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        512,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:00Z",
+      "value_us": 6.574219999999965
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        512,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:01Z",
+      "value_us": 12.188119999999799
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        512,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:02Z",
+      "value_us": 32.34951999999986
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        512,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:02Z",
+      "value_us": 21.520840000000508
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:02Z",
+      "value_us": 3.500299999999994
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:03Z",
+      "value_us": 22.171470000000078
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:03Z",
+      "value_us": 15.86990499999997
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:04Z",
+      "value_us": 14.701130000000367
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:04Z",
+      "value_us": 63.44035999999928
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:05Z",
+      "value_us": 49.01985000000007
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        8192,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:05Z",
+      "value_us": 9.37722500000002
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        8192,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:05Z",
+      "value_us": 82.80045500000001
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        8192,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:05Z",
+      "value_us": 66.97276999999998
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024,
+        8192,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:06Z",
+      "value_us": 35.989870000000586
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        8192,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:07Z",
+      "value_us": 207.09093000000038
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        8192,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:07Z",
+      "value_us": 195.69346999999993
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:07Z",
+      "value_us": 8.754104999999942
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:08Z",
+      "value_us": 70.79541499999986
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:08Z",
+      "value_us": 51.92273999999998
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:09Z",
+      "value_us": 38.45614000000039
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:09Z",
+      "value_us": 198.4305899999995
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:10Z",
+      "value_us": 143.02084999999988
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        4,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:10Z",
+      "value_us": 47.20534500000001
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        4,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:11Z",
+      "value_us": 330.8783650000003
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        4,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:11Z",
+      "value_us": 223.46395499999994
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        4,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:12Z",
+      "value_us": 122.88727000000029
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        4,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:13Z",
+      "value_us": 809.1924300000009
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        4,
+        4096,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:13Z",
+      "value_us": 769.924159999999
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        8,
+        2048,
+        4096,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:14Z",
+      "value_us": 91.48973
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        8,
+        2048,
+        4096,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:14Z",
+      "value_us": 1478.296459999998
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 200,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        8,
+        2048,
+        4096,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:15Z",
+      "value_us": 1272.5601999999988
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        8,
+        2048,
+        4096,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:16Z",
+      "value_us": 235.14959000000047
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        8,
+        2048,
+        4096,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:17Z",
+      "value_us": 3262.5086399999964
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        8,
+        2048,
+        4096,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:18Z",
+      "value_us": 3194.56615
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        256
+      ],
+      "timestamp": "2026-05-12T16:18:19Z",
+      "value_us": 2.068528000000004
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        256
+      ],
+      "timestamp": "2026-05-12T16:18:20Z",
+      "value_us": 9.920191999999963
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        256
+      ],
+      "timestamp": "2026-05-12T16:18:21Z",
+      "value_us": 5.743216000000233
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        512
+      ],
+      "timestamp": "2026-05-12T16:18:22Z",
+      "value_us": 2.06303400000003
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        512
+      ],
+      "timestamp": "2026-05-12T16:18:23Z",
+      "value_us": 10.451696000000096
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        512
+      ],
+      "timestamp": "2026-05-12T16:18:23Z",
+      "value_us": 6.003388000000029
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:18:24Z",
+      "value_us": 2.1605300000000027
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:18:25Z",
+      "value_us": 10.259319999999763
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:18:26Z",
+      "value_us": 6.5630220000001485
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:18:27Z",
+      "value_us": 2.2216940000000296
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:18:28Z",
+      "value_us": 11.850965999999978
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:18:28Z",
+      "value_us": 7.164131999999828
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        1,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:18:29Z",
+      "value_us": 2.2242539999999296
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:18:30Z",
+      "value_us": 13.237254000000085
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:18:31Z",
+      "value_us": 8.837676000000023
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        4,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:18:31Z",
+      "value_us": 2.222705999999981
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        4,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:18:33Z",
+      "value_us": 14.711441999999913
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        4,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:18:33Z",
+      "value_us": 8.774539999999758
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        4,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:18:34Z",
+      "value_us": 2.254365999999965
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        4,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:18:35Z",
+      "value_us": 17.55389399999995
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        4,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:18:36Z",
+      "value_us": 11.393661999999841
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        4,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:18:36Z",
+      "value_us": 2.3926219999999767
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        4,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:18:38Z",
+      "value_us": 22.958859999999763
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        4,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:18:38Z",
+      "value_us": 16.390475999999875
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        16,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:18:39Z",
+      "value_us": 2.519544000000049
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        16,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:18:40Z",
+      "value_us": 33.22996400000024
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        16,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:18:40Z",
+      "value_us": 26.472104000000108
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "upstream",
+      "shape": [
+        32,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:18:41Z",
+      "value_us": 3.3641639999999944
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        32,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:18:42Z",
+      "value_us": 93.81573800000002
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "dtype": "fp16",
+        "iters": 500,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        32,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:18:43Z",
+      "value_us": 87.12153999999992
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        256,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:43Z",
+      "value_us": 186.183
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        256,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:18:43Z",
+      "value_us": 184.779
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        256,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:00Z",
+      "value_us": 219.52
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        256,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:00Z",
+      "value_us": 3515.213
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        256,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:00Z",
+      "value_us": 3485.329
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        256,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:02Z",
+      "value_us": 3718.336
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        256,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:02Z",
+      "value_us": 556.754
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        256,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:02Z",
+      "value_us": 558.247
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        256,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:02Z",
+      "value_us": 604.593
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        256,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:02Z",
+      "value_us": 12678.21
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        256,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:03Z",
+      "value_us": 12845.607
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        256,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:03Z",
+      "value_us": 13183.681
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:03Z",
+      "value_us": 577.096
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:03Z",
+      "value_us": 575.542
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:04Z",
+      "value_us": 611.706
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:05Z",
+      "value_us": 13427.652
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:05Z",
+      "value_us": 13343.499
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        256,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:07Z",
+      "value_us": 13780.04
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:07Z",
+      "value_us": 2674.834
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:07Z",
+      "value_us": 2675.027
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:08Z",
+      "value_us": 2730.271
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:10Z",
+      "value_us": 53208.247
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:12Z",
+      "value_us": 53801.146
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:13Z",
+      "value_us": 53151.66
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:15Z",
+      "value_us": 10632.486
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:15Z",
+      "value_us": 10624.277
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:16Z",
+      "value_us": 10701.77
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:21Z",
+      "value_us": 119501.345
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:25Z",
+      "value_us": 119468.644
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        1024,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:28Z",
+      "value_us": 120519.708
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:30Z",
+      "value_us": 10533.588
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:30Z",
+      "value_us": 10549.051
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:32Z",
+      "value_us": 10676.426
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:37Z",
+      "value_us": 123844.773
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:41Z",
+      "value_us": 124916.92
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:46Z",
+      "value_us": 123008.82
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        2048,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:49Z",
+      "value_us": 26296.107
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        2048,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:50Z",
+      "value_us": 26245.369
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        2048,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:19:52Z",
+      "value_us": 26481.648
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        1,
+        2048,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:03Z",
+      "value_us": 256854.972
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        1,
+        2048,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:10Z",
+      "value_us": 255542.536
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        1,
+        2048,
+        2048,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:18Z",
+      "value_us": 259964.61
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        4,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:21Z",
+      "value_us": 13889.446
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        4,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:22Z",
+      "value_us": 13879.561
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        4,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:23Z",
+      "value_us": 13984.911
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        4,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:33Z",
+      "value_us": 212993.402
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        4,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:39Z",
+      "value_us": 213739.289
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        4,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:47Z",
+      "value_us": 216376.8
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        4,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:54Z",
+      "value_us": 71565.831
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        4,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:20:58Z",
+      "value_us": 70676.235
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        4,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:21:04Z",
+      "value_us": 64849.193
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        4,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:21:26Z",
+      "value_us": 530592.211
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        4,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:21:42Z",
+      "value_us": 534783.294
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        4,
+        2048,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:21:59Z",
+      "value_us": 516543.19
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        8,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:22:04Z",
+      "value_us": 28890.14
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        8,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:22:06Z",
+      "value_us": 28933.469
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 50,
+        "mode": "fwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        8,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:22:08Z",
+      "value_us": 29117.659
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "causal_conv1d_ref",
+      "shape": [
+        8,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:22:27Z",
+      "value_us": 453718.225
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch",
+      "shape": [
+        8,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:22:41Z",
+      "value_us": 453647.525
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 25,
+        "mode": "fwd+bwd"
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "pytorch_compiled",
+      "shape": [
+        8,
+        1024,
+        1024,
+        4
+      ],
+      "timestamp": "2026-05-12T16:22:55Z",
+      "value_us": 446284.233
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        256
+      ],
+      "timestamp": "2026-05-12T16:22:57Z",
+      "value_us": 86.362
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        256
+      ],
+      "timestamp": "2026-05-12T16:22:59Z",
+      "value_us": 95.909
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        512
+      ],
+      "timestamp": "2026-05-12T16:22:59Z",
+      "value_us": 88.358
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        512
+      ],
+      "timestamp": "2026-05-12T16:23:00Z",
+      "value_us": 94.481
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:23:00Z",
+      "value_us": 95.582
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:23:02Z",
+      "value_us": 96.165
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:23:02Z",
+      "value_us": 106.236
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:23:03Z",
+      "value_us": 103.607
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        1,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:23:03Z",
+      "value_us": 123.189
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        1,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:23:05Z",
+      "value_us": 110.309
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        4,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:23:05Z",
+      "value_us": 120.687
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        4,
+        1024
+      ],
+      "timestamp": "2026-05-12T16:23:07Z",
+      "value_us": 111.831
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        4,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:23:07Z",
+      "value_us": 160.431
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        4,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:23:08Z",
+      "value_us": 129.562
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        4,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:23:09Z",
+      "value_us": 232.689
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        4,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:23:10Z",
+      "value_us": 160.864
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        16,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:23:11Z",
+      "value_us": 386.454
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        16,
+        2048
+      ],
+      "timestamp": "2026-05-12T16:23:11Z",
+      "value_us": 225.119
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref",
+      "shape": [
+        32,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:23:15Z",
+      "value_us": 1302.384
+    },
+    {
+      "config": {
+        "activation": "silu",
+        "bias": true,
+        "device": "cpu",
+        "dtype": "fp16",
+        "iters": 100,
+        "mode": "update",
+        "state_len": 3,
+        "width": 4
+      },
+      "gpu": "NVIDIA H100 80GB HBM3",
+      "impl": "ref_compiled",
+      "shape": [
+        32,
+        4096
+      ],
+      "timestamp": "2026-05-12T16:23:15Z",
+      "value_us": 626.234
+    }
+  ]
+}
