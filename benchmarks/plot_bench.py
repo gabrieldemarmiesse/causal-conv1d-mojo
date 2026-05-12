@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from torch.profiler import ProfilerActivity, profile
 
 import causal_conv1d_mojo
+from causal_conv1d_mojo.reference import causal_conv1d_update_ref
 
 # Optional dep — install with `pip install causal-conv1d==1.6.1` (or
 # `pixi run pip install -e .[bench]`). The package is a C++ extension
@@ -85,6 +86,21 @@ def pytorch_fwd(x, weight, bias):
     return F.silu(out)
 
 
+# torch.compile'd reference. inductor specializes per shape on first call;
+# warmup inside bench_kernel hides the compile cost. We compile the
+# functions once at module load — the dynamo cache handles shape
+# specialization automatically across the SHAPES loop.
+#
+# Bump dynamo's recompile_limit: each new (B,D,L) and each requires_grad
+# toggle counts as a recompile, and the fwd+bwd path adds a grad-enabled
+# specialization per shape. Default 8 falls back to eager partway
+# through the bench, which silently makes the last shapes match pure
+# PyTorch exactly. 64 is comfortably above our shape × grad count.
+torch._dynamo.config.recompile_limit = 64
+pytorch_fwd_compiled = torch.compile(pytorch_fwd)
+update_ref_compiled = torch.compile(causal_conv1d_update_ref)
+
+
 def bench_kernel(fn, warmup: int, iters: int) -> float:
     """Mean GPU time per call, μs, via torch.profiler (CUPTI).
 
@@ -112,23 +128,21 @@ def bench_kernel(fn, warmup: int, iters: int) -> float:
     return total_us / iters
 
 
-def grouped_bar(
-    labels,
-    pt,
-    up,
-    mojo,
-    *,
-    title,
-    out_path,
-    pt_label="pure PyTorch (F.conv1d + F.silu)",
-):
+def grouped_bar(labels, groups, *, title, out_path):
+    """Render a grouped bar chart.
+
+    `groups` is a list of (label, color, values) tuples, one per bar in
+    each cluster. Bars are centered on each x-tick and sized to fit
+    inside a 0.8-wide slot regardless of group count.
+    """
     n = len(labels)
+    n_bars = len(groups)
     x_pos = list(range(n))
-    bw = 0.27
+    bw = 0.8 / n_bars
+    offsets = [(i - (n_bars - 1) / 2) * bw for i in range(n_bars)]
     fig, ax = plt.subplots(figsize=(max(10, 0.9 * n + 2), 5))
-    ax.bar([p - bw for p in x_pos], pt, bw, label=pt_label, color="#bbbbbb")
-    ax.bar(x_pos, up, bw, label="upstream (Tri Dao CUDA)", color="#3a78c2")
-    ax.bar([p + bw for p in x_pos], mojo, bw, label="mojo (this repo)", color="#d05050")
+    for offset, (lbl, color, vals) in zip(offsets, groups):
+        ax.bar([p + offset for p in x_pos], vals, bw, label=lbl, color=color)
     ax.set_xticks(x_pos)
     ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
     ax.set_ylabel("GPU kernel time per call (μs, lower is better)")
@@ -150,8 +164,8 @@ def main() -> None:
     gpu_name = torch.cuda.get_device_name(0)
     labels = [f"({b},{d},{l},{w})" for b, d, l, w in SHAPES]
 
-    fwd_mojo, fwd_up, fwd_pt = [], [], []
-    bwd_mojo, bwd_up, bwd_pt = [], [], []
+    fwd_mojo, fwd_up, fwd_pt, fwd_pt_c = [], [], [], []
+    bwd_mojo, bwd_up, bwd_pt, bwd_pt_c = [], [], [], []
 
     for b, d, l, w in SHAPES:
         # ------- forward only -------
@@ -166,9 +180,13 @@ def main() -> None:
         )
         u_f = bench_kernel(lambda: upstream_fn(x, weight, **kw), WARMUP_FWD, ITERS_FWD)
         p_f = bench_kernel(lambda: pytorch_fwd(x, weight, bias), WARMUP_FWD, ITERS_FWD)
+        pc_f = bench_kernel(
+            lambda: pytorch_fwd_compiled(x, weight, bias), WARMUP_FWD, ITERS_FWD
+        )
         fwd_mojo.append(m_f)
         fwd_up.append(u_f)
         fwd_pt.append(p_f)
+        fwd_pt_c.append(pc_f)
 
         # ------- forward + backward -------
         dout = torch.randn(b, d, l, generator=g).to("cuda", torch.float16)
@@ -184,6 +202,8 @@ def main() -> None:
                     )
                 elif impl == "upstream":
                     out = upstream_fn(x_g, w_g, bias=b_g, activation="silu")
+                elif impl == "pytorch_compiled":
+                    out = pytorch_fwd_compiled(x_g, w_g, b_g)
                 else:
                     out = pytorch_fwd(x_g, w_g, b_g)
                 out.backward(dout)
@@ -193,20 +213,26 @@ def main() -> None:
         m_b = bench_kernel(make_fwd_bwd("mojo"), WARMUP_BWD, ITERS_BWD)
         u_b = bench_kernel(make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD)
         p_b = bench_kernel(make_fwd_bwd("pytorch"), WARMUP_BWD, ITERS_BWD)
+        pc_b = bench_kernel(make_fwd_bwd("pytorch_compiled"), WARMUP_BWD, ITERS_BWD)
         bwd_mojo.append(m_b)
         bwd_up.append(u_b)
         bwd_pt.append(p_b)
+        bwd_pt_c.append(pc_b)
 
         print(
-            f"{(b, d, l, w)!s:>22}  fwd: mojo={m_f:7.1f} up={u_f:7.1f} pt={p_f:7.1f} | "
-            f"fwd+bwd: mojo={m_b:7.1f} up={u_b:7.1f} pt={p_b:7.1f}"
+            f"{(b, d, l, w)!s:>22}  "
+            f"fwd: mojo={m_f:7.1f} up={u_f:7.1f} pt={p_f:7.1f} pt-c={pc_f:7.1f} | "
+            f"fwd+bwd: mojo={m_b:7.1f} up={u_b:7.1f} pt={p_b:7.1f} pt-c={pc_b:7.1f}"
         )
 
     grouped_bar(
         labels,
-        fwd_pt,
-        fwd_up,
-        fwd_mojo,
+        [
+            ("pure PyTorch (F.conv1d + F.silu)", "#bbbbbb", fwd_pt),
+            ("torch.compile(pure PyTorch)", "#88c070", fwd_pt_c),
+            ("upstream (Tri Dao CUDA)", "#3a78c2", fwd_up),
+            ("mojo (this repo)", "#d05050", fwd_mojo),
+        ],
         title=(
             f"causal_conv1d FORWARD — {gpu_name}\n"
             f"fp16, bias, silu, {ITERS_FWD} iters, GPU kernel time via torch.profiler"
@@ -215,9 +241,12 @@ def main() -> None:
     )
     grouped_bar(
         labels,
-        bwd_pt,
-        bwd_up,
-        bwd_mojo,
+        [
+            ("pure PyTorch (F.conv1d + F.silu)", "#bbbbbb", bwd_pt),
+            ("torch.compile(pure PyTorch)", "#88c070", bwd_pt_c),
+            ("upstream (Tri Dao CUDA)", "#3a78c2", bwd_up),
+            ("mojo (this repo)", "#d05050", bwd_mojo),
+        ],
         title=(
             f"causal_conv1d FORWARD + BACKWARD — {gpu_name}\n"
             f"fp16, bias, silu, {ITERS_BWD} iters, GPU kernel time via torch.profiler"
@@ -227,7 +256,7 @@ def main() -> None:
 
     # ---- single-step update bench ----
     update_labels = [f"({b},{d})" for b, d in UPDATE_SHAPES]
-    update_mojo, update_up, update_ref = [], [], []
+    update_mojo, update_up, update_ref, update_ref_c = [], [], [], []
     W = 4
     state_len = W - 1
     for b, d in UPDATE_SHAPES:
@@ -243,12 +272,10 @@ def main() -> None:
                 fn = causal_conv1d_mojo.causal_conv1d_update
             elif impl == "upstream":
                 fn = upstream_update_fn
+            elif impl == "ref_compiled":
+                fn = update_ref_compiled
             else:
-                from causal_conv1d.causal_conv1d_interface import (
-                    causal_conv1d_update_ref as fn_ref,
-                )
-
-                fn = fn_ref
+                fn = causal_conv1d_update_ref
 
             def step():
                 fn(x, state, weight, bias=bias, activation="silu")
@@ -258,23 +285,30 @@ def main() -> None:
         m_u = bench_kernel(make_step("mojo"), WARMUP_UPDATE, ITERS_UPDATE)
         u_u = bench_kernel(make_step("upstream"), WARMUP_UPDATE, ITERS_UPDATE)
         r_u = bench_kernel(make_step("ref"), WARMUP_UPDATE, ITERS_UPDATE)
+        rc_u = bench_kernel(make_step("ref_compiled"), WARMUP_UPDATE, ITERS_UPDATE)
         update_mojo.append(m_u)
         update_up.append(u_u)
         update_ref.append(r_u)
-        print(f"{(b, d)!s:>14}  update: mojo={m_u:7.1f} up={u_u:7.1f} ref={r_u:7.1f}")
+        update_ref_c.append(rc_u)
+        print(
+            f"{(b, d)!s:>14}  update: mojo={m_u:7.1f} up={u_u:7.1f} "
+            f"ref={r_u:7.1f} ref-c={rc_u:7.1f}"
+        )
 
     grouped_bar(
         update_labels,
-        update_ref,
-        update_up,
-        update_mojo,
+        [
+            ("pure PyTorch (causal_conv1d_update_ref)", "#bbbbbb", update_ref),
+            ("torch.compile(causal_conv1d_update_ref)", "#88c070", update_ref_c),
+            ("upstream (Tri Dao CUDA)", "#3a78c2", update_up),
+            ("mojo (this repo)", "#d05050", update_mojo),
+        ],
         title=(
             f"causal_conv1d_update (single-step decode) — {gpu_name}\n"
             f"fp16, bias, silu, seqlen=1, state_len=3, "
             f"{ITERS_UPDATE} iters, GPU kernel time via torch.profiler"
         ),
         out_path=DOCS / "bench_update.png",
-        pt_label="pure PyTorch (causal_conv1d_update_ref)",
     )
 
 
