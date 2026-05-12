@@ -149,7 +149,13 @@ def fwd_kernel[
                 Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
             )
         elif contig_inner:
-            if chunk_start + kChunkSize <= seqlen:
+            # Per-thread vec load when the thread's kNElts slice is fully
+            # in-bounds — even on a partial chunk. Threads near the end
+            # fall back to scalar. This matters for shapes like
+            # (1, 1024, 512, 4) where seqlen=512 < kChunkSize=1024: 64
+            # of the 128 threads still get 16-byte vec loads here
+            # instead of 8 scalar fp16 loads each.
+            if seq_start + kNElts <= seqlen:
                 x_curr = x.load[width=kNElts, alignment=16](
                     Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
                 )
@@ -272,7 +278,10 @@ def fwd_kernel[
                 out_vals.cast[dtype](),
             )
         elif contig_inner:
-            if chunk_start + kChunkSize <= seqlen:
+            # Same per-thread vec store as the load: when this thread's
+            # kNElts slice is fully in-bounds, emit one st.global.v4.b32;
+            # else fall through to scalar predicated stores.
+            if seq_start + kNElts <= seqlen:
                 output.store[alignment=16](
                     Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
                     out_vals.cast[dtype](),
