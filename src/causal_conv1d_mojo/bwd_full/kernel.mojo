@@ -90,6 +90,62 @@ def _block_sum_f32[block_size: Int](val: Float32) -> Float32:
     return block_val
 
 
+@always_inline
+def _block_sum_f32_vec[
+    block_size: Int, n: Int
+](vals: SIMD[DType.float32, n]) -> SIMD[DType.float32, n]:
+    """Block-level fp32 sum of `n` independent values, **one barrier** total.
+
+    Each thread holds a SIMD[fp32, n] of n independent values; the result
+    (held only by lane 0 of warp 0, i.e. tid 0) is the block-wide sum of
+    each lane. This replaces `n` independent calls to `_block_sum_f32`,
+    each of which would issue its own barrier — we instead pack the n
+    per-warp partials into one smem layout and do a single barrier
+    before the cross-warp reduce. Saves `n-1` barriers per kernel.
+    """
+    comptime assert block_size >= 32 and block_size % 32 == 0, (
+        "block_size must be a multiple of warp size (32)"
+    )
+    comptime n_warps: Int = block_size // 32
+
+    # Step 1: per-warp butterfly reduce, every lane.
+    var warp_result = SIMD[DType.float32, n](0)
+
+    comptime for j in range(n):
+        warp_result[j] = _warp_sum_f32(vals[j])
+
+    comptime if n_warps == 1:
+        return warp_result
+
+    var tid: Int = thread_idx.x
+    var lane: Int = tid & 31
+    var warp: Int = tid >> 5
+
+    # Step 2: lane 0 of each warp writes its `n` warp-sums to smem
+    # at layout smem[warp * n + j]. n_warps * n total fp32 slots.
+    var smem = stack_allocation[
+        n_warps * n, DType.float32, address_space=AddressSpace.SHARED
+    ]()
+    if lane == 0:
+
+        comptime for j in range(n):
+            smem[warp * n + j] = warp_result[j]
+
+    barrier()
+
+    # Step 3: warp 0 reads the n_warps partials per lane j and reduces.
+    var block_vals = SIMD[DType.float32, n](0)
+    if warp == 0:
+
+        comptime for j in range(n):
+            var v: Float32 = 0
+            if lane < n_warps:
+                v = smem[lane * n + j]
+            block_vals[j] = _warp_sum_f32(v)
+
+    return block_vals
+
+
 def bwd_full_kernel[
     dtype: DType,
     n_elts: Int,
@@ -593,19 +649,46 @@ def bwd_full_kernel[
     #   monotonic+device : (4,4096,2048) bwd kernel =  3700 us
     # Caller does its own torch.cuda.synchronize(); a release/acquire
     # fence here is unnecessary.
-    comptime for k in range(width):
-        var block_dw_k = _block_sum_f32[block_size=kNThreads](local_dweight[k])
-        if tidx == 0:
-            _ = Atomic[DType.float32, scope="device"].fetch_add[
-                ordering=Ordering.RELAXED
-            ](
-                dweight_acc_ptr + channel_id * width + k,
-                block_dw_k,
-            )
-
+    #
+    # We use the vectorised block-sum to fuse the (width) dweight
+    # reductions plus optional dbias reduction into a single barrier-
+    # sharing block-reduce. Naively, `width` independent `_block_sum_f32`
+    # calls would each issue its own `barrier()` (the cross-warp sync) —
+    # `width = 2..4` => 2..4 extra block-wide stalls per (B,D) block.
+    # Packing them lets the smem write/read pair amortise one sync across
+    # all reductions.
     comptime if has_bias:
-        var block_dbias = _block_sum_f32[block_size=kNThreads](local_dbias)
+        comptime nred: Int = width + 1
+        var packed = SIMD[accum_t, nred](0)
+
+        comptime for k in range(width):
+            packed[k] = local_dweight[k]
+        packed[width] = local_dbias
+        var block_red = _block_sum_f32_vec[block_size=kNThreads, n=nred](
+            packed
+        )
         if tidx == 0:
+
+            comptime for k in range(width):
+                _ = Atomic[DType.float32, scope="device"].fetch_add[
+                    ordering=Ordering.RELAXED
+                ](
+                    dweight_acc_ptr + channel_id * width + k,
+                    block_red[k],
+                )
             _ = Atomic[DType.float32, scope="device"].fetch_add[
                 ordering=Ordering.RELAXED
-            ](dbias_acc_ptr + channel_id, block_dbias)
+            ](dbias_acc_ptr + channel_id, block_red[width])
+    else:
+        var block_red = _block_sum_f32_vec[
+            block_size=kNThreads, n=width
+        ](local_dweight)
+        if tidx == 0:
+
+            comptime for k in range(width):
+                _ = Atomic[DType.float32, scope="device"].fetch_add[
+                    ordering=Ordering.RELAXED
+                ](
+                    dweight_acc_ptr + channel_id * width + k,
+                    block_red[k],
+                )
