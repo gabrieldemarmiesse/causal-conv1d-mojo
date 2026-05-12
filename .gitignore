@@ -24,3 +24,7 @@ wheels/
 __mojocache__/
 flash-attention/
 /cines
+
+# PTX dumps from `dump_asm` in each subpackage's compile_function call.
+# Refreshed on every first-import build; one file per comptime variant.
+/ptx/

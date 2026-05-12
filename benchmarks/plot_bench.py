@@ -1,16 +1,23 @@
-"""Run the wall-time benches (forward, forward+backward, single-step
-update) and emit docs/bench_forward.png, docs/bench_backward.png, and
-docs/bench_update.png.
+"""Run the per-kernel GPU-time benches (forward, forward+backward,
+single-step update) and emit docs/bench_forward.png,
+docs/bench_backward.png, and docs/bench_update.png.
+
+Each impl is timed inside `torch.profiler` via CUPTI: warmup runs
+outside the profiler, then ITERS calls inside it, and we sum
+`self_device_time_total` across every CUDA event recorded for that
+impl's runs. This excludes Python overhead + cudaLaunchKernel + sync
+round-trip — the floor that dominated the old `time.perf_counter_ns()`
+wall-clock measurement at small shapes.
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
+from torch.profiler import ProfilerActivity, profile
 
 import causal_conv1d_mojo
 
@@ -29,18 +36,30 @@ except ImportError as e:
 
 
 SHAPES = [
+    # Tiny / low-occupancy: kChunkSize=1024 (fp16) so L<=1024 → 1 chunk,
+    # and B*D blocks → most grids don't fill the SMs. This is the
+    # regime where launch overhead matters in practice (short prefills).
+    (1, 256, 64, 4),
+    (1, 1024, 64, 4),
+    (1, 1024, 128, 4),
+    (1, 1024, 256, 4),
+    # Mid: 1-block-per-(B,D) grid still fits the GPU comfortably.
     (1, 1024, 512, 4),
     (1, 1024, 2048, 4),
     (1, 1024, 8192, 4),
     (1, 4096, 2048, 4),
+    # Large: fully GPU-bound.
     (4, 4096, 2048, 4),
     (8, 2048, 4096, 4),
 ]
 
 # Update op: per-call (B, D) with seqlen=1 (one-token-at-a-time decode).
 # state_len = W-1 = 3. These are typical Mamba decode shapes; per-call
-# wall time is what matters since the user runs this every token.
+# kernel time is what matters since the user runs this every token.
 UPDATE_SHAPES = [
+    # Tiny decode shapes (e.g. single-user inference, small models).
+    (1, 256),
+    (1, 512),
     (1, 1024),
     (1, 2048),
     (1, 4096),
@@ -51,11 +70,11 @@ UPDATE_SHAPES = [
     (32, 4096),
 ]
 WARMUP_FWD = 30
-ITERS_FWD = 500
+ITERS_FWD = 200
 WARMUP_BWD = 20
-ITERS_BWD = 200
+ITERS_BWD = 100
 WARMUP_UPDATE = 50
-ITERS_UPDATE = 1000
+ITERS_UPDATE = 500
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 
 
@@ -66,18 +85,31 @@ def pytorch_fwd(x, weight, bias):
     return F.silu(out)
 
 
-def bench_wall(fn, warmup: int, iters: int) -> float:
-    # Min over samples: tightest noise-free estimate.
+def bench_kernel(fn, warmup: int, iters: int) -> float:
+    """Mean GPU time per call, μs, via torch.profiler (CUPTI).
+
+    Warmup runs outside the profiler scope; ITERS calls inside; we sum
+    `self_device_time_total` (μs) over every CUDA event in the trace
+    and divide by ITERS. Captures ALL kernels launched by `fn` — for
+    the PyTorch reference this includes the conv1d + silu fusion, and
+    for the +bwd path it includes the gradient kernels too — which is
+    exactly what we want to compare.
+    """
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
-    samples = []
-    for _ in range(iters):
-        t0 = time.perf_counter_ns()
-        fn()
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=False,
+    ) as prof:
+        for _ in range(iters):
+            fn()
         torch.cuda.synchronize()
-        samples.append(time.perf_counter_ns() - t0)
-    return min(samples) / 1_000.0
+    total_us = 0.0
+    for evt in prof.events():
+        if evt.device_type == torch.autograd.DeviceType.CUDA:
+            total_us += evt.self_device_time_total
+    return total_us / iters
 
 
 def grouped_bar(
@@ -93,13 +125,13 @@ def grouped_bar(
     n = len(labels)
     x_pos = list(range(n))
     bw = 0.27
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(max(10, 0.9 * n + 2), 5))
     ax.bar([p - bw for p in x_pos], pt, bw, label=pt_label, color="#bbbbbb")
     ax.bar(x_pos, up, bw, label="upstream (Tri Dao CUDA)", color="#3a78c2")
     ax.bar([p + bw for p in x_pos], mojo, bw, label="mojo (this repo)", color="#d05050")
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
-    ax.set_ylabel("wall time per call (μs, lower is better)")
+    ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
+    ax.set_ylabel("GPU kernel time per call (μs, lower is better)")
     ax.set_yscale("log")
     ax.set_title(title)
     ax.legend(loc="upper left")
@@ -127,13 +159,13 @@ def main() -> None:
         weight = torch.randn(d, w, generator=g).to("cuda", torch.float16)
         bias = torch.randn(d, generator=g).to("cuda", torch.float16)
         kw = dict(bias=bias, activation="silu")
-        m_f = bench_wall(
+        m_f = bench_kernel(
             lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw),
             WARMUP_FWD,
             ITERS_FWD,
         )
-        u_f = bench_wall(lambda: upstream_fn(x, weight, **kw), WARMUP_FWD, ITERS_FWD)
-        p_f = bench_wall(lambda: pytorch_fwd(x, weight, bias), WARMUP_FWD, ITERS_FWD)
+        u_f = bench_kernel(lambda: upstream_fn(x, weight, **kw), WARMUP_FWD, ITERS_FWD)
+        p_f = bench_kernel(lambda: pytorch_fwd(x, weight, bias), WARMUP_FWD, ITERS_FWD)
         fwd_mojo.append(m_f)
         fwd_up.append(u_f)
         fwd_pt.append(p_f)
@@ -158,9 +190,9 @@ def main() -> None:
 
             return step
 
-        m_b = bench_wall(make_fwd_bwd("mojo"), WARMUP_BWD, ITERS_BWD)
-        u_b = bench_wall(make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD)
-        p_b = bench_wall(make_fwd_bwd("pytorch"), WARMUP_BWD, ITERS_BWD)
+        m_b = bench_kernel(make_fwd_bwd("mojo"), WARMUP_BWD, ITERS_BWD)
+        u_b = bench_kernel(make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD)
+        p_b = bench_kernel(make_fwd_bwd("pytorch"), WARMUP_BWD, ITERS_BWD)
         bwd_mojo.append(m_b)
         bwd_up.append(u_b)
         bwd_pt.append(p_b)
@@ -177,7 +209,7 @@ def main() -> None:
         fwd_mojo,
         title=(
             f"causal_conv1d FORWARD — {gpu_name}\n"
-            f"fp16, bias, silu, {ITERS_FWD} iters, sync after each call"
+            f"fp16, bias, silu, {ITERS_FWD} iters, GPU kernel time via torch.profiler"
         ),
         out_path=DOCS / "bench_forward.png",
     )
@@ -188,7 +220,7 @@ def main() -> None:
         bwd_mojo,
         title=(
             f"causal_conv1d FORWARD + BACKWARD — {gpu_name}\n"
-            f"fp16, bias, silu, {ITERS_BWD} iters, sync after each call"
+            f"fp16, bias, silu, {ITERS_BWD} iters, GPU kernel time via torch.profiler"
         ),
         out_path=DOCS / "bench_backward.png",
     )
@@ -223,9 +255,9 @@ def main() -> None:
 
             return step
 
-        m_u = bench_wall(make_step("mojo"), WARMUP_UPDATE, ITERS_UPDATE)
-        u_u = bench_wall(make_step("upstream"), WARMUP_UPDATE, ITERS_UPDATE)
-        r_u = bench_wall(make_step("ref"), WARMUP_UPDATE, ITERS_UPDATE)
+        m_u = bench_kernel(make_step("mojo"), WARMUP_UPDATE, ITERS_UPDATE)
+        u_u = bench_kernel(make_step("upstream"), WARMUP_UPDATE, ITERS_UPDATE)
+        r_u = bench_kernel(make_step("ref"), WARMUP_UPDATE, ITERS_UPDATE)
         update_mojo.append(m_u)
         update_up.append(u_u)
         update_ref.append(r_u)
@@ -239,7 +271,7 @@ def main() -> None:
         title=(
             f"causal_conv1d_update (single-step decode) — {gpu_name}\n"
             f"fp16, bias, silu, seqlen=1, state_len=3, "
-            f"{ITERS_UPDATE} iters, sync after each call"
+            f"{ITERS_UPDATE} iters, GPU kernel time via torch.profiler"
         ),
         out_path=DOCS / "bench_update.png",
         pt_label="pure PyTorch (causal_conv1d_update_ref)",

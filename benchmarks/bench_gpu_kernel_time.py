@@ -17,17 +17,7 @@ from torch.profiler import ProfilerActivity, profile, record_function
 
 import causal_conv1d_mojo
 
-# Optional dep — install with `pip install causal-conv1d==1.6.1` (or
-# `pixi run pip install -e .[bench]`). The package is a C++ extension
-# whose source-build takes minutes; we only need it for upstream-vs-Mojo
-# benchmark comparisons.
-try:
-    from causal_conv1d import causal_conv1d_fn as upstream_fn
-except ImportError as e:
-    raise SystemExit(
-        "this benchmark compares against upstream causal-conv1d; "
-        'run `pip install causal-conv1d==1.6.1` (or `pixi run pip install -e ".[bench]"`) first'
-    ) from e
+from causal_conv1d import causal_conv1d_fn as upstream_fn
 
 
 SHAPES = [
@@ -46,12 +36,13 @@ ITERS = 100
 def _kind(name: str) -> str:
     """Classify a CUDA kernel symbol as mojo (our op) or upstream (Tri Dao's).
 
-    The native kernel built via 'mojo build --emit shared-lib' shows up as
-    'mojo_pkg_<hash>'. The upstream Tri Dao op is 'causal_conv1d_fwd_kernel'.
+    Mojo emits names like `kernel_fwd_kernel_DType_..._<hash>` (the `mojo build`
+    backend mangles the comptime parameters into the name). The upstream Tri Dao
+    op is 'causal_conv1d_fwd_kernel'.
     """
     if name.startswith("void causal_conv1d_fwd_kernel"):
         return "upstream"
-    if name.startswith("causal_conv1d_native_fwd_kernel"):
+    if "fwd_kernel" in name and not name.startswith("void"):
         return "mojo"
     return ""
 

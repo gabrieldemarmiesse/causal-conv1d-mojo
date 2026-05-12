@@ -21,7 +21,15 @@ dependencies = [
 # pulled in when benchmarking us against the upstream kernel:
 #   pip install causal-conv1d==1.6.1
 [project.optional-dependencies]
-bench = ["causal-conv1d==1.6.1", "ninja"]
+bench = [
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl", 
+    "ninja"
+]
+
+
+[tool.pixi.environments]
+default = {features = [], solve-group = "default"}
+bench = {features = ["bench"], solve-group = "default"}
 
 [build-system]
 requires = ["setuptools>=70"]
