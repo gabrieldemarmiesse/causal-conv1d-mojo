@@ -195,6 +195,7 @@ def causal_conv1d_update(
                     type_of(state_tt).LayoutType,
                     type_of(o_tt).LayoutType,
                 ],
+                dump_asm=StaticString("./ptx/update_%.ptx"),
             ]()
             stream.enqueue_function(
                 compiled,

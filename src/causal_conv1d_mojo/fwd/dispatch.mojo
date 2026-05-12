@@ -189,6 +189,7 @@ def causal_conv1d_fwd(
                         WLT,
                         OLT,
                     ],
+                    dump_asm=StaticString("./ptx/fwd_%.ptx"),
                 ]()
                 stream.enqueue_function(
                     compiled,

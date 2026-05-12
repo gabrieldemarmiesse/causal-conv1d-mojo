@@ -229,6 +229,7 @@ def causal_conv1d_bwd_full(
                         DoutLT,
                         DxLT,
                     ],
+                    dump_asm=StaticString("./ptx/bwd_full_%.ptx"),
                 ]()
                 stream.enqueue_function(
                     compiled,
