@@ -13,7 +13,7 @@ from std.atomic import Atomic, Ordering
 from std.sys import llvm_intrinsic
 from layout import TileTensor, TensorLayout, Idx, Coord
 
-from common import kNEltsBwd, kNThreads
+from common import kNThreads
 
 
 @always_inline
@@ -92,6 +92,7 @@ def _block_sum_f32[block_size: Int](val: Float32) -> Float32:
 
 def bwd_full_kernel[
     dtype: DType,
+    n_elts: Int,
     width: Int,
     has_bias: Bool,
     has_seq_idx: Bool,
@@ -164,9 +165,14 @@ def bwd_full_kernel[
     After the chunk loop: block-reduce dweight,dbias and atomic_add to global.
     """
     comptime accum_t = DType.float32
-    # Local alias: bwd uses kNEltsBwd. Forward uses kNElts=4 because its
-    # grid scales with seqlen and we don't want to halve parallelism.
-    comptime kNElts: Int = kNEltsBwd
+    # Per-thread element count, set by the dispatcher: 8 for fp16/bf16
+    # when seqlen is a multiple of 1024, else 4 (to keep all 128 threads
+    # busy on small seqlens). For fp32 it's always 4 (16-byte LDG cap).
+    # Forward uses a fixed 4 because its grid scales with seqlen and a
+    # wider per-thread tile halves parallelism; here the grid is (D, B)
+    # and the chunk loop walks the seqlen, so a wider tile only
+    # shortens the loop.
+    comptime kNElts: Int = n_elts
     comptime kChunkSize: Int = kNThreads * kNElts
 
     var tidx: Int = thread_idx.x
