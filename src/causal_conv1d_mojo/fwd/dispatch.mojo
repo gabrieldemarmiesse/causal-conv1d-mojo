@@ -13,7 +13,7 @@ from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
 
 from kernel import fwd_kernel
-from common import kNElts, kNThreads
+from common import kNThreads, kNEltsFwd
 
 comptime _BOOLS = [False, True]
 comptime _WIDTHS = [2, 3, 4]
@@ -100,11 +100,9 @@ def causal_conv1d_fwd(
     )
     var stream = ctx.create_external_stream(stream_opaque)
 
-    var grid = (
-        ceildiv(seqlen_int, kNThreads * kNElts),
-        dim_int,
-        batch_int,
-    )
+    # One block per (channel, batch); block walks all chunks of seqlen.
+    var grid = (dim_int, batch_int)
+
     var contig_inner_rt: Bool = (
         x_l_stride == 1 and w_w_stride == 1 and o_l_stride == 1
     )
@@ -118,6 +116,11 @@ def causal_conv1d_fwd(
     # driver to load (cached per-context after first call).
     @parameter
     def run[dtype: DType]() raises:
+        # kNElts is dtype-specific: 8 for fp16/bf16 (2 B each), 4 for fp32.
+        # `aligned_seq` is `seqlen % (kNThreads * kNElts) == 0`.
+        comptime kNElts: Int = kNEltsFwd[dtype]()
+        var aligned_seq_rt: Bool = seqlen_int % (kNThreads * kNElts) == 0
+
         var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=x_addr
         )
@@ -138,9 +141,11 @@ def causal_conv1d_fwd(
         )
 
         # Kernel variants per (dtype, width): has_bias × has_seq_idx ×
-        # has_initial_states × apply_silu × contig_inner. seq_idx and
-        # initial_states are mutually exclusive at the public API; we only
-        # emit cubins for the 3 reachable (seq_idx, init) combinations.
+        # has_initial_states × apply_silu × contig_inner × aligned_seq.
+        # seq_idx and initial_states are mutually exclusive at the public
+        # API; we still emit the (hs=T, hi=T) combination — keeps the
+        # sweep symmetric and the `comptime if` filter only catches the
+        # aligned-implies-contig invariant.
         @parameter
         def enqueue_fwd[
             width: Int,
@@ -149,6 +154,7 @@ def causal_conv1d_fwd(
             has_initial_states: Bool,
             apply_silu: Bool,
             contig_inner: Bool,
+            aligned_seq: Bool,
         ]() raises:
             # The `contig_inner` fast path bakes `Idx[1]()` into the inner
             # stride slot of each Layout, so the multiply on the innermost
@@ -174,6 +180,8 @@ def causal_conv1d_fwd(
                         has_seq_idx,
                         has_initial_states,
                         apply_silu,
+                        contig_inner,
+                        aligned_seq,
                         XLT,
                         WLT,
                         OLT,
@@ -185,6 +193,8 @@ def causal_conv1d_fwd(
                         has_seq_idx,
                         has_initial_states,
                         apply_silu,
+                        contig_inner,
+                        aligned_seq,
                         XLT,
                         WLT,
                         OLT,
@@ -256,26 +266,33 @@ def causal_conv1d_fwd(
                 )
                 launch(x_tt.as_immut(), w_tt.as_immut(), o_tt)
 
-        # 4-way comptime sweep across (has_seq_idx, has_initial_states,
-        # apply_silu, contig_inner), nested under the has_bias loop. The
-        # `comptime if` filter drops the (seq_idx & init) combination that
-        # the public API rules out as mutually exclusive — so we don't
-        # waste a cubin on a code path that will never be hit at runtime.
+        # 6-flag comptime sweep across (has_bias, has_seq_idx,
+        # has_initial_states, apply_silu, contig_inner, aligned_seq).
+        # `aligned_seq=True` only makes sense with `contig_inner=True`
+        # (the aligned vec load needs the stride=1 inner). seq_idx and
+        # initial_states are mutually exclusive at the public API, but
+        # we still emit the (hs=T, hi=T) combination — keeps the sweep
+        # symmetric.
         @parameter
         def dispatch_w[width: Int]() raises:
-            comptime for hb in _BOOLS:
-                comptime for hs, hi, silu, contig in product(
-                    _BOOLS, _BOOLS, _BOOLS, _BOOLS
-                ):
-                    comptime if not (hs and hi):
-                        if (
-                            hb == has_bias_rt
-                            and hs == has_seq_idx_rt
-                            and hi == has_initial_states_rt
-                            and silu == apply_silu_rt
-                            and contig == contig_inner_rt
-                        ):
-                            enqueue_fwd[width, hb, hs, hi, silu, contig]()
+            comptime for hs in _BOOLS:
+                comptime for hi in _BOOLS:
+                    comptime for hb, silu, contig, aligned in product(
+                        _BOOLS, _BOOLS, _BOOLS, _BOOLS
+                    ):
+                        comptime if not (aligned and not contig):
+                            comptime if not (hs and hi):
+                                if (
+                                    hb == has_bias_rt
+                                    and hs == has_seq_idx_rt
+                                    and hi == has_initial_states_rt
+                                    and silu == apply_silu_rt
+                                    and contig == contig_inner_rt
+                                    and aligned == aligned_seq_rt
+                                ):
+                                    enqueue_fwd[
+                                        width, hb, hs, hi, silu, contig, aligned
+                                    ]()
 
         comptime for w in _WIDTHS:
             if width_rt == w:
