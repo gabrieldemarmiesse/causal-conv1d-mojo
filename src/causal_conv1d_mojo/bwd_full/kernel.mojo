@@ -13,7 +13,24 @@ from std.atomic import Atomic, Ordering
 from std.sys import llvm_intrinsic
 from layout import TileTensor, TensorLayout, Idx, Coord
 
-from common import kNEltsBwd, kNThreads
+from common import kNThreads
+
+
+@always_inline
+def _rcp_approx_f32(x: Float32) -> Float32:
+    """Single-instruction `rcp.approx.ftz.f32`, fp32 reciprocal.
+
+    The default `1.0 / x` lowers to `div.rn.f32` (IEEE-accurate, several
+    cycles latency on H100). The bwd's silu' computation chains a
+    reciprocal onto `1.0 + exp(-pre)` per element — kNElts of them per
+    chunk-iter per thread. Swapping the IEEE-accurate divide for the
+    `rcp.approx.ftz` PTX intrinsic gets us a single-cycle reciprocal
+    at fp16-ish precision (more than enough for the silu sigmoid
+    backward, whose result is then multiplied by an fp16/bf16 dout).
+    On the fwd kernel this was the largest single perf win (1.25x →
+    1.00x ratio).
+    """
+    return llvm_intrinsic["llvm.nvvm.rcp.approx.ftz.f", Float32](x)
 
 
 @always_inline
@@ -90,8 +107,65 @@ def _block_sum_f32[block_size: Int](val: Float32) -> Float32:
     return block_val
 
 
+@always_inline
+def _block_sum_f32_vec[
+    block_size: Int, n: Int
+](vals: SIMD[DType.float32, n]) -> SIMD[DType.float32, n]:
+    """Block-level fp32 sum of `n` independent values, **one barrier** total.
+
+    Each thread holds a SIMD[fp32, n] of n independent values; the result
+    (held only by lane 0 of warp 0, i.e. tid 0) is the block-wide sum of
+    each lane. This replaces `n` independent calls to `_block_sum_f32`,
+    each of which would issue its own barrier — we instead pack the n
+    per-warp partials into one smem layout and do a single barrier
+    before the cross-warp reduce. Saves `n-1` barriers per kernel.
+    """
+    comptime assert block_size >= 32 and block_size % 32 == 0, (
+        "block_size must be a multiple of warp size (32)"
+    )
+    comptime n_warps: Int = block_size // 32
+
+    # Step 1: per-warp butterfly reduce, every lane.
+    var warp_result = SIMD[DType.float32, n](0)
+
+    comptime for j in range(n):
+        warp_result[j] = _warp_sum_f32(vals[j])
+
+    comptime if n_warps == 1:
+        return warp_result
+
+    var tid: Int = thread_idx.x
+    var lane: Int = tid & 31
+    var warp: Int = tid >> 5
+
+    # Step 2: lane 0 of each warp writes its `n` warp-sums to smem
+    # at layout smem[warp * n + j]. n_warps * n total fp32 slots.
+    var smem = stack_allocation[
+        n_warps * n, DType.float32, address_space=AddressSpace.SHARED
+    ]()
+    if lane == 0:
+
+        comptime for j in range(n):
+            smem[warp * n + j] = warp_result[j]
+
+    barrier()
+
+    # Step 3: warp 0 reads the n_warps partials per lane j and reduces.
+    var block_vals = SIMD[DType.float32, n](0)
+    if warp == 0:
+
+        comptime for j in range(n):
+            var v: Float32 = 0
+            if lane < n_warps:
+                v = smem[lane * n + j]
+            block_vals[j] = _warp_sum_f32(v)
+
+    return block_vals
+
+
 def bwd_full_kernel[
     dtype: DType,
+    n_elts: Int,
     width: Int,
     has_bias: Bool,
     has_seq_idx: Bool,
@@ -164,9 +238,14 @@ def bwd_full_kernel[
     After the chunk loop: block-reduce dweight,dbias and atomic_add to global.
     """
     comptime accum_t = DType.float32
-    # Local alias: bwd uses kNEltsBwd. Forward uses kNElts=4 because its
-    # grid scales with seqlen and we don't want to halve parallelism.
-    comptime kNElts: Int = kNEltsBwd
+    # Per-thread element count, set by the dispatcher: 8 for fp16/bf16
+    # when seqlen is a multiple of 1024, else 4 (to keep all 128 threads
+    # busy on small seqlens). For fp32 it's always 4 (16-byte LDG cap).
+    # Forward uses a fixed 4 because its grid scales with seqlen and a
+    # wider per-thread tile halves parallelism; here the grid is (D, B)
+    # and the chunk loop walks the seqlen, so a wider tile only
+    # shortens the loop.
+    comptime kNElts: Int = n_elts
     comptime kChunkSize: Int = kNThreads * kNElts
 
     var tidx: Int = thread_idx.x
@@ -214,9 +293,7 @@ def bwd_full_kernel[
     # chunk) thread kNThreads-1 reads smem_dout[0] for its halo; for the
     # last chunk that halo is past the seqlen end and must be zero.
     if tidx == 0:
-
-        comptime for i in range(kNElts):
-            smem_dout[i] = 0
+        smem_dout.store[alignment=16](SIMD[accum_t, kNElts](0))
 
     barrier()
 
@@ -305,10 +382,26 @@ def bwd_full_kernel[
         # tidx>0:  read previous thread's x_curr from smem.
         var x_prev = SIMD[accum_t, kNElts](0)
         if tidx == 0 and chunk > 0:
+            # `chunk > 0` ⇒ chunk_start ≥ kChunkSize > kNElts ⇒ all kNElts
+            # elements at [chunk_start - kNElts, chunk_start) are in
+            # range. `chunk_start` is a multiple of `kChunkSize` (=
+            # `kNThreads * kNElts`), so `chunk_start - kNElts` is a
+            # multiple of kNElts ⇒ kNElts-aligned addr ⇒ 16-byte aligned
+            # for both fp16/bf16 (kNElts=8 × 2 B = 16) and fp32
+            # (kNElts=4 × 4 B = 16). Skip the per-element bounds-checked
+            # scalar path for `contig_inner` and issue a single LDG.E.128.
+            comptime if contig_inner:
+                x_prev = x.load[width=kNElts, alignment=16](
+                    Coord(
+                        Idx(batch_id),
+                        Idx(channel_id),
+                        Idx(chunk_start - kNElts),
+                    )
+                ).cast[accum_t]()
+            else:
 
-            comptime for i in range(kNElts):
-                var t = chunk_start - kNElts + i
-                if t >= 0:
+                comptime for i in range(kNElts):
+                    var t = chunk_start - kNElts + i
                     x_prev[i] = x[batch_id, channel_id, t].cast[accum_t]()
 
         # When `has_initial_states`, chunk 0 / tidx 0 reads the trailing
@@ -325,15 +418,20 @@ def bwd_full_kernel[
                     ].cast[accum_t]()
 
         # Publish x_curr to smem so the next thread can pick it up as halo.
-        comptime for i in range(kNElts):
-            smem_x[tidx * kNElts + i] = x_curr[i].cast[dtype]()
+        # Single vector store: tidx*kNElts*sizeof(dtype) is 16-byte aligned
+        # (kNElts*sizeof(dtype) = 16 for both fp16 kNElts=8 and fp32 kNElts=4),
+        # so the compiler emits one st.shared.v4.b32 rather than kNElts scalar
+        # stores. Same for the load on the read-back side.
+        (smem_x + tidx * kNElts).store[alignment=16](x_curr.cast[dtype]())
 
         barrier()  # smem_x writes visible
 
         if tidx > 0:
-
-            comptime for i in range(kNElts):
-                x_prev[i] = smem_x[(tidx - 1) * kNElts + i].cast[accum_t]()
+            x_prev = (
+                (smem_x + (tidx - 1) * kNElts)
+                .load[width=kNElts, alignment=16]()
+                .cast[accum_t]()
+            )
 
         # ---- [P3] derive dpre from dout (and silu' if activation was silu) ----
         # When apply_silu, dpre = dout * silu'(pre); otherwise dpre = dout
@@ -375,7 +473,9 @@ def bwd_full_kernel[
                                     x_prev[kNElts + i + offset_w] * weights[k]
                                 )
 
-                    var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+                    var sig: Scalar[accum_t] = _rcp_approx_f32(
+                        1.0 + exp(-pre)
+                    )
                     var silu_grad: Scalar[accum_t] = sig * (
                         1.0 + pre * (1.0 - sig)
                     )
@@ -404,7 +504,9 @@ def bwd_full_kernel[
                                         * weights[k]
                                     )
 
-                        var sig: Scalar[accum_t] = 1.0 / (1.0 + exp(-pre))
+                        var sig: Scalar[accum_t] = _rcp_approx_f32(
+                        1.0 + exp(-pre)
+                    )
                         var silu_grad: Scalar[accum_t] = sig * (
                             1.0 + pre * (1.0 - sig)
                         )
@@ -432,33 +534,41 @@ def bwd_full_kernel[
             local_dbias += dpre.reduce_add()
 
         # ---- [P4] dout halo from next chunk (already in smem_dout) ----
-        # Three-barrier dance, mirroring upstream:
+        # Two-barrier dance:
         #   1. tidx>0 writes its dpre to smem_dout[tidx*kNElts..]
         #      (slot 0 still holds NEXT chunk's thread-0 dpre, which thread
         #       kNThreads-1 will read for its halo).
         #   2. all threads read smem_dout[((tidx+1) % kNThreads)*kNElts..]
         #   3. thread 0 writes its dpre to slot 0 for the next iteration.
-        barrier()  # all reads of smem_x done; safe to reuse smem_dout
-
+        # Note: upstream's bwd has an extra `__syncthreads()` here just
+        # before the tidx>0 writes. It's redundant on our control flow
+        # because (a) smem_x and smem_dout are *separate* shared buffers
+        # so the smem_x reads above don't race with the smem_dout writes
+        # below, and (b) every smem_dout slot tidx>0 was last *read* in
+        # the *previous* chunk iter and protected by that iter's
+        # `barrier()  # all halo reads done` — which any subsequent
+        # barrier (including this iter's smem_x barrier above) covers
+        # transitively. Dropping it saves one block-wide sync per chunk.
+        #
+        # Vector stores/loads on smem_dout: same story as smem_x — one
+        # v4.b32 per 16 bytes. For fp16/bf16 with kNElts=8 the dpre is
+        # 8 fp32 = 32 bytes, so the compiler emits two v4.b32 (still
+        # better than 8 scalars). For fp32 with kNElts=4 it's a single
+        # v4.b32.
         if tidx > 0:
-
-            comptime for i in range(kNElts):
-                smem_dout[tidx * kNElts + i] = dpre[i]
+            (smem_dout + tidx * kNElts).store[alignment=16](dpre)
 
         barrier()  # tidx>0 writes visible; slot 0 still holds NEXT chunk's data
 
         var halo_thread = tidx + 1 if tidx < kNThreads - 1 else 0
-        var dout_halo = SIMD[accum_t, kNElts](0)
-
-        comptime for i in range(kNElts):
-            dout_halo[i] = smem_dout[halo_thread * kNElts + i]
+        var dout_halo = (smem_dout + halo_thread * kNElts).load[
+            width=kNElts, alignment=16
+        ]()
 
         barrier()  # all halo reads done; thread 0 may now stomp slot 0
 
         if tidx == 0:
-
-            comptime for i in range(kNElts):
-                smem_dout[i] = dpre[i]
+            smem_dout.store[alignment=16](dpre)
 
         # ---- [P5] dx = anti-causal conv on dpre || dout_halo ----
         # dx[i] = sum_w weights[w] * combined[i + (W-1-w)]
@@ -584,19 +694,46 @@ def bwd_full_kernel[
     #   monotonic+device : (4,4096,2048) bwd kernel =  3700 us
     # Caller does its own torch.cuda.synchronize(); a release/acquire
     # fence here is unnecessary.
-    comptime for k in range(width):
-        var block_dw_k = _block_sum_f32[block_size=kNThreads](local_dweight[k])
-        if tidx == 0:
-            _ = Atomic[DType.float32, scope="device"].fetch_add[
-                ordering=Ordering.RELAXED
-            ](
-                dweight_acc_ptr + channel_id * width + k,
-                block_dw_k,
-            )
-
+    #
+    # We use the vectorised block-sum to fuse the (width) dweight
+    # reductions plus optional dbias reduction into a single barrier-
+    # sharing block-reduce. Naively, `width` independent `_block_sum_f32`
+    # calls would each issue its own `barrier()` (the cross-warp sync) —
+    # `width = 2..4` => 2..4 extra block-wide stalls per (B,D) block.
+    # Packing them lets the smem write/read pair amortise one sync across
+    # all reductions.
     comptime if has_bias:
-        var block_dbias = _block_sum_f32[block_size=kNThreads](local_dbias)
+        comptime nred: Int = width + 1
+        var packed = SIMD[accum_t, nred](0)
+
+        comptime for k in range(width):
+            packed[k] = local_dweight[k]
+        packed[width] = local_dbias
+        var block_red = _block_sum_f32_vec[block_size=kNThreads, n=nred](
+            packed
+        )
         if tidx == 0:
+
+            comptime for k in range(width):
+                _ = Atomic[DType.float32, scope="device"].fetch_add[
+                    ordering=Ordering.RELAXED
+                ](
+                    dweight_acc_ptr + channel_id * width + k,
+                    block_red[k],
+                )
             _ = Atomic[DType.float32, scope="device"].fetch_add[
                 ordering=Ordering.RELAXED
-            ](dbias_acc_ptr + channel_id, block_dbias)
+            ](dbias_acc_ptr + channel_id, block_red[width])
+    else:
+        var block_red = _block_sum_f32_vec[
+            block_size=kNThreads, n=width
+        ](local_dweight)
+        if tidx == 0:
+
+            comptime for k in range(width):
+                _ = Atomic[DType.float32, scope="device"].fetch_add[
+                    ordering=Ordering.RELAXED
+                ](
+                    dweight_acc_ptr + channel_id * width + k,
+                    block_red[k],
+                )

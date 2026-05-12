@@ -5,6 +5,7 @@ Mirrors upstream's `causal_conv1d_common.h`. Imported by the
 """
 
 from std.math import exp
+from std.sys import size_of
 
 
 # Shared by the GPU forward kernel + the GPU launcher (grid math).
@@ -14,11 +15,16 @@ comptime kNThreads: Int = 128
 # costs parallelism on small seqlens, even though it would help vector
 # load throughput.
 comptime kNElts: Int = 4
+
+
 # Backward: bwd has only one block per (B,D) (it walks the full seqlen
 # via an inner chunk loop), so per-thread element count doesn't cost
-# parallelism. Kept at 4 to match the fwd alignment story (LDG.E.U64 for
-# fp16/bf16, LDG.E.128 for fp32 with the alignment=16 promise).
-comptime kNEltsBwd: Int = 4
+# parallelism — we want it AS LARGE AS the load width allows. Upstream
+# uses 8 for 16-bit dtypes and 4 for fp32; matching that here gives
+# 16 bytes/thread = a single LDG.E.128 either way, doubling the per-
+# chunk element count for fp16/bf16 vs the old uniform-4 setting.
+fn kNEltsBwd_for[dtype: DType]() -> Int:
+    return 16 // size_of[dtype]()
 
 
 def _silu_f32(x: Float32) -> Float32:

@@ -13,7 +13,7 @@ from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
 
 from kernel import bwd_full_kernel
-from common import kNEltsBwd, kNThreads
+from common import kNEltsBwd_for, kNThreads
 
 comptime _BOOLS = [False, True]
 comptime _WIDTHS = [2, 3, 4]
@@ -134,13 +134,28 @@ def causal_conv1d_bwd_full(
         and dout_l_stride == 1
         and dx_l_stride == 1
     )
-    var aligned_seq_rt: Bool = seqlen_int % (kNThreads * kNEltsBwd) == 0
 
     # `run[dtype]` materialises dtype-typed pointers and the comptime
     # has_bias/apply_silu/contig/aligned dispatch tree below it. The
     # dweight_acc / dbias_acc accumulators stay fp32 regardless of dtype.
+    #
+    # kNElts (per-thread element count) is picked here at runtime:
+    #   16-bit dtype with seqlen % 1024 == 0  ⇒  kNElts = 8 (LDG.E.128,
+    #     kChunkSize=1024, halves chunk-loop trips on large seqlens).
+    #   else                                  ⇒  kNElts = 4 (kChunkSize=512,
+    #     keeps all 128 threads busy when seqlen < 1024 or unaligned).
+    # fp32 has only one viable kNElts (16 bytes / 4 = 4), so the dispatch
+    # tree below only emits the chosen variant.
     @parameter
     def run[dtype: DType]() raises:
+        comptime n_elts_wide: Int = kNEltsBwd_for[dtype]()
+        comptime n_elts_narrow: Int = 4
+        var use_wide: Bool = (
+            n_elts_wide != n_elts_narrow
+            and seqlen_int % (kNThreads * n_elts_wide) == 0
+        )
+        var n_elts_rt: Int = n_elts_wide if use_wide else n_elts_narrow
+        var aligned_seq_rt: Bool = seqlen_int % (kNThreads * n_elts_rt) == 0
         var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
             unsafe_from_address=x_addr
         )
@@ -174,6 +189,7 @@ def causal_conv1d_bwd_full(
 
         @parameter
         def enqueue_bwd[
+            n_elts: Int,
             width: Int,
             has_bias: Bool,
             has_seq_idx: Bool,
@@ -203,6 +219,7 @@ def causal_conv1d_bwd_full(
                 var compiled = ctx.compile_function[
                     bwd_full_kernel[
                         dtype,
+                        n_elts,
                         width,
                         has_bias,
                         has_seq_idx,
@@ -217,6 +234,7 @@ def causal_conv1d_bwd_full(
                     ],
                     bwd_full_kernel[
                         dtype,
+                        n_elts,
                         width,
                         has_bias,
                         has_seq_idx,
@@ -317,35 +335,44 @@ def causal_conv1d_bwd_full(
                 )
                 launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)
 
-        # 6-flag comptime sweep across (has_bias, has_seq_idx,
+        # Comptime sweep across (n_elts, has_bias, has_seq_idx,
         # has_initial_states, apply_silu, contig_inner, aligned_seq).
-        # std.itertools.product caps at 4 iterables, so has_seq_idx and
-        # has_initial_states are the outer comptime loops and the
-        # remaining 4 form the inner product. `aligned_seq=True` only
-        # makes sense with `contig_inner=True`. Note: seq_idx and
-        # initial_states are mutually exclusive at the public API, but
-        # we still emit the (hs=T, hi=T) combination — keeps the sweep
-        # symmetric and the `comptime if` filter only catches the
-        # aligned/contig invariant.
+        # std.itertools.product caps at 4 iterables, so n_elts +
+        # has_seq_idx + has_initial_states are the outer comptime loops
+        # and the remaining 4 form the inner product. `aligned_seq=True`
+        # only makes sense with `contig_inner=True`. We only emit n_elts
+        # values that are actually selectable for this dtype (the
+        # dispatcher's `use_wide` runtime check forces a single one).
+        # Note: seq_idx and initial_states are mutually exclusive at the
+        # public API, but we still emit the (hs=T, hi=T) combination —
+        # keeps the sweep symmetric and the `comptime if` filter only
+        # catches the aligned/contig invariant.
+        comptime n_elts_options = (
+            [n_elts_narrow] if n_elts_wide == n_elts_narrow
+            else [n_elts_narrow, n_elts_wide]
+        )
+
         @parameter
         def dispatch_w[width: Int]() raises:
-            comptime for hs in _BOOLS:
-                comptime for hi in _BOOLS:
-                    comptime for hb, silu, contig, aligned in product(
-                        _BOOLS, _BOOLS, _BOOLS, _BOOLS
-                    ):
-                        comptime if not (aligned and not contig):
-                            if (
-                                hb == has_bias_rt
-                                and hs == has_seq_idx_rt
-                                and hi == has_initial_states_rt
-                                and silu == apply_silu_rt
-                                and contig == contig_inner_rt
-                                and aligned == aligned_seq_rt
-                            ):
-                                enqueue_bwd[
-                                    width, hb, hs, hi, silu, contig, aligned
-                                ]()
+            comptime for ne in n_elts_options:
+                comptime for hs in _BOOLS:
+                    comptime for hi in _BOOLS:
+                        comptime for hb, silu, contig, aligned in product(
+                            _BOOLS, _BOOLS, _BOOLS, _BOOLS
+                        ):
+                            comptime if not (aligned and not contig):
+                                if (
+                                    ne == n_elts_rt
+                                    and hb == has_bias_rt
+                                    and hs == has_seq_idx_rt
+                                    and hi == has_initial_states_rt
+                                    and silu == apply_silu_rt
+                                    and contig == contig_inner_rt
+                                    and aligned == aligned_seq_rt
+                                ):
+                                    enqueue_bwd[
+                                        ne, width, hb, hs, hi, silu, contig, aligned
+                                    ]()
 
         comptime for w in _WIDTHS:
             if width_rt == w:
