@@ -216,6 +216,18 @@ def fwd_kernel[
         if tidx == kNThreads - 1:
             (smem_exchange + tidx * kNElts).store[alignment=16](x_curr)
 
+        # Threads whose entire slice is past the seqlen (typical on partial
+        # chunks like seqlen=512 with kChunkSize=1024 where threads 64..127
+        # have seq_start >= 512) can't produce any valid output. They still
+        # had to participate in the smem dance — but they can skip the
+        # cast → conv → silu → store work below. The `continue` jumps back
+        # to the loop top where the next iter's first `barrier()` syncs
+        # them with the other threads. Comptime-gated on `aligned_seq=False`
+        # so the (very common) aligned-fast-path stays a straight line.
+        comptime if not aligned_seq:
+            if seq_start >= seqlen:
+                continue
+
         # ---- [P3] Build x_window = [x_prev || x_curr] in fp32 ----
         # We only need the last (W-1) of x_prev plus all of x_curr;
         # the compiler will dead-code-eliminate the unused slots.
