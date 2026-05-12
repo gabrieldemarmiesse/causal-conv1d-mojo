@@ -115,10 +115,11 @@ def fwd_kernel[
 
     # Thread 0 zero-init slot kNThreads-1 — it serves as the "previous
     # chunk's tail" before the first chunk's halo barrier dance.
+    # Single 16-byte aligned store: kNElts*sizeof(dtype) == 16.
     if tidx == 0:
-
-        comptime for i in range(kNElts):
-            smem_exchange[(kNThreads - 1) * kNElts + i] = 0
+        (smem_exchange + (kNThreads - 1) * kNElts).store[alignment=16](
+            SIMD[dtype, kNElts](0)
+        )
 
     var seq_idx_base: Int = batch_id * seq_idx_b_stride
     var initial_states_base: Int = (
@@ -177,19 +178,21 @@ def fwd_kernel[
         #   if(tidx==N-1) smem[tidx]=x_curr;
         barrier()  # complete prev iter / pre-loop init
 
+        # Vectorized smem store: tidx*kNElts*sizeof(dtype) is 16-byte
+        # aligned (kNElts*sizeof(dtype) = 16), so a single st.shared.v4.b32
+        # instead of kNElts scalar st.shared.b16/b32. Matches the bwd
+        # kernel's smem-vec optimisation.
         if tidx < kNThreads - 1:
-
-            comptime for i in range(kNElts):
-                smem_exchange[tidx * kNElts + i] = x_curr[i]
+            (smem_exchange + tidx * kNElts).store[alignment=16](x_curr)
 
         barrier()  # writes from tidx<N-1 visible; slot N-1 still holds
                   # prev chunk's tail (or 0 on first chunk)
 
         var prev_tidx = tidx - 1 if tidx > 0 else (kNThreads - 1)
-        var x_prev = SIMD[dtype, kNElts](0)
-
-        comptime for i in range(kNElts):
-            x_prev[i] = smem_exchange[prev_tidx * kNElts + i]
+        # Vectorized smem load: same alignment argument as the store path.
+        var x_prev = (smem_exchange + prev_tidx * kNElts).load[
+            width=kNElts, alignment=16
+        ]()
 
         # On chunk 0, tidx 0 needs x_prev populated with initial_states
         # (for the W-1 trailing slots). Otherwise x_prev stays at 0.
@@ -203,10 +206,9 @@ def fwd_kernel[
 
         barrier()  # all halo reads done; tidx==N-1 may now stomp slot N-1
 
+        # Same vectorized store as above for the inter-chunk carry write.
         if tidx == kNThreads - 1:
-
-            comptime for i in range(kNElts):
-                smem_exchange[tidx * kNElts + i] = x_curr[i]
+            (smem_exchange + tidx * kNElts).store[alignment=16](x_curr)
 
         # ---- [P3] Build x_window = [x_prev || x_curr] in fp32 ----
         # We only need the last (W-1) of x_prev plus all of x_curr;
