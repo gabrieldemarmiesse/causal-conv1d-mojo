@@ -8,12 +8,6 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "torch==2.8.0",
-    # 'max' here only ships the Mojo compiler + runtime libs that our
-    # native .so links against (libKGENCompilerRTShared, libAsyncRTMojoBindings,
-    # etc.). We do not use the MAX framework / CustomOpLibrary at runtime.
-    # 26.3.0 transitively requires the pre-release mojo-compiler==1.0.0b1;
-    # we pin it explicitly so the resolver accepts the pre-release.
-    "max==26.3.0",
     "mojo-compiler==1.0.0b1",
     "mojo-compiler-mojo-libs==1.0.0b1",
     "setuptools>=70",
