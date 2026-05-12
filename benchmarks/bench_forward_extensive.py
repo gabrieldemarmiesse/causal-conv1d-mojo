@@ -1,12 +1,19 @@
-"""Extensive forward-only bench: mojo vs upstream vs pure PyTorch."""
+"""Extensive forward-only bench: mojo vs upstream vs pure PyTorch.
+
+GPU-kernel-only timing via `torch.profiler` (CUPTI traces): we sum
+`self_device_time_total` over all CUDA events emitted by each impl's
+runs, so the numbers exclude Python overhead and cudaLaunchKernel
+latency — just the kernel's own GPU execution time.
+"""
 
 import statistics
-import time
 
 import torch
 import torch.nn.functional as F
+from torch.profiler import ProfilerActivity, profile
 
 import causal_conv1d_mojo
+from _baseline import BaselineCache
 
 # Optional dep — install with `pip install causal-conv1d==1.6.1` (or
 # `pixi run pip install -e .[bench]`). The package is a C++ extension
@@ -75,18 +82,26 @@ def _pytorch_fwd(x, weight, bias):
 
 
 def bench_one(call) -> float:
-    # Min over samples: tightest noise-free estimate (median is biased
-    # upward by transient system load).
+    """Mean GPU-kernel time per call, μs, via torch.profiler (CUPTI).
+
+    Warmup outside the profiler; ITERS calls inside; sum
+    `self_device_time_total` over every CUDA event and divide by ITERS.
+    """
     for _ in range(WARMUP):
         call()
     torch.cuda.synchronize()
-    samples = []
-    for _ in range(ITERS):
-        t0 = time.perf_counter_ns()
-        call()
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=False,
+    ) as prof:
+        for _ in range(ITERS):
+            call()
         torch.cuda.synchronize()
-        samples.append(time.perf_counter_ns() - t0)
-    return min(samples) / 1_000.0
+    total_us = 0.0
+    for evt in prof.events():
+        if evt.device_type == torch.autograd.DeviceType.CUDA:
+            total_us += evt.self_device_time_total
+    return total_us / ITERS
 
 
 def fmt_us(t):
@@ -98,7 +113,8 @@ def fmt_us(t):
 def main() -> None:
     print(
         f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | "
-        f"activation=silu | bias=True | width=4 | iters={ITERS} (forward only)\n"
+        f"activation=silu | bias=True | width=4 | iters={ITERS} (forward only) | "
+        f"GPU kernel time via torch.profiler\n"
     )
     h = (
         f"{'shape (B, D, L)':>20} | "
@@ -108,6 +124,9 @@ def main() -> None:
     print(h)
     print("-" * len(h))
 
+    cache = BaselineCache(__file__)
+    cfg = {"dtype": "fp16", "activation": "silu", "bias": True, "iters": ITERS}
+
     rows = []
     for B, D, L, W in SHAPES:
         x, weight, bias = _make(B, D, L, W)
@@ -116,8 +135,20 @@ def main() -> None:
                 x, weight, bias=bias, activation="silu"
             )
         )
-        u = bench_one(lambda: upstream_fn(x, weight, bias=bias, activation="silu"))
-        p = bench_one(lambda: _pytorch_fwd(x, weight, bias))
+        u = cache.get_or_run(
+            impl="upstream",
+            shape=(B, D, L, W),
+            config=cfg,
+            run=lambda: bench_one(
+                lambda: upstream_fn(x, weight, bias=bias, activation="silu")
+            ),
+        )
+        p = cache.get_or_run(
+            impl="pytorch",
+            shape=(B, D, L, W),
+            config=cfg,
+            run=lambda: bench_one(lambda: _pytorch_fwd(x, weight, bias)),
+        )
         rows.append((B, D, L, m, u, p))
         print(
             f"{(B, D, L)!s:>20} | {fmt_us(m)} | {fmt_us(u)} | {fmt_us(p)} | {m / u:>6.2f}x | {m / p:>6.2f}x"

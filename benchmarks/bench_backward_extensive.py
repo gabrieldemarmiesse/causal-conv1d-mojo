@@ -2,28 +2,25 @@
 
 Sweeps a wide grid over (batch, dim, seqlen) for width=4 fp16 silu+bias.
 Each iteration rebuilds the autograd graph and runs forward + backward.
-Reports median per-iter wall time; ratios vs mojo.
+Reports mean per-iter GPU-kernel time via `torch.profiler` (CUPTI): sum
+of `self_device_time_total` across all CUDA events emitted by each
+impl's (forward + backward) runs, so Python and cudaLaunchKernel
+overhead are excluded.
 """
 
 import statistics
-import time
 
 import torch
 import torch.nn.functional as F
+from torch.profiler import ProfilerActivity, profile
 
 import causal_conv1d_mojo
+from _baseline import BaselineCache
 
-# Optional dep — install with `pip install causal-conv1d==1.6.1` (or
-# `pixi run pip install -e .[bench]`). The package is a C++ extension
-# whose source-build takes minutes; we only need it for upstream-vs-Mojo
-# benchmark comparisons.
-try:
-    from causal_conv1d import causal_conv1d_fn as upstream_fn
-except ImportError as e:
-    raise SystemExit(
-        "this benchmark compares against upstream causal-conv1d; "
-        'run `pip install causal-conv1d==1.6.1` (or `pixi run pip install -e ".[bench]"`) first'
-    ) from e
+
+# pixi run -e bench ...
+from causal_conv1d import causal_conv1d_fn as upstream_fn
+
 
 
 # Wide sweep across realistic SSM shapes.
@@ -88,20 +85,27 @@ def _pytorch_fwd(x, weight, bias):
 
 
 def bench_one(make_call) -> float:
-    # Min over samples: tightest noise-free estimate (median is biased
-    # upward by transient system load).
+    """Mean GPU-kernel time per (forward + backward) call, μs, via
+    torch.profiler (CUPTI). Sums `self_device_time_total` over all CUDA
+    events in the trace; Python/launch overhead excluded.
+    """
     for _ in range(WARMUP):
         out, dout = make_call()
         out.backward(dout)
     torch.cuda.synchronize()
-    samples = []
-    for _ in range(ITERS):
-        t0 = time.perf_counter_ns()
-        out, dout = make_call()
-        out.backward(dout)
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=False,
+    ) as prof:
+        for _ in range(ITERS):
+            out, dout = make_call()
+            out.backward(dout)
         torch.cuda.synchronize()
-        samples.append(time.perf_counter_ns() - t0)
-    return min(samples) / 1_000.0
+    total_us = 0.0
+    for evt in prof.events():
+        if evt.device_type == torch.autograd.DeviceType.CUDA:
+            total_us += evt.self_device_time_total
+    return total_us / ITERS
 
 
 def fmt_us(t):
@@ -116,7 +120,8 @@ def main() -> None:
 
     print(
         f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | "
-        f"activation=silu | bias=True | width=4 | iters={ITERS} (fwd+bwd)\n"
+        f"activation=silu | bias=True | width=4 | iters={ITERS} (fwd+bwd) | "
+        f"GPU kernel time via torch.profiler\n"
     )
 
     header = (
@@ -126,6 +131,15 @@ def main() -> None:
     )
     print(header)
     print("-" * len(header))
+
+    cache = BaselineCache(__file__)
+    cfg = {
+        "dtype": "fp16",
+        "activation": "silu",
+        "bias": True,
+        "iters": ITERS,
+        "mode": "fwd+bwd",
+    }
 
     rows = []
     for B, D, L, W in SHAPES:
@@ -155,8 +169,18 @@ def main() -> None:
             return out, dout
 
         m = bench_one(make_call_mojo)
-        u = bench_one(make_call_upstream)
-        p = bench_one(make_call_pytorch)
+        u = cache.get_or_run(
+            impl="upstream",
+            shape=(B, D, L, W),
+            config=cfg,
+            run=lambda: bench_one(make_call_upstream),
+        )
+        p = cache.get_or_run(
+            impl="pytorch",
+            shape=(B, D, L, W),
+            config=cfg,
+            run=lambda: bench_one(make_call_pytorch),
+        )
         rows.append((B, D, L, m, u, p))
 
         # progress print as we go

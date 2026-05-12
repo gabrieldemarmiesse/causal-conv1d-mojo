@@ -13,11 +13,12 @@ from __future__ import annotations
 from collections import defaultdict
 
 import torch
-from torch.profiler import ProfilerActivity, profile, record_function
+from torch.profiler import ProfilerActivity, profile
 
 import causal_conv1d_mojo
 
 from causal_conv1d import causal_conv1d_fn as upstream_fn
+from _baseline import BaselineCache
 
 
 SHAPES = [
@@ -33,18 +34,36 @@ SHAPES = [
 ITERS = 100
 
 
-def _kind(name: str) -> str:
-    """Classify a CUDA kernel symbol as mojo (our op) or upstream (Tri Dao's).
+def _is_mojo(name: str) -> bool:
+    """Return True if `name` looks like a Mojo-emitted CUDA kernel.
 
     Mojo emits names like `kernel_fwd_kernel_DType_..._<hash>` (the `mojo build`
-    backend mangles the comptime parameters into the name). The upstream Tri Dao
-    op is 'causal_conv1d_fwd_kernel'.
+    backend mangles the comptime parameters into the name).
     """
-    if name.startswith("void causal_conv1d_fwd_kernel"):
-        return "upstream"
-    if "fwd_kernel" in name and not name.startswith("void"):
-        return "mojo"
-    return ""
+    return "fwd_kernel" in name and not name.startswith("void")
+
+
+def _sum_cuda_us(prof) -> float:
+    total = 0.0
+    for evt in prof.events():
+        if evt.device_type == torch.autograd.DeviceType.CUDA:
+            total += evt.self_device_time_total
+    return total
+
+
+def _bench_kernel(fn) -> float:
+    """Mean per-call GPU kernel time, μs, via torch.profiler (CUPTI)."""
+    for _ in range(20):
+        fn()
+    torch.cuda.synchronize()
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=False,
+    ) as prof:
+        for _ in range(ITERS):
+            fn()
+        torch.cuda.synchronize()
+    return _sum_cuda_us(prof) / ITERS
 
 
 def main() -> None:
@@ -62,57 +81,75 @@ def main() -> None:
     print(header)
     print("-" * len(header))
 
+    cache = BaselineCache(__file__)
+    cfg = {
+        "dtype": "fp16",
+        "activation": activation,
+        "bias": True,
+        "iters": ITERS,
+    }
+
+    # Debug the mojo kernel name on first shape so the user sees what name
+    # the build produced (was useful when iterating on the comptime tree).
+    first_shape = SHAPES[0]
+    dumped_debug = False
+
     for batch, dim, seqlen, width in SHAPES:
         x = torch.randn(batch, dim, seqlen, generator=g).to(device=device, dtype=dtype)
         weight = torch.randn(dim, width, generator=g).to(device=device, dtype=dtype)
         bias = torch.randn(dim, generator=g).to(device=device, dtype=dtype)
+        shape = (batch, dim, seqlen, width)
 
-        # Warmup: not under the profiler.
-        for _ in range(20):
-            causal_conv1d_mojo.causal_conv1d_fn(
-                x, weight, bias=bias, activation=activation
-            )
-            upstream_fn(x, weight, bias=bias, activation=activation)
-        torch.cuda.synchronize()
-
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            record_shapes=False,
-        ) as prof:
-            for _ in range(ITERS):
-                with record_function("mojo"):
+        # Mojo: always re-measure. We also do one debug pass on the first
+        # shape to print kernel names emitted by mojo build.
+        if shape == first_shape and not dumped_debug:
+            for _ in range(20):
+                causal_conv1d_mojo.causal_conv1d_fn(
+                    x, weight, bias=bias, activation=activation
+                )
+            torch.cuda.synchronize()
+            with profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                record_shapes=False,
+            ) as prof:
+                for _ in range(ITERS):
                     causal_conv1d_mojo.causal_conv1d_fn(
                         x, weight, bias=bias, activation=activation
                     )
-                with record_function("upstream"):
-                    upstream_fn(x, weight, bias=bias, activation=activation)
-            torch.cuda.synchronize()
-
-        if (batch, dim, seqlen, width) == SHAPES[0]:
+                torch.cuda.synchronize()
             counts: dict[str, int] = defaultdict(int)
+            mojo_total = 0.0
             for evt in prof.events():
-                if evt.device_type == torch.autograd.DeviceType.CUDA:
-                    counts[evt.name] += 1
-            print("DEBUG kernels on first shape (counts over both impls x ITERS):")
+                if evt.device_type != torch.autograd.DeviceType.CUDA:
+                    continue
+                counts[evt.name] += 1
+                if _is_mojo(evt.name):
+                    mojo_total += evt.self_device_time_total
+            print("DEBUG mojo kernels on first shape (counts over ITERS):")
             for n, c in sorted(counts.items()):
                 print(f"  {c:5d}  {n}")
             print()
+            mojo_us = mojo_total / ITERS
+            dumped_debug = True
+        else:
+            mojo_us = _bench_kernel(
+                lambda: causal_conv1d_mojo.causal_conv1d_fn(
+                    x, weight, bias=bias, activation=activation
+                )
+            )
 
-        # key_averages is per-op rolled up; use events for per-kernel attribution.
-        totals: dict[str, int] = defaultdict(int)
-        for evt in prof.events():
-            if evt.device_type != torch.autograd.DeviceType.CUDA:
-                continue
-            kind = _kind(evt.name)
-            if not kind:
-                continue
-            totals[kind] += evt.self_device_time_total
+        up_us = cache.get_or_run(
+            impl="upstream",
+            shape=shape,
+            config=cfg,
+            run=lambda: _bench_kernel(
+                lambda: upstream_fn(x, weight, bias=bias, activation=activation)
+            ),
+        )
 
-        mojo_us = totals["mojo"] / ITERS
-        up_us = totals["upstream"] / ITERS
         ratio = mojo_us / up_us if up_us else float("inf")
         print(
-            f"{(batch, dim, seqlen, width)!s:>22} | {mojo_us:15.1f} | {up_us:19.1f} | {ratio:6.2f}x"
+            f"{shape!s:>22} | {mojo_us:15.1f} | {up_us:19.1f} | {ratio:6.2f}x"
         )
 
 

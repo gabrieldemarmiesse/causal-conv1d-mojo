@@ -1,9 +1,11 @@
-"""Wall-time bench for the backward pass: mojo vs upstream vs pure PyTorch.
+"""GPU-kernel-only bench for the backward pass: mojo vs upstream vs pure PyTorch.
 
-Measures per-call time of `out.backward(dout)` on a fresh autograd graph
-each iteration. Forward time is included in each sample because the graph
-needs to exist before backward; reported numbers are total wall-clock per
-(forward + backward) call to keep apples-to-apples.
+Measures per-call GPU time of `out.backward(dout)` on a fresh autograd
+graph each iteration. Forward kernels are included in each sample
+because the graph needs to exist before backward; reported numbers sum
+every CUDA event launched during (forward + backward), via
+torch.profiler (CUPTI) — Python and cudaLaunchKernel overhead are
+excluded.
 
 mojo:     causal_conv1d_mojo.causal_conv1d_fn (native fwd + custom bwd)
 upstream: causal_conv1d.causal_conv1d_fn (Tri Dao CUDA fwd + bwd)
@@ -12,12 +14,12 @@ pytorch:  pure F.conv1d(groups=D)+F.silu, autograd-driven backward
 
 from __future__ import annotations
 
-import time
-
 import torch
 import torch.nn.functional as F
+from torch.profiler import ProfilerActivity, profile
 
 import causal_conv1d_mojo
+from _baseline import BaselineCache
 
 # Optional dep — install with `pip install causal-conv1d==1.6.1` (or
 # `pixi run pip install -e .[bench]`). The package is a C++ extension
@@ -63,22 +65,28 @@ def _pytorch_fwd(x, weight, bias):
 
 def bench_one(make_call) -> float:
     """make_call() must rebuild the autograd graph and return (out, dout).
-    Returns minimum per-iter wall time in μs covering forward + backward
-    + sync. Min over samples: kernel time is "this many cycles + possible
-    interference"; min is the tightest noise-free estimate.
+
+    Returns mean GPU-kernel time per (forward + backward) call, μs, via
+    torch.profiler (CUPTI). All CUDA events emitted between calls are
+    summed; Python and launch overhead are excluded.
     """
     for _ in range(WARMUP):
         out, dout = make_call()
         out.backward(dout)
     torch.cuda.synchronize()
-    samples = []
-    for _ in range(ITERS):
-        t0 = time.perf_counter_ns()
-        out, dout = make_call()
-        out.backward(dout)
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=False,
+    ) as prof:
+        for _ in range(ITERS):
+            out, dout = make_call()
+            out.backward(dout)
         torch.cuda.synchronize()
-        samples.append(time.perf_counter_ns() - t0)
-    return min(samples) / 1_000.0
+    total_us = 0.0
+    for evt in prof.events():
+        if evt.device_type == torch.autograd.DeviceType.CUDA:
+            total_us += evt.self_device_time_total
+    return total_us / ITERS
 
 
 def main() -> None:
@@ -87,8 +95,18 @@ def main() -> None:
 
     print(
         f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | "
-        f"activation=silu | bias=True | iters={ITERS} (forward + backward)\n"
+        f"activation=silu | bias=True | iters={ITERS} (forward + backward) | "
+        f"GPU kernel time via torch.profiler\n"
     )
+
+    cache = BaselineCache(__file__)
+    cfg = {
+        "dtype": "fp16",
+        "activation": "silu",
+        "bias": True,
+        "iters": ITERS,
+        "mode": "fwd+bwd",
+    }
 
     h = f"{'shape (B,D,L,W)':>22} | {'mojo':>10} | {'upstream':>10} | {'pytorch':>10}"
     print(h)
@@ -126,8 +144,18 @@ def main() -> None:
             return out, dout
 
         m = bench_one(call_mojo)
-        u = bench_one(call_upstream)
-        p = bench_one(call_pytorch)
+        u = cache.get_or_run(
+            impl="upstream",
+            shape=(B, D, L, W),
+            config=cfg,
+            run=lambda: bench_one(call_upstream),
+        )
+        p = cache.get_or_run(
+            impl="pytorch",
+            shape=(B, D, L, W),
+            config=cfg,
+            run=lambda: bench_one(call_pytorch),
+        )
         print(f"{(B, D, L, W)!s:>22} | {m:9.1f}u | {u:9.1f}u | {p:9.1f}u")
 
 

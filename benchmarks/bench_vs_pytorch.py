@@ -8,19 +8,21 @@
                   fallback you'd write if you didn't have a custom op
                   at all.
 
-Reports two numbers per call: wall-clock per call (sync after each
-call) and host-only submit time (one sync at the end). Both at fp16
-with bias and silu, the bench config our native path specializes for.
+Reports GPU-kernel-only time per call (μs) for each impl, measured via
+`torch.profiler` (CUPTI traces). Python + cudaLaunchKernel + sync round-
+trip overhead is excluded — only the kernel's own GPU execution time is
+summed. Both at fp16 with bias and silu, the bench config our native
+path specializes for.
 """
 
 from __future__ import annotations
 
-import time
-
 import torch
 import torch.nn.functional as F
+from torch.profiler import ProfilerActivity, profile
 
 import causal_conv1d_mojo
+from _baseline import BaselineCache
 
 # Optional dep — install with `pip install causal-conv1d==1.6.1` (or
 # `pixi run pip install -e .[bench]`). The package is a C++ extension
@@ -64,33 +66,29 @@ def call_pytorch(x, weight, bias) -> torch.Tensor:
     return F.silu(out)
 
 
-def bench_wall(fn) -> float:
-    # Min over samples: kernel time is "this many cycles + possible
-    # interference"; min picks the run that wasn't disturbed. Mean and
-    # median are both shifted upward by system noise; min is the
-    # tightest noise-free estimate.
+def bench_kernel(fn) -> float:
+    """Mean GPU-kernel time per call, μs, via torch.profiler (CUPTI).
+
+    Warmup runs outside the profiler scope; ITERS calls inside; we sum
+    `self_device_time_total` (μs) over every CUDA event in the trace
+    and divide by ITERS. Captures ALL kernels launched by `fn` (for the
+    PyTorch reference that includes the conv1d + silu kernels).
+    """
     for _ in range(WARMUP):
         fn()
     torch.cuda.synchronize()
-    samples = []
-    for _ in range(ITERS):
-        t0 = time.perf_counter_ns()
-        fn()
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=False,
+    ) as prof:
+        for _ in range(ITERS):
+            fn()
         torch.cuda.synchronize()
-        samples.append(time.perf_counter_ns() - t0)
-    return min(samples) / 1_000.0
-
-
-def bench_host(fn) -> float:
-    for _ in range(WARMUP):
-        fn()
-    torch.cuda.synchronize()
-    t0 = time.perf_counter_ns()
-    for _ in range(ITERS):
-        fn()
-    elapsed = time.perf_counter_ns() - t0
-    torch.cuda.synchronize()
-    return elapsed / ITERS / 1_000.0
+    total_us = 0.0
+    for evt in prof.events():
+        if evt.device_type == torch.autograd.DeviceType.CUDA:
+            total_us += evt.self_device_time_total
+    return total_us / ITERS
 
 
 def main() -> None:
@@ -100,14 +98,16 @@ def main() -> None:
     g = torch.Generator(device="cpu").manual_seed(0)
     print(
         f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | "
-        f"activation=silu | bias=True | iters={ITERS}\n"
+        f"activation=silu | bias=True | iters={ITERS} | "
+        f"GPU kernel time via torch.profiler\n"
     )
+
+    cache = BaselineCache(__file__)
+    cfg = {"dtype": "fp16", "activation": "silu", "bias": True, "iters": ITERS}
 
     h = (
         f"{'shape (B,D,L,W)':>22} | "
-        f"{'mojo wall':>10} | {'mojo host':>10} | "
-        f"{'up wall':>10} | {'up host':>10} | "
-        f"{'pt wall':>10} | {'pt host':>10}"
+        f"{'mojo':>10} | {'upstream':>10} | {'pytorch':>10}"
     )
     print(h)
     print("-" * len(h))
@@ -122,22 +122,24 @@ def main() -> None:
         bias = torch.randn(dim, generator=g).to(device=device, dtype=torch.float16)
 
         kw = dict(bias=bias, activation="silu")
-        m_wall = bench_wall(
-            lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw)
+        shape = (batch, dim, seqlen, width)
+        m = bench_kernel(lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw))
+        u = cache.get_or_run(
+            impl="upstream",
+            shape=shape,
+            config=cfg,
+            run=lambda: bench_kernel(lambda: upstream_fn(x, weight, **kw)),
         )
-        m_host = bench_host(
-            lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw)
+        p = cache.get_or_run(
+            impl="pytorch",
+            shape=shape,
+            config=cfg,
+            run=lambda: bench_kernel(lambda: call_pytorch(x, weight, bias)),
         )
-        u_wall = bench_wall(lambda: upstream_fn(x, weight, **kw))
-        u_host = bench_host(lambda: upstream_fn(x, weight, **kw))
-        p_wall = bench_wall(lambda: call_pytorch(x, weight, bias))
-        p_host = bench_host(lambda: call_pytorch(x, weight, bias))
 
         print(
-            f"{(batch, dim, seqlen, width)!s:>22} | "
-            f"{m_wall:9.1f}u | {m_host:9.1f}u | "
-            f"{u_wall:9.1f}u | {u_host:9.1f}u | "
-            f"{p_wall:9.1f}u | {p_host:9.1f}u"
+            f"{shape!s:>22} | "
+            f"{m:9.1f}u | {u:9.1f}u | {p:9.1f}u"
         )
 
 

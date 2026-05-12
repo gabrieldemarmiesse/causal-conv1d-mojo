@@ -21,6 +21,7 @@ from torch.profiler import ProfilerActivity, profile
 
 import causal_conv1d_mojo
 from causal_conv1d_mojo.reference import causal_conv1d_update_ref
+from _baseline import BaselineCache
 
 # Optional dep — install with `pip install causal-conv1d==1.6.1` (or
 # `pixi run pip install -e .[bench]`). The package is a C++ extension
@@ -164,6 +165,8 @@ def main() -> None:
     gpu_name = torch.cuda.get_device_name(0)
     labels = [f"({b},{d},{l},{w})" for b, d, l, w in SHAPES]
 
+    cache = BaselineCache(__file__)
+
     fwd_mojo, fwd_up, fwd_pt, fwd_pt_c = [], [], [], []
     bwd_mojo, bwd_up, bwd_pt, bwd_pt_c = [], [], [], []
 
@@ -173,15 +176,43 @@ def main() -> None:
         weight = torch.randn(d, w, generator=g).to("cuda", torch.float16)
         bias = torch.randn(d, generator=g).to("cuda", torch.float16)
         kw = dict(bias=bias, activation="silu")
+        cfg_fwd = {
+            "dtype": "fp16",
+            "activation": "silu",
+            "bias": True,
+            "iters": ITERS_FWD,
+            "mode": "fwd",
+        }
         m_f = bench_kernel(
             lambda: causal_conv1d_mojo.causal_conv1d_fn(x, weight, **kw),
             WARMUP_FWD,
             ITERS_FWD,
         )
-        u_f = bench_kernel(lambda: upstream_fn(x, weight, **kw), WARMUP_FWD, ITERS_FWD)
-        p_f = bench_kernel(lambda: pytorch_fwd(x, weight, bias), WARMUP_FWD, ITERS_FWD)
-        pc_f = bench_kernel(
-            lambda: pytorch_fwd_compiled(x, weight, bias), WARMUP_FWD, ITERS_FWD
+        u_f = cache.get_or_run(
+            impl="upstream",
+            shape=(b, d, l, w),
+            config=cfg_fwd,
+            run=lambda: bench_kernel(
+                lambda: upstream_fn(x, weight, **kw), WARMUP_FWD, ITERS_FWD
+            ),
+        )
+        p_f = cache.get_or_run(
+            impl="pytorch",
+            shape=(b, d, l, w),
+            config=cfg_fwd,
+            run=lambda: bench_kernel(
+                lambda: pytorch_fwd(x, weight, bias), WARMUP_FWD, ITERS_FWD
+            ),
+        )
+        pc_f = cache.get_or_run(
+            impl="pytorch_compiled",
+            shape=(b, d, l, w),
+            config=cfg_fwd,
+            run=lambda: bench_kernel(
+                lambda: pytorch_fwd_compiled(x, weight, bias),
+                WARMUP_FWD,
+                ITERS_FWD,
+            ),
         )
         fwd_mojo.append(m_f)
         fwd_up.append(u_f)
@@ -190,6 +221,13 @@ def main() -> None:
 
         # ------- forward + backward -------
         dout = torch.randn(b, d, l, generator=g).to("cuda", torch.float16)
+        cfg_bwd = {
+            "dtype": "fp16",
+            "activation": "silu",
+            "bias": True,
+            "iters": ITERS_BWD,
+            "mode": "fwd+bwd",
+        }
 
         def make_fwd_bwd(impl):
             def step():
@@ -211,9 +249,28 @@ def main() -> None:
             return step
 
         m_b = bench_kernel(make_fwd_bwd("mojo"), WARMUP_BWD, ITERS_BWD)
-        u_b = bench_kernel(make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD)
-        p_b = bench_kernel(make_fwd_bwd("pytorch"), WARMUP_BWD, ITERS_BWD)
-        pc_b = bench_kernel(make_fwd_bwd("pytorch_compiled"), WARMUP_BWD, ITERS_BWD)
+        u_b = cache.get_or_run(
+            impl="upstream",
+            shape=(b, d, l, w),
+            config=cfg_bwd,
+            run=lambda: bench_kernel(
+                make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD
+            ),
+        )
+        p_b = cache.get_or_run(
+            impl="pytorch",
+            shape=(b, d, l, w),
+            config=cfg_bwd,
+            run=lambda: bench_kernel(make_fwd_bwd("pytorch"), WARMUP_BWD, ITERS_BWD),
+        )
+        pc_b = cache.get_or_run(
+            impl="pytorch_compiled",
+            shape=(b, d, l, w),
+            config=cfg_bwd,
+            run=lambda: bench_kernel(
+                make_fwd_bwd("pytorch_compiled"), WARMUP_BWD, ITERS_BWD
+            ),
+        )
         bwd_mojo.append(m_b)
         bwd_up.append(u_b)
         bwd_pt.append(p_b)
@@ -259,6 +316,15 @@ def main() -> None:
     update_mojo, update_up, update_ref, update_ref_c = [], [], [], []
     W = 4
     state_len = W - 1
+    cfg_upd = {
+        "dtype": "fp16",
+        "activation": "silu",
+        "bias": True,
+        "iters": ITERS_UPDATE,
+        "mode": "update",
+        "width": W,
+        "state_len": state_len,
+    }
     for b, d in UPDATE_SHAPES:
         x = torch.randn(b, d, generator=g).to("cuda", torch.float16)
         weight = torch.randn(d, W, generator=g).to("cuda", torch.float16)
@@ -283,9 +349,28 @@ def main() -> None:
             return step
 
         m_u = bench_kernel(make_step("mojo"), WARMUP_UPDATE, ITERS_UPDATE)
-        u_u = bench_kernel(make_step("upstream"), WARMUP_UPDATE, ITERS_UPDATE)
-        r_u = bench_kernel(make_step("ref"), WARMUP_UPDATE, ITERS_UPDATE)
-        rc_u = bench_kernel(make_step("ref_compiled"), WARMUP_UPDATE, ITERS_UPDATE)
+        u_u = cache.get_or_run(
+            impl="upstream",
+            shape=(b, d),
+            config=cfg_upd,
+            run=lambda: bench_kernel(
+                make_step("upstream"), WARMUP_UPDATE, ITERS_UPDATE
+            ),
+        )
+        r_u = cache.get_or_run(
+            impl="ref",
+            shape=(b, d),
+            config=cfg_upd,
+            run=lambda: bench_kernel(make_step("ref"), WARMUP_UPDATE, ITERS_UPDATE),
+        )
+        rc_u = cache.get_or_run(
+            impl="ref_compiled",
+            shape=(b, d),
+            config=cfg_upd,
+            run=lambda: bench_kernel(
+                make_step("ref_compiled"), WARMUP_UPDATE, ITERS_UPDATE
+            ),
+        )
         update_mojo.append(m_u)
         update_up.append(u_u)
         update_ref.append(r_u)
