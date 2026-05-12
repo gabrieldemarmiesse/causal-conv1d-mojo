@@ -382,10 +382,26 @@ def bwd_full_kernel[
         # tidx>0:  read previous thread's x_curr from smem.
         var x_prev = SIMD[accum_t, kNElts](0)
         if tidx == 0 and chunk > 0:
+            # `chunk > 0` ⇒ chunk_start ≥ kChunkSize > kNElts ⇒ all kNElts
+            # elements at [chunk_start - kNElts, chunk_start) are in
+            # range. `chunk_start` is a multiple of `kChunkSize` (=
+            # `kNThreads * kNElts`), so `chunk_start - kNElts` is a
+            # multiple of kNElts ⇒ kNElts-aligned addr ⇒ 16-byte aligned
+            # for both fp16/bf16 (kNElts=8 × 2 B = 16) and fp32
+            # (kNElts=4 × 4 B = 16). Skip the per-element bounds-checked
+            # scalar path for `contig_inner` and issue a single LDG.E.128.
+            comptime if contig_inner:
+                x_prev = x.load[width=kNElts, alignment=16](
+                    Coord(
+                        Idx(batch_id),
+                        Idx(channel_id),
+                        Idx(chunk_start - kNElts),
+                    )
+                ).cast[accum_t]()
+            else:
 
-            comptime for i in range(kNElts):
-                var t = chunk_start - kNElts + i
-                if t >= 0:
+                comptime for i in range(kNElts):
+                    var t = chunk_start - kNElts + i
                     x_prev[i] = x[batch_id, channel_id, t].cast[accum_t]()
 
         # When `has_initial_states`, chunk 0 / tidx 0 reads the trailing
