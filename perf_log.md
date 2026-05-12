@@ -102,6 +102,21 @@ per thread.
 
 6 of 8 shapes now BEAT upstream. Worst-case shrunk to 1.01x.
 
+### Opt11 (reverted): two-phase SIMD silu' (build `pre_vec` then SIMD-apply silu')
+
+Idea: refactor the silu compute from per-i scalar (compute pre[i],
+sig=rcp(1+exp(-pre[i])), silu_grad, dpre[i]) into two phases —
+first build a full SIMD[fp32, kNElts] `pre_vec` via the conv-reduce
+loop, then vector-apply silu' across `pre_vec` in one pass. The
+hypothesis was that ptxas could schedule the kNElts independent
+`ex2.approx` + `rcp.approx` chains in parallel, hiding their
+latency.
+
+Result: wash to slight regression on every shape (±0.01). The
+compiler was already scheduling them well; making the structure
+explicit added a few SIMD-construction instructions without net
+benefit. **Reverted.**
+
 ### Opt8 (reverted): kNThreads=256
 
 Doubling the block size to halve chunk-loop trips regressed every
