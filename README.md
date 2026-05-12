@@ -165,3 +165,19 @@ via `mojo.importer` — it runs `mojo build --emit shared-lib` and caches
 the resulting `.so` under `src/causal_conv1d_mojo/_native/__mojocache__/`.
 First import takes a few seconds; subsequent imports are cache hits.
 No manual build step.
+
+
+## Time to compile on the fluidstack node:
+
+```
+subpkg            compile (s)  .so size (MB)
+--------------------------------------------
+fwd                      2.29           42.3
+bwd_full                 4.23          195.6
+update                   1.72           22.9
+fwd_cpu                  1.61           24.4
+bwd_full_cpu             2.21           44.6
+update_cpu               1.94           44.9
+--------------------------------------------
+TOTAL                   13.99          374.7
+```

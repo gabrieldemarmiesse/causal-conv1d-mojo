@@ -12,12 +12,18 @@ wall-clock measurement at small shapes.
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
+
+# Conda-built PyTorch on this box reports 1 thread by default (no
+# OMP_NUM_THREADS in env). Pin to physical cores: hyperthread siblings
+# don't help compute-bound kernels and just add scheduling noise.
+torch.set_num_threads(max(1, (os.cpu_count() or 2) // 2))
 from torch.profiler import ProfilerActivity, profile
 import causal_conv1d_mojo
 from causal_conv1d_mojo.reference import causal_conv1d_ref, causal_conv1d_update_ref
