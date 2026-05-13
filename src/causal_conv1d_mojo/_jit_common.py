@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Iterable
-
+import time
 from mojo.run import subprocess_run_mojo
 
 _CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"))
@@ -95,8 +95,10 @@ def compile_and_load_variant(
             f"[causal_conv1d_mojo] JIT-compiling {subpkg} variant "
             f"{mod_name} — cached for future runs.",
             file=sys.stderr,
+            end="",
         )
         try:
+            t1 = time.perf_counter()
             subprocess_run_mojo(
                 [
                     "build",
@@ -109,6 +111,8 @@ def compile_and_load_variant(
                 capture_output=True,
                 check=True,
             )
+            t2 = time.perf_counter()
+            print(f" done in {(t2 - t1) * 1000:8.1f} ms", file=sys.stderr)
         except Exception as e:
             raise RuntimeError(
                 f"JIT compilation of {subpkg} variant {mod_name} failed: {e}"
