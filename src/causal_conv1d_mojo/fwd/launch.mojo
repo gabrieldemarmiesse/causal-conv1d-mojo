@@ -30,6 +30,7 @@ def launch_fwd[
     apply_silu: Bool,
     contig_inner: Bool,
     aligned_seq: Bool,
+    vec_aligned: Bool,
 ](
     batch_int: Int,
     dim_int: Int,
@@ -107,6 +108,7 @@ def launch_fwd[
                 apply_silu,
                 contig_inner,
                 aligned_seq,
+                vec_aligned,
                 XLT,
                 WLT,
                 OLT,
@@ -120,12 +122,11 @@ def launch_fwd[
                 apply_silu,
                 contig_inner,
                 aligned_seq,
+                vec_aligned,
                 XLT,
                 WLT,
                 OLT,
             ],
-            dump_asm=StaticString("/tmp/mojo_fwd_%.amdgcn"),
-            dump_llvm=StaticString("/tmp/mojo_fwd_%.ll"),
         ]()
         stream.enqueue_function(
             compiled,

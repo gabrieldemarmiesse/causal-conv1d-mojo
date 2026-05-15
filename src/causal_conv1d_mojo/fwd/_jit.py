@@ -52,6 +52,13 @@ def _config_from_args(args: tuple) -> tuple:
     seqlen = args[6]
     contig_inner = args[9] == 1 and args[11] == 1 and args[14] == 1
     aligned_seq = (seqlen % (_KNTHREADS * _KN_ELTS[dtype_code])) == 0
+    # `vec_aligned` is the weaker "seqlen % kNElts == 0" — true for any
+    # power-of-two seqlen on fp16/bf16 (kNElts=8) and fp32 (kNElts=4).
+    # When this holds, every thread's kNElts slice either fits entirely
+    # inside [0, seqlen) or starts past it, so the partial-chunk scalar
+    # fallback path in the kernel becomes statically dead. Mirrors
+    # upstream's `kIsVecLoad` BOOL_SWITCH (gated on the same condition).
+    vec_aligned = (seqlen % _KN_ELTS[dtype_code]) == 0
     return (
         dtype_code,
         width,
@@ -61,6 +68,7 @@ def _config_from_args(args: tuple) -> tuple:
         apply_silu,
         contig_inner,
         aligned_seq,
+        vec_aligned,
     )
 
 
@@ -71,11 +79,11 @@ def _mod_name(config: tuple) -> str:
     PyInit symbol suffix in the generated `.so`. Reading it should be
     enough to reproduce the config by hand.
     """
-    (dt, w, hb, hs, hi, silu, c, a) = config
+    (dt, w, hb, hs, hi, silu, c, a, va) = config
     return (
         f"{_DTYPE_NAME[dt]}_w{w}"
         f"_hb{int(hb)}_hs{int(hs)}_hi{int(hi)}_silu{int(silu)}"
-        f"_contig{int(c)}_aligned{int(a)}"
+        f"_contig{int(c)}_aligned{int(a)}_vec{int(va)}"
     )
 
 
@@ -102,6 +110,7 @@ def _generate_variant_source(mod_name: str, config: tuple) -> str:
         apply_silu,
         contig_inner,
         aligned_seq,
+        vec_aligned,
     ) = config
     return f'''\
 """JIT-generated variant for causal_conv1d_fwd (config-frozen).
@@ -157,6 +166,7 @@ def causal_conv1d_fwd_variant(
         {apply_silu},
         {contig_inner},
         {aligned_seq},
+        {vec_aligned},
     ](
         batch_int,
         dim_int,

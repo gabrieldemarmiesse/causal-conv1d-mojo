@@ -45,6 +45,7 @@ def fwd_kernel[
     apply_silu: Bool,
     contig_inner: Bool,
     aligned_seq: Bool,
+    vec_aligned: Bool,
     XLayoutType: TensorLayout,
     WLayoutType: TensorLayout,
     OLayoutType: TensorLayout,
@@ -88,6 +89,18 @@ def fwd_kernel[
     `aligned_seq`: seqlen is a multiple of `kNThreads * kNElts`. When
     True, the per-chunk bounds-checked tail path is dropped — halves
     the kernel's compiled code and eliminates predicated stores.
+
+    `vec_aligned`: weaker — seqlen is a multiple of `kNElts` (always
+    True for power-of-two seqlens). Each thread's `seq_start` is also a
+    multiple of `kNElts`, so `seq_start < seqlen` ⟺ `seq_start +
+    kNElts ≤ seqlen`; the partial-element scalar fallback path
+    becomes statically dead and gets dropped at comptime. This is the
+    case for shapes like `(B, D, 512, W)` where chunk-alignment fails
+    (kChunkSize=1024 for fp16) but vec-alignment still holds — without
+    this gate the compiler emits `kNElts` predicated scalar loads and
+    `kNElts` predicated scalar stores per fully-OOB thread, fattening
+    the kernel and adding ~4× branches versus upstream's vec-load path.
+    Mirrors upstream's `kIsVecLoad` BOOL_SWITCH.
     """
     comptime accum_t = DType.float32
     comptime kNElts: Int = kNEltsFwd[dtype]()
@@ -153,20 +166,21 @@ def fwd_kernel[
             x_curr = x.load[width=kNElts, alignment=16](
                 Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
             )
+        elif contig_inner and vec_aligned:
+            # vec_aligned ⇒ each thread's kNElts slice is either fully
+            # in-bounds or starts past `seqlen`. Either a single 16-byte
+            # vec load or nothing — never partial. The else arm of the
+            # `seq_start + kNElts <= seqlen` test below would be the
+            # scalar fallback, but vec_aligned makes it statically dead.
+            if seq_start + kNElts <= seqlen:
+                x_curr = x.load[width=kNElts, alignment=16](
+                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
+                )
         elif contig_inner:
             # Per-thread vec load when the thread's kNElts slice is fully
-            # in-bounds — even on a partial chunk. Threads near the end
-            # fall back to scalar. This matters for shapes like
-            # (1, 1024, 512, 4) where seqlen=512 < kChunkSize=1024: 64
-            # of the 128 threads still get 16-byte vec loads here
-            # instead of 8 scalar fp16 loads each. Threads whose slice
-            # is fully past seqlen skip the load entirely — their
-            # `x_curr` stays at 0 (the initial value) and the later
-            # `continue` at the bottom of the smem dance gates compute
-            # off. Without this `elif seq_start < seqlen` guard the
-            # else-branch emits kNElts predicated scalar loads per
-            # fully-OOB thread, which is wasted issue slots on partial
-            # chunks (50% of threads on the L=512 case).
+            # in-bounds — even on a partial chunk. Threads at the
+            # boundary fall back to scalar; threads past `seqlen` skip
+            # the load entirely (their `x_curr` stays at 0).
             if seq_start + kNElts <= seqlen:
                 x_curr = x.load[width=kNElts, alignment=16](
                     Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
@@ -298,6 +312,14 @@ def fwd_kernel[
 
         # ---- [P6] Store out_vals to global ----
         comptime if contig_inner and aligned_seq:
+            output.store[alignment=16](
+                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
+                out_vals.cast[dtype](),
+            )
+        elif contig_inner and vec_aligned:
+            # vec_aligned ⇒ no boundary partial. Single vec store guarded
+            # by `seq_start < seqlen` (or equivalently +kNElts ≤ seqlen);
+            # OOB threads were already gated off by the `continue` above.
             output.store[alignment=16](
                 Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
                 out_vals.cast[dtype](),
