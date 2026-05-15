@@ -34,7 +34,8 @@ Each thread handles one (batch, channel). One block covers
 """
 
 from std.gpu import block_idx, thread_idx
-from layout import TileTensor, TensorLayout
+from std.sys import size_of
+from layout import TileTensor, TensorLayout, Coord, Idx
 
 from common import _silu_f32
 
@@ -102,10 +103,27 @@ def update_kernel[
             return
         state_batch_coord = idx_val
 
+    # Force a single wide load for all `width` weight values of this
+    # channel. Without this, the comptime-unrolled `weight[c, k]` loop
+    # emits `width` separate `global_load_ushort` ops on amdgcn (Mojo
+    # doesn't merge adjacent fp16 loads as aggressively as HIP/clang
+    # does). `width × 2` bytes per thread maps to:
+    #   width=2 → `global_load_dword`    (4 bytes)
+    #   width=4 → `global_load_dwordx2`  (8 bytes)
+    # width=3 (6 bytes) is awkward and falls back to scalar loads. The
+    # alignment promise is `size_of(dtype) * width` because the weight
+    # tensor is `(D, W)` contig — channel rows are W*sizeof(dtype)-byte
+    # aligned by PyTorch's allocator.
     var weights = SIMD[accum_t, width](0)
-
-    comptime for k in range(width):
-        weights[k] = weight[channel_id, k].cast[accum_t]()
+    comptime if width == 2 or width == 4:
+        var w_vec = weight.load[
+            width=width, alignment = size_of[dtype]() * width
+        ](Coord(Idx(channel_id), Idx(0)))
+        comptime for k in range(width):
+            weights[k] = w_vec[k].cast[accum_t]()
+    else:
+        comptime for k in range(width):
+            weights[k] = weight[channel_id, k].cast[accum_t]()
 
     var bias_v: Scalar[accum_t] = 0
 
@@ -135,17 +153,37 @@ def update_kernel[
 
         # Phase 2 (linear): read trailing W-1 history into x_vals (with
         # writeback for the small-state_len edge case).
+        #
+        # Issue the (W-1) state reads as one vec load when possible so
+        # amdgcn emits a single `global_load_dword{,x2}` instead of
+        # (W-1) `global_load_ushort` ops. width=2 → 1×16-bit (no win),
+        # width=3 → 2×16-bit packed into a dword, width=4 → 3×16-bit
+        # which lowers to dword + ushort (one instruction saved).
+        var state_vals = SIMD[dtype, width - 1](0)
+        comptime if width == 3 or width == 4:
+            var s_vec = conv_state.load[width = width - 1, alignment=2](
+                Coord(
+                    Idx(state_batch_coord),
+                    Idx(channel_id),
+                    Idx(state_len - (width - 1)),
+                )
+            )
+            comptime for i in range(width - 1):
+                state_vals[i] = s_vec[i]
+        else:
+            comptime for i in range(width - 1):
+                var read_idx: Int = state_len - (width - 1) + i
+                state_vals[i] = conv_state[
+                    state_batch_coord, channel_id, read_idx
+                ]
+
         comptime for i in range(width - 1):
-            var read_idx: Int = state_len - (width - 1) + i
-            var state_val = conv_state[
-                state_batch_coord, channel_id, read_idx
-            ]
             var write_idx: Int = state_len - advance_len - (width - 1) + i
             if i < advance_len + (width - 1) and write_idx >= 0:
                 conv_state[
                     state_batch_coord, channel_id, write_idx
-                ] = state_val
-            x_vals[i] = state_val.cast[accum_t]()
+                ] = state_vals[i]
+            x_vals[i] = state_vals[i].cast[accum_t]()
     else:
         # Phase 1+2 (circular): read W-1 history starting at update_idx,
         # advancing with wrap. After this, update_idx = cache_seqlen %
