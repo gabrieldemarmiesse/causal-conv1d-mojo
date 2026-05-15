@@ -38,7 +38,7 @@ from common import _silu_f32, kNThreads, kNEltsFwd
 )
 def fwd_kernel[
     dtype: DType,
-    width: Int,
+    kWidth: Int,
     has_bias: Bool,
     has_seq_idx: Bool,
     has_initial_states: Bool,
@@ -110,17 +110,17 @@ def fwd_kernel[
     var channel_id: Int = block_idx.x
     var batch_id: Int = block_idx.y
 
-    # ---- Load weights once per block (fp32 registers) ----
-    var weights = SIMD[accum_t, width](0)
+    # ---- Load weight_vals once per block (fp32 registers) ----
+    var weight_vals = SIMD[accum_t, kWidth](0)
 
-    comptime for k in range(width):
-        weights[k] = weight[channel_id, k].cast[accum_t]()
+    comptime for k in range(kWidth):
+        weight_vals[k] = weight[channel_id, k].cast[accum_t]()
 
     # ---- Load bias once per block ----
-    var cur_bias: Scalar[accum_t] = 0
+    var bias_val: Scalar[accum_t] = 0
 
     comptime if has_bias:
-        cur_bias = bias_ptr[channel_id].cast[accum_t]()
+        bias_val = bias_ptr[channel_id].cast[accum_t]()
 
     # ---- Smem exchange buffer for (W-1) halo across chunks ----
     # Slot i holds thread i's last kNElts x values; we read slot
@@ -232,8 +232,8 @@ def fwd_kernel[
         comptime if has_initial_states:
             if tidx == 0 and chunk == 0:
 
-                comptime for i in range(width - 1):
-                    x_prev[kNElts - (width - 1) + i] = initial_states_ptr[
+                comptime for i in range(kWidth - 1):
+                    x_prev[kNElts - (kWidth - 1) + i] = initial_states_ptr[
                         initial_states_base + i * initial_states_l_stride
                     ]
 
@@ -267,13 +267,13 @@ def fwd_kernel[
         # ---- [P4] seq_idx window (only when has_seq_idx) ----
         # Needed at positions [seq_start - (W-1) .. seq_start + kNElts - 1].
         # Out-of-range positions get -1 so the gate naturally fails.
-        comptime kSeqWindow: Int = (width - 1) + kNElts
+        comptime kSeqWindow: Int = (kWidth - 1) + kNElts
         var seq_window = InlineArray[Int32, kSeqWindow](uninitialized=True)
 
         comptime if has_seq_idx:
 
             comptime for j in range(kSeqWindow):
-                var t_j = seq_start + j - (width - 1)
+                var t_j = seq_start + j - (kWidth - 1)
                 if 0 <= t_j and t_j < seqlen:
                     seq_window[j] = seq_idx_ptr[
                         seq_idx_base + t_j * seq_idx_l_stride
@@ -281,24 +281,24 @@ def fwd_kernel[
                 else:
                     seq_window[j] = -1
 
-        # ---- [P5] Compute out[i] = bias + sum_w weights[w] * x_vals[kNElts + i - (W-1-w)] ----
+        # ---- [P5] Compute out[i] = bias + sum_w weight_vals[w] * x_vals[kNElts + i - (W-1-w)] ----
         var out_vals = SIMD[accum_t, kNElts](0)
 
         comptime for i in range(kNElts):
-            var acc: Scalar[accum_t] = cur_bias
+            var acc: Scalar[accum_t] = bias_val
             var cur_id: Int32 = 0
 
             comptime if has_seq_idx:
-                cur_id = seq_window[(width - 1) + i]
+                cur_id = seq_window[(kWidth - 1) + i]
 
-            comptime for w in range(width):
-                comptime x_idx: Int = kNElts + i - (width - 1 - w)
+            comptime for w in range(kWidth):
+                comptime x_idx: Int = kNElts + i - (kWidth - 1 - w)
                 var include: Bool = True
 
                 comptime if has_seq_idx:
                     include = seq_window[i + w] == cur_id
                 if include:
-                    acc += weights[w] * x_vals[x_idx]
+                    acc += weight_vals[w] * x_vals[x_idx]
 
             comptime if apply_silu:
                 acc = _silu_f32(Float32(acc))
