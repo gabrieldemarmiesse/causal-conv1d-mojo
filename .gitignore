@@ -30,3 +30,6 @@ flash-attention/
 /ptx/
 
 benchmarks/baselines/
+
+# mojo kgen trace dumps
+kgen.trace.json.time*
