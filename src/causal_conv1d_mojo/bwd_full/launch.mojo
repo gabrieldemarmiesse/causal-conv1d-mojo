@@ -73,7 +73,14 @@ def launch_bwd_full[
     )
     var stream = ctx.create_external_stream(stream_opaque)
 
-    var grid = (dim_int, batch_int)
+    # Grid layout (batch, dim) matches upstream Tri Dao. On AMD with a
+    # single batch (the small-shape regime we care about), this means
+    # gridDim.x = 1 and gridDim.y = dim — and AMD's CU dispatcher
+    # scans gridDim.x first when filling the GPU, so adjacent dim_id
+    # blocks land on adjacent CUs (better channel-stride locality on
+    # the dweight atomics). With (dim, batch) the order is inverted
+    # and the dweight atomics scatter more across L2 partitions.
+    var grid = (batch_int, dim_int)
 
     var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
         unsafe_from_address=x_addr
@@ -175,33 +182,53 @@ def launch_bwd_full[
             block_dim=(kNThreads,),
         )
 
+    # Pass strides as `UInt32` to keep the kernel-side address math at
+    # 32 bits. The default `Int` (64-bit) routes every stride-times-
+    # index multiply through `s_mul_i32` + `s_mul_hi_u32` (a 64×32 →
+    # 64 multiply pair on AMD); with `UInt32` the high-half multiplies
+    # are dead-code-eliminated and we get a single `s_mul_i32`. Saves
+    # ~7 SGPRs of address setup per block, which the small-shape
+    # regime is sensitive to. Mirrors the fwd launcher. 32-bit is fine
+    # — strides this large would need a single buffer >16 GB.
     comptime if contig_inner:
         var x_tt = TileTensor(
             x_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(x_b_stride), Idx(x_c_stride), Idx[1]()),
+                (
+                    Idx(UInt32(x_b_stride)),
+                    Idx(UInt32(x_c_stride)),
+                    Idx[1](),
+                ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
                 (Idx(dim_int), Idx[width]()),
-                (Idx(w_c_stride), Idx[1]()),
+                (Idx(UInt32(w_c_stride)), Idx[1]()),
             ),
         )
         var dout_tt = TileTensor(
             dout_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(dout_b_stride), Idx(dout_c_stride), Idx[1]()),
+                (
+                    Idx(UInt32(dout_b_stride)),
+                    Idx(UInt32(dout_c_stride)),
+                    Idx[1](),
+                ),
             ),
         )
         var dx_tt = TileTensor(
             dx_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(dx_b_stride), Idx(dx_c_stride), Idx[1]()),
+                (
+                    Idx(UInt32(dx_b_stride)),
+                    Idx(UInt32(dx_c_stride)),
+                    Idx[1](),
+                ),
             ),
         )
         launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)
@@ -210,28 +237,40 @@ def launch_bwd_full[
             x_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+                (
+                    Idx(UInt32(x_b_stride)),
+                    Idx(UInt32(x_c_stride)),
+                    Idx(UInt32(x_l_stride)),
+                ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
                 (Idx(dim_int), Idx[width]()),
-                (Idx(w_c_stride), Idx(w_w_stride)),
+                (Idx(UInt32(w_c_stride)), Idx(UInt32(w_w_stride))),
             ),
         )
         var dout_tt = TileTensor(
             dout_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(dout_b_stride), Idx(dout_c_stride), Idx(dout_l_stride)),
+                (
+                    Idx(UInt32(dout_b_stride)),
+                    Idx(UInt32(dout_c_stride)),
+                    Idx(UInt32(dout_l_stride)),
+                ),
             ),
         )
         var dx_tt = TileTensor(
             dx_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(dx_b_stride), Idx(dx_c_stride), Idx(dx_l_stride)),
+                (
+                    Idx(UInt32(dx_b_stride)),
+                    Idx(UInt32(dx_c_stride)),
+                    Idx(UInt32(dx_l_stride)),
+                ),
             ),
         )
         launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)
