@@ -210,7 +210,7 @@ def test_update_conv_state_indices(device, dtype):
 
 def test_update_padding_token(device, dtype):
     """conv_state_indices[b] < 0 marks a padding token: output zeros, state
-    untouched."""
+    untouched. Non-padding rows must match the standard reference."""
     pool_size = 4
     B, D, W = 3, 8, 4
     state_len = W - 1
@@ -231,6 +231,16 @@ def test_update_padding_token(device, dtype):
     untouched = (pool_before != pool).any(dim=(1, 2))
     assert untouched[0].item() and untouched[2].item()
     assert not untouched[1].item() and not untouched[3].item()
+
+    # Non-padding rows of the output and the touched pool slots must
+    # match a fresh-state reference run.
+    real_idx = torch.tensor([0, 2], dtype=torch.int64)
+    state_real = pool_before[indices.to(torch.int64)[real_idx]].clone()
+    out_ref_real = causal_conv1d_update_ref(x[real_idx], state_real, weight)
+    assert _max_diff(out[real_idx], out_ref_real) < _FWD_TOL[dtype]
+    assert (
+        _max_diff(pool[indices.to(torch.int64)[real_idx]], state_real) < _FWD_TOL[dtype]
+    )
 
 
 def test_update_state_too_small_raises():
