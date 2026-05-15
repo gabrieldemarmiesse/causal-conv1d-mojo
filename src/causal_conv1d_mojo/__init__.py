@@ -19,9 +19,25 @@ causal_conv1d_mojo.<subpkg>_cpu import dispatch` triggers a one-time
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+# MAX 26.3+ links against CUDA-13's internal libnvptxcompiler and refuses to
+# load on NVIDIA driver <580 (CUDA <13). Pointing MAX at an external CUDA-12
+# ptxas via MODULAR_NVPTX_COMPILER_PATH disables the driver-version guard.
+if "MODULAR_NVPTX_COMPILER_PATH" not in os.environ:
+    try:
+        import nvidia.cuda_nvcc  # type: ignore[import-not-found]
+
+        _ptxas = Path(nvidia.cuda_nvcc.__file__).parent / "bin" / "ptxas"
+        if _ptxas.is_file():
+            os.environ["MODULAR_NVPTX_COMPILER_PATH"] = str(_ptxas)
+    except ImportError:
+        pass
+
 # Registers the import hook used by the CPU subpackages'
 # `from <subpkg>_cpu import dispatch` lazy import.
-import mojo.importer  # noqa: F401
+import mojo.importer  # noqa: F401, E402
 
 from causal_conv1d_mojo._fn import causal_conv1d_fn
 from causal_conv1d_mojo._update import causal_conv1d_update
