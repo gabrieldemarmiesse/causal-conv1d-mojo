@@ -23,14 +23,19 @@ x values via smem.
 """
 
 from std.gpu import block_idx, thread_idx, barrier
+from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA
 from std.gpu.memory import AddressSpace
 from std.math import ceildiv
 from std.memory import stack_allocation
+from std.utils.index import StaticTuple
 from layout import TileTensor, TensorLayout, Idx, Coord
 
 from common import _silu_f32, kNThreads, kNEltsFwd
 
 
+@__llvm_metadata(
+    MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](Int32(kNThreads))
+)
 def fwd_kernel[
     dtype: DType,
     width: Int,
@@ -154,23 +159,31 @@ def fwd_kernel[
             # fall back to scalar. This matters for shapes like
             # (1, 1024, 512, 4) where seqlen=512 < kChunkSize=1024: 64
             # of the 128 threads still get 16-byte vec loads here
-            # instead of 8 scalar fp16 loads each.
+            # instead of 8 scalar fp16 loads each. Threads whose slice
+            # is fully past seqlen skip the load entirely — their
+            # `x_curr` stays at 0 (the initial value) and the later
+            # `continue` at the bottom of the smem dance gates compute
+            # off. Without this `elif seq_start < seqlen` guard the
+            # else-branch emits kNElts predicated scalar loads per
+            # fully-OOB thread, which is wasted issue slots on partial
+            # chunks (50% of threads on the L=512 case).
             if seq_start + kNElts <= seqlen:
                 x_curr = x.load[width=kNElts, alignment=16](
                     Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
                 )
-            else:
+            elif seq_start < seqlen:
 
                 comptime for i in range(kNElts):
                     var t = seq_start + i
                     if t < seqlen:
                         x_curr[i] = x[batch_id, channel_id, t]
         else:
+            if seq_start < seqlen:
 
-            comptime for i in range(kNElts):
-                var t = seq_start + i
-                if t < seqlen:
-                    x_curr[i] = x[batch_id, channel_id, t]
+                comptime for i in range(kNElts):
+                    var t = seq_start + i
+                    if t < seqlen:
+                        x_curr[i] = x[batch_id, channel_id, t]
 
         # ---- [P2] Halo dance ----
         # Slot kNThreads-1 holds the prev chunk's tail (initialised to

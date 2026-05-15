@@ -124,6 +124,8 @@ def launch_fwd[
                 WLT,
                 OLT,
             ],
+            dump_asm=StaticString("/tmp/mojo_fwd_%.amdgcn"),
+            dump_llvm=StaticString("/tmp/mojo_fwd_%.ll"),
         ]()
         stream.enqueue_function(
             compiled,
