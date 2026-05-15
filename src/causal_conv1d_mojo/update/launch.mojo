@@ -6,15 +6,48 @@ into this with their comptime params hard-coded.
 Caller responsibilities:
 - Bail out on `batch == 0 || dim == 0` before calling.
 - Pass the comptime params that select the right kernel specialisation.
+
+Implementation note: launch passes raw pointers + Int32 strides (not
+TileTensor) to keep the kernarg footprint small. At decode shapes
+(seqlen=1, dim=64..4096) the kernel itself is microseconds-fast and
+launch overhead dominates; shaving kernarg bytes matters.
+
+On AMD specifically, `var ctx = DeviceContext()` per call ends up
+calling `hipStreamCreate` + matching `hipStreamDestroy` each time
+(visible in torch.profiler traces — these CPU calls are the bulk of
+per-call overhead). The Python wrapper caches a "context handle" the
+first time a variant is loaded and passes it in as
+`ctx_handle_addr`; we wrap that via the non-owning DeviceContext
+constructor so no fresh hipStream is created per call.
 """
 
 from std.gpu.host import DeviceContext
+from std.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
 from std.math import ceildiv
 from std.memory import OpaquePointer
-from layout import TileTensor, Idx
-from layout.tile_layout import Layout
 
 from kernel import kNThreadsUpdate, update_kernel
+
+
+def acquire_ctx_handle() raises -> Int:
+    """Create a DeviceContext, retain its handle, and leak the wrapper.
+
+    The Python side calls this once per variant and caches the returned
+    integer. The handle stays alive for the duration of the process —
+    the matching release happens at process exit (or never).
+
+    Returns the address of the underlying C++ DeviceContext as an Int.
+    """
+    var ctx = DeviceContext()
+    # Retain to bump the refcount so `ctx.__del__` (when this function
+    # returns) doesn't free the underlying resource. The caller is now
+    # responsible for the extra refcount.
+    ctx._retain()
+    # `ctx._handle` is `_CPointer[_DeviceContextCpp, ...]` which is
+    # `Optional[UnsafePointer[_DeviceContextCpp, ...]]`. Unwrap and
+    # cast to an integer.
+    var raw_ptr = ctx._handle.value()
+    return Int(raw_ptr)
 
 
 def launch_update[
@@ -48,8 +81,15 @@ def launch_update[
     o_c_stride: Int,
     o_l_stride: Int,
     stream_handle_addr: Int,
+    ctx_handle_addr: Int,
 ) raises:
-    var ctx = DeviceContext()
+    # Reconstruct a non-owning DeviceContext from the cached handle —
+    # avoids the hipStreamCreate/Destroy that would happen with the
+    # default `DeviceContext()` constructor each call.
+    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutExternalOrigin](
+        unsafe_from_address=ctx_handle_addr
+    )
+    var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
@@ -79,34 +119,6 @@ def launch_update[
         unsafe_from_address=o_addr
     )
 
-    var x_tt = TileTensor(
-        x_ptr,
-        Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
-        ),
-    )
-    var w_tt = TileTensor(
-        w_ptr,
-        Layout(
-            (Idx(dim_int), Idx[width]()),
-            (Idx(w_c_stride), Idx(w_w_stride)),
-        ),
-    )
-    var state_tt = TileTensor(
-        state_ptr,
-        Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(state_len_int)),
-            (Idx(state_b_stride), Idx(state_c_stride), Idx(state_l_stride)),
-        ),
-    )
-    var o_tt = TileTensor(
-        o_ptr,
-        Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(o_b_stride), Idx(o_c_stride), Idx(o_l_stride)),
-        ),
-    )
     var compiled = ctx.compile_function[
         update_kernel[
             dtype,
@@ -115,10 +127,6 @@ def launch_update[
             apply_silu,
             has_state_indices,
             is_circular,
-            type_of(x_tt).LayoutType,
-            type_of(w_tt).LayoutType,
-            type_of(state_tt).LayoutType,
-            type_of(o_tt).LayoutType,
         ],
         update_kernel[
             dtype,
@@ -127,23 +135,30 @@ def launch_update[
             apply_silu,
             has_state_indices,
             is_circular,
-            type_of(x_tt).LayoutType,
-            type_of(w_tt).LayoutType,
-            type_of(state_tt).LayoutType,
-            type_of(o_tt).LayoutType,
         ],
     ]()
     stream.enqueue_function(
         compiled,
-        seqlen_int,
-        state_len_int,
-        x_tt.as_immut(),
-        w_tt.as_immut(),
+        Int32(dim_int),
+        Int32(seqlen_int),
+        Int32(state_len_int),
+        x_ptr,
+        w_ptr,
         b_ptr,
-        state_tt,
+        state_ptr,
         state_indices_ptr,
         cache_seqlens_ptr,
-        o_tt,
+        o_ptr,
+        Int32(x_b_stride),
+        Int32(x_c_stride),
+        Int32(x_l_stride),
+        Int32(w_c_stride),
+        Int32(state_b_stride),
+        Int32(state_c_stride),
+        Int32(state_l_stride),
+        Int32(o_b_stride),
+        Int32(o_c_stride),
+        Int32(o_l_stride),
         grid_dim=grid,
         block_dim=(kNThreadsUpdate,),
     )
