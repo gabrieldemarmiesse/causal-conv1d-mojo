@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Collect MI300X (gfx942) hardware counters for one kernel.
+#
+# Two counter groups are collected by default (rocprofv3 runs the bench
+# twice automatically — once per group):
+#
+#  Group 1 — instruction mix + GPU activity
+#    SQ_WAVES               wavefronts launched
+#    SQ_INSTS_VALU          VALU instructions retired
+#    SQ_INSTS_SALU          SALU instructions
+#    SQ_INSTS_VMEM_RD       vector global/buffer reads
+#    SQ_INSTS_VMEM_WR       vector global/buffer writes
+#    SQ_INSTS_LDS           LDS (shared-memory) instructions
+#    SQ_INSTS_FLAT          generic-address-space memory instructions
+#    GRBM_GUI_ACTIVE        GPU busy cycles (the "time" denominator)
+#
+#  Group 2 — cache / memory
+#    TCC_HIT_sum            L2 hits
+#    TCC_MISS_sum           L2 misses
+#    TCP_TCC_READ_REQ_sum   L1→L2 read requests
+#    SQ_ACCUM_PREV_HIRES    active cycles for occupancy
+#
+# Usage:
+#   ./tools/rocprof_pmc --kernel causal_conv1d_fwd_kernel \
+#         --kind fwd --shape 1,1024,2048,4 --iters 5
+#
+# IMPORTANT: rocprofv3 + Mojo's `DeviceContext` do not play together —
+# this tool defaults to --impl upstream. Use this for *upstream
+# reference numbers* (how many VALU / VMEM / LDS instructions upstream
+# uses per kernel); compare against the Mojo ISA dump from
+# `./tools/dump_isa --sub <sub>` for the Mojo side.
+
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(dirname "$here")"
+
+KERNEL_RE=""
+have_impl=false
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --kernel) KERNEL_RE="$2"; shift 2 ;;
+        --impl) have_impl=true; ARGS+=("$1" "$2"); shift 2 ;;
+        *) ARGS+=("$1"); shift ;;
+    esac
+done
+
+if [[ -z "$KERNEL_RE" ]]; then
+    echo "Usage: $0 --kernel <regex> [bench args...]" >&2
+    echo "  example: $0 --kernel causal_conv1d_fwd_kernel --kind fwd --shape 1,1024,2048,4 --iters 5" >&2
+    exit 2
+fi
+
+$have_impl || ARGS+=(--impl upstream)
+ARGS+=(--no-cache)
+
+outdir="$(mktemp -d /tmp/rocprof_pmc.XXXXXX)"
+pmc="$outdir/pmc.txt"
+cat > "$pmc" <<'PMC'
+pmc: SQ_WAVES SQ_INSTS_VALU SQ_INSTS_SALU SQ_INSTS_VMEM_RD SQ_INSTS_VMEM_WR SQ_INSTS_LDS SQ_INSTS_FLAT GRBM_GUI_ACTIVE
+pmc: TCC_HIT_sum TCC_MISS_sum TCP_TCC_READ_REQ_sum SQ_ACCUM_PREV_HIRES
+PMC
+
+exec flock /tmp/.gpu_bench_lock bash -c "
+    rocprofv3 -i '$pmc' --kernel-include-regex '$KERNEL_RE' -f csv -d '$outdir' -- \
+        '$repo/.venv/bin/python' '$repo/benchmarks/bench_gpu_kernel_time.py' $(printf ' %q' "${ARGS[@]}") \
+        2> '$outdir/rocprof.log'
+    rc=\$?
+    if [ \$rc -ne 0 ]; then
+        echo 'rocprofv3 exit \$rc — log tail:'
+        tail -30 '$outdir/rocprof.log'
+        exit \$rc
+    fi
+    echo
+    echo '--- rocprofv3 PMC results (averaged per kernel × counter) ---'
+    files=\$(find '$outdir' -name '*counter_collection.csv' 2>/dev/null | sort)
+    python3 - <<PYEOF
+import csv, glob, statistics
+from collections import defaultdict
+files = \"\"\"\${files}\"\"\".strip().split()
+agg = defaultdict(list)
+for f in files:
+    with open(f) as fp:
+        for r in csv.DictReader(fp):
+            kn = r.get('Kernel_Name','')
+            cn = r.get('Counter_Name','')
+            try: cv = float(r.get('Counter_Value','0'))
+            except: continue
+            short = kn[:60] + ('…' if len(kn) > 60 else '')
+            agg[(short, cn)].append(cv)
+# Print sorted by kernel then counter.
+for (kn, cn), vs in sorted(agg.items()):
+    mean = sum(vs)/len(vs)
+    print(f\"{kn:<60} {cn:<24} {mean:>14.1f}  (n={len(vs)})\")
+PYEOF
+    echo
+    echo 'Raw output: $outdir'
+"

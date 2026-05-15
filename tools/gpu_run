@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Run any GPU command serialised on /tmp/.gpu_bench_lock.
+#
+# Another agent is sharing this MI300X; flock blocks until the lock is
+# free and releases it on exit. Use this for *every* command that
+# exercises the GPU heavily (benches, ncu/rocprof, big pytest runs).
+#
+# Usage: ./tools/gpu_run <command> [args...]
+#   ./tools/gpu_run uv run python benchmarks/bench_gpu_kernel_time.py --kind fwd
+#   ./tools/gpu_run uv run pytest tests/test_causal_conv1d.py -k width4 -x
+
+set -euo pipefail
+exec flock /tmp/.gpu_bench_lock "$@"
