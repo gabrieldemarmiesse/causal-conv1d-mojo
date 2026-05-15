@@ -69,9 +69,10 @@ def test_update_short_burst(device, dtype, width):
 
 def test_update_decode_sequence_matches_full_forward(device, dtype, bias_present):
     """Roll the kernel one-token-at-a-time over a full sequence and the
-    concatenated outputs should match a single-shot causal_conv1d_fn
-    over the same input — bit-for-bit (both paths use fp32 internally
-    and round identically per element)."""
+    concatenated outputs should match a single-shot causal_conv1d_fn over
+    the same input. Both paths use fp32 internally and round identically
+    per element, so fp16/bf16 are bit-for-bit identical; fp32 can show a
+    single-ulp FMA-reorder delta (~5e-7) on cuda but never more."""
     B, D, L, W = 2, 16, 24, 4
     x = torch.randn(B, D, L, dtype=dtype, device=device)
     weight = torch.randn(D, W, dtype=dtype, device=device)
@@ -91,7 +92,8 @@ def test_update_decode_sequence_matches_full_forward(device, dtype, bias_present
         decoded.append(out_t)
     decoded_out = torch.cat(decoded, dim=-1)
 
-    assert _max_diff(full_out, decoded_out) < _FWD_TOL[dtype]
+    tol = 1e-6 if dtype == torch.float32 else 0.0
+    assert _max_diff(full_out, decoded_out) <= tol
 
 
 def test_update_circular_buffer_matches_ref(
