@@ -2,6 +2,17 @@ import pytest
 import torch
 
 
+# Make every test deterministic. Failures near the tolerance threshold
+# should be reproducible — without this, a flaky test would only fail
+# under whatever RNG state pytest happened to leave behind from the
+# previous test in the order.
+@pytest.fixture(autouse=True)
+def _seed_rng():
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(0)
+
+
 # Devices to run every test against. CPU is always available; CUDA is
 # parametrised in but skipped per-test if the box has no GPU. fp16/bf16
 # on CPU are supported on PyTorch 2.x — the native CPU kernel computes

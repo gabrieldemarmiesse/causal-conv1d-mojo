@@ -69,9 +69,10 @@ def test_update_short_burst(device, dtype, width):
 
 def test_update_decode_sequence_matches_full_forward(device, dtype, bias_present):
     """Roll the kernel one-token-at-a-time over a full sequence and the
-    concatenated outputs should match a single-shot causal_conv1d_fn
-    over the same input — bit-for-bit (both paths use fp32 internally
-    and round identically per element)."""
+    concatenated outputs should match a single-shot causal_conv1d_fn over
+    the same input. Both paths use fp32 internally and round identically
+    per element, so fp16/bf16 are bit-for-bit identical; fp32 can show a
+    single-ulp FMA-reorder delta (~5e-7) on cuda but never more."""
     B, D, L, W = 2, 16, 24, 4
     x = torch.randn(B, D, L, dtype=dtype, device=device)
     weight = torch.randn(D, W, dtype=dtype, device=device)
@@ -91,7 +92,8 @@ def test_update_decode_sequence_matches_full_forward(device, dtype, bias_present
         decoded.append(out_t)
     decoded_out = torch.cat(decoded, dim=-1)
 
-    assert _max_diff(full_out, decoded_out) < _FWD_TOL[dtype]
+    tol = 1e-6 if dtype == torch.float32 else 0.0
+    assert _max_diff(full_out, decoded_out) <= tol
 
 
 def test_update_circular_buffer_matches_ref(
@@ -208,7 +210,7 @@ def test_update_conv_state_indices(device, dtype):
 
 def test_update_padding_token(device, dtype):
     """conv_state_indices[b] < 0 marks a padding token: output zeros, state
-    untouched."""
+    untouched. Non-padding rows must match the standard reference."""
     pool_size = 4
     B, D, W = 3, 8, 4
     state_len = W - 1
@@ -229,6 +231,16 @@ def test_update_padding_token(device, dtype):
     untouched = (pool_before != pool).any(dim=(1, 2))
     assert untouched[0].item() and untouched[2].item()
     assert not untouched[1].item() and not untouched[3].item()
+
+    # Non-padding rows of the output and the touched pool slots must
+    # match a fresh-state reference run.
+    real_idx = torch.tensor([0, 2], dtype=torch.int64)
+    state_real = pool_before[indices.to(torch.int64)[real_idx]].clone()
+    out_ref_real = causal_conv1d_update_ref(x[real_idx], state_real, weight)
+    assert _max_diff(out[real_idx], out_ref_real) < _FWD_TOL[dtype]
+    assert (
+        _max_diff(pool[indices.to(torch.int64)[real_idx]], state_real) < _FWD_TOL[dtype]
+    )
 
 
 def test_update_state_too_small_raises():
