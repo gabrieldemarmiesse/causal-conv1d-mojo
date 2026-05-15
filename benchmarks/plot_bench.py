@@ -1,6 +1,8 @@
 """Run the per-kernel GPU-time benches (forward, forward+backward,
-single-step update) and emit docs/bench_forward.png,
-docs/bench_backward.png, and docs/bench_update.png.
+single-step update) and emit docs/bench_<op>__<device-slug>.png
+(e.g. ``bench_forward__nvidia_rtx_2000_ada_generation_laptop_gpu.png``,
+``bench_forward_cpu__intel_xeon_8480c.png``). The device suffix lets
+plots from multiple machines coexist in the same docs/ directory.
 
 Each impl is timed inside `torch.profiler` via CUPTI: warmup runs
 outside the profiler, then ITERS calls inside it, and we sum
@@ -12,6 +14,8 @@ wall-clock measurement at small shapes.
 
 from __future__ import annotations
 
+import platform
+import re
 import os
 import time
 from pathlib import Path
@@ -99,6 +103,23 @@ ITERS_UPDATE_CPU = 100
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 
 
+def _device_slug(name: str) -> str:
+    """Filename-safe lowercase rendering of a device name."""
+    return re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower() or "unknown"
+
+
+def _cpu_model() -> str:
+    """Best-effort human-readable CPU model (e.g. 'Intel(R) Xeon(R) ...')."""
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or platform.machine() or "cpu"
+
+
 def pytorch_fwd(x, weight, bias):
     seqlen = x.shape[-1]
     D, W = weight.shape
@@ -166,25 +187,51 @@ def bench_kernel_cpu(fn, warmup: int, iters: int) -> float:
     return min(samples) / 1_000.0
 
 
-def grouped_bar(labels, groups, *, title, out_path):
-    """Render a grouped bar chart.
+def grouped_bar(labels, groups, *, title, out_path, baseline_label):
+    """Render a grouped bar chart of speed *relative to* `baseline_label`.
 
-    `groups` is a list of (label, color, values) tuples, one per bar in
-    each cluster. Bars are centered on each x-tick and sized to fit
-    inside a 0.8-wide slot regardless of group count.
+    `groups` is a list of (label, color, values) tuples of absolute µs.
+    One group's label must match `baseline_label`; its values are the
+    denominator. Every plotted bar is `baseline_us / impl_us`, so the
+    baseline group is always 1.0 and higher = faster. The y-axis is
+    linear and capped at [0, 2].
     """
+    baseline_vals = next((v for lbl, _, v in groups if lbl == baseline_label), None)
+    if baseline_vals is None:
+        raise ValueError(f"baseline_label {baseline_label!r} not found in groups")
+
+    def _ratio(impl_vals):
+        return [(b / i) if (i and b) else 0.0 for b, i in zip(baseline_vals, impl_vals)]
+
+    norm_groups = [(lbl, color, _ratio(v)) for lbl, color, v in groups]
+
     n = len(labels)
-    n_bars = len(groups)
+    n_bars = len(norm_groups)
     x_pos = list(range(n))
     bw = 0.8 / n_bars
     offsets = [(i - (n_bars - 1) / 2) * bw for i in range(n_bars)]
     fig, ax = plt.subplots(figsize=(max(10, 0.9 * n + 2), 5))
-    for offset, (lbl, color, vals) in zip(offsets, groups):
-        ax.bar([p + offset for p in x_pos], vals, bw, label=lbl, color=color)
+    for offset, (lbl, color, vals) in zip(offsets, norm_groups):
+        # Cap visually-clipped bars at the ylim so they're still drawn,
+        # and annotate over-range values on top so the reader can see them.
+        capped = [min(v, 2.0) for v in vals]
+        bars = ax.bar([p + offset for p in x_pos], capped, bw, label=lbl, color=color)
+        for bar, raw, cap in zip(bars, vals, capped):
+            if raw > 2.0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    cap,
+                    f"{raw:.1f}×",
+                    ha="center",
+                    va="bottom",
+                    fontsize=7,
+                )
+    ax.axhline(1.0, color="black", linewidth=0.8, linestyle="--", alpha=0.6)
     ax.set_xticks(x_pos)
     ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
-    ax.set_ylabel("GPU kernel time per call (μs, lower is better)")
-    ax.set_yscale("log")
+    ax.set_ylabel(f"Speed relative to {baseline_label} (higher = faster)")
+    ax.set_yscale("linear")
+    ax.set_ylim(0.0, 2.0)
     ax.set_title(title)
     ax.legend(loc="upper left")
     ax.grid(axis="y", which="both", linestyle=":", alpha=0.4)
@@ -200,6 +247,7 @@ def main() -> None:
         raise SystemExit("CUDA required")
     g = torch.Generator(device="cpu").manual_seed(0)
     gpu_name = torch.cuda.get_device_name(0)
+    gpu_slug = _device_slug(gpu_name)
     labels = [f"({b},{d},{l},{w})" for b, d, l, w in SHAPES]
 
     cache = BaselineCache(__file__)
@@ -290,9 +338,7 @@ def main() -> None:
             impl="upstream",
             shape=(b, d, l, w),
             config=cfg_bwd,
-            run=lambda: bench_kernel(
-                make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD
-            ),
+            run=lambda: bench_kernel(make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD),
         )
         p_b = cache.get_or_run(
             impl="pytorch",
@@ -331,7 +377,8 @@ def main() -> None:
             f"causal_conv1d FORWARD — {gpu_name}\n"
             f"fp16, bias, silu, {ITERS_FWD} iters, GPU kernel time via torch.profiler"
         ),
-        out_path=DOCS / "bench_forward.png",
+        out_path=DOCS / f"bench_forward__{gpu_slug}.png",
+        baseline_label="upstream (Tri Dao CUDA)",
     )
     grouped_bar(
         labels,
@@ -345,7 +392,8 @@ def main() -> None:
             f"causal_conv1d FORWARD + BACKWARD — {gpu_name}\n"
             f"fp16, bias, silu, {ITERS_BWD} iters, GPU kernel time via torch.profiler"
         ),
-        out_path=DOCS / "bench_backward.png",
+        out_path=DOCS / f"bench_backward__{gpu_slug}.png",
+        baseline_label="upstream (Tri Dao CUDA)",
     )
 
     # ---- single-step update bench ----
@@ -430,7 +478,8 @@ def main() -> None:
             f"fp16, bias, silu, seqlen=1, state_len=3, "
             f"{ITERS_UPDATE} iters, GPU kernel time via torch.profiler"
         ),
-        out_path=DOCS / "bench_update.png",
+        out_path=DOCS / f"bench_update__{gpu_slug}.png",
+        baseline_label="upstream (Tri Dao CUDA)",
     )
 
     run_cpu_benches(g, cache)
@@ -443,6 +492,7 @@ def run_cpu_benches(g, cache) -> None:
     the pure-pytorch `causal_conv1d_ref` (and same for the update op).
     """
     cpu_threads = torch.get_num_threads()
+    cpu_slug = _device_slug(_cpu_model())
     labels = [f"({b},{d},{l},{w})" for b, d, l, w in CPU_SHAPES]
 
     fwd_mojo, fwd_ref, fwd_pt, fwd_pt_c = [], [], [], []
@@ -524,9 +574,7 @@ def run_cpu_benches(g, cache) -> None:
 
             return step
 
-        m_b = bench_kernel_cpu(
-            make_fwd_bwd_cpu("mojo"), WARMUP_BWD_CPU, ITERS_BWD_CPU
-        )
+        m_b = bench_kernel_cpu(make_fwd_bwd_cpu("mojo"), WARMUP_BWD_CPU, ITERS_BWD_CPU)
         r_b = cache.get_or_run(
             impl="causal_conv1d_ref",
             shape=(b, d, l, w),
@@ -576,7 +624,8 @@ def run_cpu_benches(g, cache) -> None:
             f"causal_conv1d FORWARD — CPU ({cpu_threads} threads)\n"
             f"fp16, bias, silu, {ITERS_FWD_CPU} iters, min wall-clock time"
         ),
-        out_path=DOCS / "bench_forward_cpu.png",
+        out_path=DOCS / f"bench_forward_cpu__{cpu_slug}.png",
+        baseline_label="causal_conv1d_ref (PyTorch reference)",
     )
     grouped_bar(
         labels,
@@ -590,7 +639,8 @@ def run_cpu_benches(g, cache) -> None:
             f"causal_conv1d FORWARD + BACKWARD — CPU ({cpu_threads} threads)\n"
             f"fp16, bias, silu, {ITERS_BWD_CPU} iters, min wall-clock time"
         ),
-        out_path=DOCS / "bench_backward_cpu.png",
+        out_path=DOCS / f"bench_backward_cpu__{cpu_slug}.png",
+        baseline_label="causal_conv1d_ref (PyTorch reference)",
     )
 
     # ---- single-step update bench (CPU) ----
@@ -665,7 +715,8 @@ def run_cpu_benches(g, cache) -> None:
             f"fp16, bias, silu, seqlen=1, state_len=3, "
             f"{ITERS_UPDATE_CPU} iters, min wall-clock time"
         ),
-        out_path=DOCS / "bench_update_cpu.png",
+        out_path=DOCS / f"bench_update_cpu__{cpu_slug}.png",
+        baseline_label="causal_conv1d_update_ref (PyTorch)",
     )
 
 

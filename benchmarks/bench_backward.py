@@ -96,7 +96,7 @@ def main() -> None:
     print(
         f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | "
         f"activation=silu | bias=True | iters={ITERS} (forward + backward) | "
-        f"GPU kernel time via torch.profiler\n"
+        f"kernel time via torch.profiler\n"
     )
 
     cache = BaselineCache(__file__)
