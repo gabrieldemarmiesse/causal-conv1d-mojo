@@ -22,7 +22,6 @@ from _baseline import BaselineCache
 from causal_conv1d import causal_conv1d_fn as upstream_fn
 
 
-
 # Wide sweep across realistic SSM shapes.
 # (batch, dim, seqlen). width=4 fixed (only width supported by the mojo path).
 SHAPES = [
@@ -121,7 +120,7 @@ def main() -> None:
     print(
         f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | "
         f"activation=silu | bias=True | width=4 | iters={ITERS} (fwd+bwd) | "
-        f"GPU kernel time via torch.profiler\n"
+        f"kernel time via torch.profiler\n"
     )
 
     header = (

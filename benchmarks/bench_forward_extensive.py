@@ -114,7 +114,7 @@ def main() -> None:
     print(
         f"GPU: {torch.cuda.get_device_name(0)} | dtype=fp16 | "
         f"activation=silu | bias=True | width=4 | iters={ITERS} (forward only) | "
-        f"GPU kernel time via torch.profiler\n"
+        f"kernel time via torch.profiler\n"
     )
     h = (
         f"{'shape (B, D, L)':>20} | "
