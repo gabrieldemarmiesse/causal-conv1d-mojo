@@ -9,23 +9,14 @@ resolution-markers = [
 [[package]]
 name = "causal-conv1d"
 version = "1.6.2.post1"
-source = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ninja" },
     { name = "packaging" },
     { name = "torch", version = "2.9.1+rocm6.4", source = { registry = "https://download.pytorch.org/whl/rocm6.4" }, marker = "sys_platform == 'linux'" },
     { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
 ]
-wheels = [
-    { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl", hash = "sha256:81f5e0cdf17f83814d3fc328ed1549affd9e61e05b0a812a6fdb7a247971f206" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "ninja" },
-    { name = "packaging" },
-    { name = "torch" },
-]
+sdist = { url = "https://files.pythonhosted.org/packages/63/5c/2403b8410122d159405c4bd8456340c7251c193358fa24d30cb273fb5048/causal_conv1d-1.6.2.post1.tar.gz", hash = "sha256:245e314ea21064ded7a5bf6b3b842b644aa6f92e45cecfe3e935629744c35ff4", size = 29434, upload-time = "2026-05-09T13:00:51.622Z" }
 
 [[package]]
 name = "causal-conv1d-mojo"
@@ -68,7 +59,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "causal-conv1d", url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" },
+    { name = "causal-conv1d" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "nvidia-cuda-nvcc-cu12", specifier = "==12.8.*" },
     { name = "packaging" },

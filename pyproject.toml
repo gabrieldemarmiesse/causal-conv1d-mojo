@@ -30,7 +30,7 @@ dev = [
     # `__file__` at import time to set MODULAR_NVPTX_COMPILER_PATH. See
     # src/causal_conv1d_mojo/__init__.py.
     "nvidia-cuda-nvcc-cu12==12.8.*",
-    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl",
+    "causal-conv1d",
     "wheel",
     "packaging",
     "setuptools>=70",
@@ -64,6 +64,9 @@ triton-rocm = [
 # `uv sync` installs `dev` by default; users who want bench wheels run
 # `uv sync --extra bench`.
 default-groups = ["dev"]
+# causal-conv1d's setup.py imports torch at build time to detect CUDA vs
+# HIP, so it needs the env's torch — not a fresh PEP-517 build env.
+no-build-isolation-package = ["causal-conv1d"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
