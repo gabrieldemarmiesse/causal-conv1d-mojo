@@ -8,15 +8,36 @@ upstream Tri Dao CUDA", with upstream as the moving target.
 
 - `src/causal_conv1d_mojo/`
   - `fwd/`, `bwd_full/`, `update/`: GPU kernels (one subpackage each).
-    Every subpackage has `kernel.mojo` (the device function),
-    `dispatch.mojo` (the Python/CPython entry, comptime dispatch tree,
-    `compile_function` + `enqueue_function` calls), `common.mojo`
-    (shared constants/helpers), and `__init__.py` (Python wrapper that
-    lazy-imports `dispatch`). `mojo.importer` compiles each subpackage
-    to a `.so` on first import; built artefacts cache under
-    `<subpkg>/__mojocache__/`.
-  - `fwd_cpu/`, `bwd_full_cpu/`, `update_cpu/`: CPU fallbacks. Same
-    layout, used by tests as a portable reference.
+    Pure JIT-on-first-use — there is no `dispatch.mojo` and no AOT
+    comptime sweep. Every subpackage has:
+    - `kernel.mojo` (the device function — comptime-parameterized
+      over dtype, width, has_bias, ...).
+    - `common.mojo` (shared constants/helpers).
+    - `launch.mojo` (`launch_<sub>[...]`: configures the
+      `DeviceContext`, builds the `TileTensor` layouts, calls
+      `compile_function` + `enqueue_function`, parameterised by the
+      full comptime tuple).
+    - `_jit.py` (Python: extracts the config tuple from the call's
+      runtime args, formats a readable mod name, templates a small
+      single-variant `.mojo` source that calls `launch_<sub>` with the
+      params hard-coded, and delegates to the shared cache+compile+load
+      helper).
+    - `__init__.py` (Python wrapper that builds the args tuple and
+      calls `_jit.call_<sub>(args)`).
+    The shared codegen → `mojo build` → `dlopen` plumbing lives in
+    `_jit_common.py` at the package root (`compile_and_load_variant`).
+    Per-variant artefacts cache under
+    `$XDG_CACHE_HOME/causal_conv1d_mojo/<sub>/<mod_name>/`, where
+    `<mod_name>` is a readable string like
+    `fp16_w4_hb0_hs0_hi0_silu0_contig1_aligned1`.
+  - `fwd_cpu/`, `bwd_full_cpu/`, `update_cpu/`: CPU fallbacks. These
+    still use the old AOT model — `__init__.py` does
+    `from causal_conv1d_mojo.<sub>_cpu import dispatch` which triggers
+    `mojo.importer` to build the whole `dispatch.mojo` AOT sweep on
+    first import, caching under `<sub>_cpu/__mojocache__/`. The CPU
+    trees are small enough that AOT cost is fine.
+  - `_jit_common.py`: shared variant cache + compile + load helper used
+    by the three GPU subpackages.
   - `_fn.py`, `_update.py`, `reference.py`: Python facades + pure-PyTorch
     reference implementations.
 - `tests/`: pytest suite. Run with `pixi run -e bench pytest` (the
@@ -46,12 +67,20 @@ pixi run -e bench python benchmarks/bench_gpu_kernel_time.py
 pixi run -e bench plot-bench
 ```
 
-If you change `.mojo` source between envs, clear the cache (cached `.so`s
+If you change `.mojo` source between envs, clear the caches (cached `.so`s
 have the *build env's* lib path baked into RUNPATH):
 
 ```bash
+# CPU subpackages' AOT cache (only ever populated by `*_cpu` imports).
 find src -name __mojocache__ -type d -exec rm -rf {} +
+# GPU subpackages' per-variant JIT cache.
+rm -rf ~/.cache/causal_conv1d_mojo/
 ```
+
+The GPU JIT cache is content-addressed (`<mod_name>.hash-<srchash>.so`),
+so editing `kernel.mojo`/`launch.mojo`/`common.mojo` automatically busts
+the cache for every variant that depends on them on next compile — you
+usually only need to nuke it when switching envs.
 
 ## Measuring kernel performance properly
 
@@ -194,14 +223,17 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
    0`, drop the bounds-checked tail-chunk path entirely. Halves the
    compiled kernel size and avoids the predicated stores ptxas can't
    merge.
-5. **Comptime dispatch tree, runtime selector.** All
-   (dtype × width × has_bias × has_seq_idx × has_initial_states ×
-   apply_silu × contig_inner × aligned_seq) leaves compile to their own
-   cubin embedded in `.rodata`; the dispatcher walks the tree and picks
-   one. The mutually-exclusive `seq_idx` + `initial_states` combo is
-   `comptime if`-filtered out of the tree so we don't waste a cubin on
-   it. `product` from `std.itertools` takes 2/3/4 iterables; for ≥5,
-   nest the loops.
+5. **One cubin per (dtype × width × has_bias × has_seq_idx ×
+   has_initial_states × apply_silu × contig_inner × aligned_seq) leaf,
+   compiled JIT on first use.** Each leaf compiles to its own
+   single-variant `.so` via `_jit_common.compile_and_load_variant`,
+   cached at `~/.cache/causal_conv1d_mojo/<sub>/<mod_name>/`. The
+   Python-side `_jit.py` decides the config from runtime args; the
+   generated `variant.mojo` is ~30 lines and just calls
+   `launch_<sub>[concrete params](...)` from `launch.mojo`. First call
+   per (config, machine) pays ~1-3 s for `mojo build`; every later call
+   in this or any future process hits the on-disk cache. There is no
+   comptime sweep — each variant is its own translation unit.
 6. **`Atomic[dtype, scope="device"].fetch_add[ordering=RELAXED]`** in
    the bwd's reduce step. Default atomics on Mojo lower to
    `ATOMG.E.ADD.F32.STRONG.SYS` (system-scope, sequentially consistent
@@ -217,9 +249,11 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
    `launch__waves_per_multiprocessor` with `ncu`.
 3. If all shapes regress → check the PTX for the relevant variant.
    Compare instruction counts (`ld.global`, `st.global`, `st.shared`,
-   `ld.shared`, `bar.sync`) to a known-good version. The dispatcher's
-   `dump_asm="/tmp/mojo_fwd_%.ptx"` knob is the fast way to capture
-   them; remember to disable it after.
+   `ld.shared`, `bar.sync`) to a known-good version. Add a temporary
+   `dump_asm=StaticString("/tmp/mojo_<sub>_%.ptx")` to the
+   `compile_function[...]` call inside `<sub>/launch.mojo`, trigger the
+   variant once (e.g. via a bench/test run), and remove the knob
+   afterwards. Don't commit it.
 4. The vendored Tri Dao source at `causal-conv1d/csrc/` is the
    reference for every algorithmic choice (chunk size, smem layout,
    gating order). When in doubt, mirror it.
@@ -233,10 +267,11 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
   `ptr + i` for offsets.
 - `comptime for x, y, ... in product(...)` only handles up to 4
   iterables. Nest loops or call `product` recursively.
-- The `mojo build` cache (`__mojocache__/`) bakes the *build env's*
-  modular-lib path into the `.so`'s `RUNPATH`. If you switch pixi envs
-  the runtime loader can't find `libKGENCompilerRTShared.so`. Clear
-  the cache when changing envs.
+- The `mojo build` caches (CPU AOT `__mojocache__/` and GPU JIT
+  `~/.cache/causal_conv1d_mojo/`) bake the *build env's* modular-lib
+  path into each `.so`'s `RUNPATH`. If you switch pixi envs the runtime
+  loader can't find `libKGENCompilerRTShared.so`. Clear both caches
+  when changing envs (see the "Running the benches" section above).
 - `dump_asm` paths must be `StaticString(...)`-wrapped; bare string
   literals can fail the `Variant[Bool, Path, StaticString, ...]` coerce.
 
@@ -244,8 +279,11 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
 
 - Tests live under `tests/` and use the pure-PyTorch
   `causal_conv1d_ref` / `causal_conv1d_update_ref` as ground truth.
-  When changing a kernel, run `pixi run -e bench pytest` (1600+ tests,
-  ~20s). Don't skip it.
+  When changing a kernel, run `pixi run -e bench pytest` — 1600+ tests,
+  ~30 s warm (every variant the test matrix touches is cached). Cold
+  the first run is ~30 min because the JIT has to compile ~270 unique
+  fwd+bwd+update variants once each. Don't skip the run on kernel
+  edits; cache invalidation is automatic.
 - The `ref` Python implementations are the *spec*; do not change them
   to chase a perf bug — fix the kernel.
 - Don't commit `dump_asm=...` in `compile_function` calls. It's a
