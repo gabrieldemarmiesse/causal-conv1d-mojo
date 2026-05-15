@@ -10,26 +10,7 @@ dependencies = [
     "torch==2.8.0",
     "mojo-compiler==1.0.0b1",
     "mojo-compiler-mojo-libs==1.0.0b1",
-    "setuptools>=70",
-    "wheel",
-    "packaging",
     "numpy>=2.4.4",
-    # Provides an external `ptxas` so MAX 26.3+ (linked against CUDA-13's
-    # libnvptxcompiler) can run on NVIDIA driver <580. The package itself
-    # exposes a real `nvidia.cuda_nvcc` Python module; we read its
-    # `__file__` at import time to set MODULAR_NVPTX_COMPILER_PATH. See
-    # src/causal_conv1d_mojo/__init__.py.
-    "nvidia-cuda-nvcc-cu12==12.8.*",
-    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl",
-]
-
-# Upstream `causal-conv1d` (Tri Dao's CUDA op) is a C++ extension whose
-# build-from-source takes several minutes; we don't need it for correctness
-# (tests use the pure-pytorch reference in `tests/_reference.py`). It's only
-# pulled in when benchmarking us against the upstream kernel.
-[project.optional-dependencies]
-bench = [
-    "ninja",
 ]
 
 [build-system]
@@ -42,6 +23,16 @@ dev = [
     "pytest>=9.0.3",
     "ruff",
     "pre-commit",
+    # Provides an external `ptxas` so MAX 26.3+ (linked against CUDA-13's
+    # libnvptxcompiler) can run on NVIDIA driver <580. The package itself
+    # exposes a real `nvidia.cuda_nvcc` Python module; we read its
+    # `__file__` at import time to set MODULAR_NVPTX_COMPILER_PATH. See
+    # src/causal_conv1d_mojo/__init__.py.
+    "nvidia-cuda-nvcc-cu12==12.8.*",
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl",
+    "wheel",
+    "packaging",
+    "setuptools>=70",
 ]
 
 [tool.uv]
