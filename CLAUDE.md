@@ -274,17 +274,3 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
   when changing envs (see the "Running the benches" section above).
 - `dump_asm` paths must be `StaticString(...)`-wrapped; bare string
   literals can fail the `Variant[Bool, Path, StaticString, ...]` coerce.
-
-## Conventions
-
-- Tests live under `tests/` and use the pure-PyTorch
-  `causal_conv1d_ref` / `causal_conv1d_update_ref` as ground truth.
-  When changing a kernel, run `pixi run -e bench pytest` — 1600+ tests,
-  ~30 s warm (every variant the test matrix touches is cached). Cold
-  the first run is ~30 min because the JIT has to compile ~270 unique
-  fwd+bwd+update variants once each. Don't skip the run on kernel
-  edits; cache invalidation is automatic.
-- The `ref` Python implementations are the *spec*; do not change them
-  to chase a perf bug — fix the kernel.
-- Don't commit `dump_asm=...` in `compile_function` calls. It's a
-  debug-only knob.
