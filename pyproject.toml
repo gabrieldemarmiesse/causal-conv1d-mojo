@@ -14,7 +14,7 @@ dependencies = [
     "wheel",
     "packaging",
     "numpy>=2.4.4",
-    #"causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl", 
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl", 
 
 ]
 
@@ -40,6 +40,7 @@ build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
+    "matplotlib>=3.10.9",
     "pytest>=9.0.3",
 ]
 
