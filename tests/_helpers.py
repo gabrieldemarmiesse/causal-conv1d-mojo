@@ -36,6 +36,8 @@ def _expected(x, weight, bias, activation):
 
 
 def _max_diff(a, b):
+    assert torch.isfinite(a).all(), "actual contains NaN or Inf"
+    assert torch.isfinite(b).all(), "reference contains NaN or Inf"
     return (a.float() - b.float()).abs().max().item()
 
 
