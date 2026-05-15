@@ -10,15 +10,44 @@ Caller responsibilities:
 - Bail out on any zero-sized dim (`batch == 0 || dim == 0 || seqlen == 0`)
   *before* calling — DeviceContext + enqueue_function reject grid_dim==0.
 - Pass the comptime params that select the right kernel specialisation.
+
+On AMD specifically, `var ctx = DeviceContext()` per call ends up
+calling `hipStreamCreate` + matching `hipStreamDestroy` each time
+(visible in torch.profiler traces — these CPU calls bleed into
+`self_device_time_total` for the surrounding kernel and inflate the
+measured per-call time). The Python wrapper caches a "context handle"
+the first time a variant is loaded and passes it in as
+`ctx_handle_addr`; we wrap that via the non-owning DeviceContext
+constructor so no fresh hipStream is created per call. Matches the
+pattern from `update/` and `bwd_full/`.
 """
 
 from std.gpu.host import DeviceContext
+from std.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
 
 from kernel import fwd_kernel
 from common import kNThreads
+
+
+def acquire_ctx_handle() raises -> Int:
+    """Create a DeviceContext, retain its handle, and leak the wrapper.
+
+    The Python side calls this once per variant and caches the returned
+    integer. The handle stays alive for the duration of the process —
+    the matching release happens at process exit (or never).
+
+    Returns the address of the underlying C++ DeviceContext as an Int.
+    """
+    var ctx = DeviceContext()
+    # Retain to bump the refcount so `ctx.__del__` (when this function
+    # returns) doesn't free the underlying resource. The caller is now
+    # responsible for the extra refcount.
+    ctx._retain()
+    var raw_ptr = ctx._handle.value()
+    return Int(raw_ptr)
 
 
 def launch_fwd[
@@ -55,8 +84,15 @@ def launch_fwd[
     initial_states_c_stride: Int,
     initial_states_l_stride: Int,
     stream_handle_addr: Int,
+    ctx_handle_addr: Int,
 ) raises:
-    var ctx = DeviceContext()
+    # Reconstruct a non-owning DeviceContext from the cached handle —
+    # avoids the hipStreamCreate/Destroy that would happen with the
+    # default `DeviceContext()` constructor each call.
+    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutExternalOrigin](
+        unsafe_from_address=ctx_handle_addr
+    )
+    var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
