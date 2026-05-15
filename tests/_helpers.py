@@ -19,10 +19,28 @@ from causal_conv1d_mojo import causal_conv1d_ref
 # Per-dtype tolerances reused by every test file.
 _FWD_TOL = {torch.float16: 2e-2, torch.bfloat16: 2e-1, torch.float32: 1e-4}
 _DX_TOL = {torch.float16: 1e-1, torch.bfloat16: 5e-1, torch.float32: 1e-3}
-# dweight/dbias are sums over B*L terms — same fp32 accumulator on all
-# paths, so the only delta is the cast back to the input dtype at the
-# boundary. fp32 keeps the full accumulator so the tolerance collapses.
-_DW_TOL = {torch.float16: 1.0, torch.bfloat16: 2.0, torch.float32: 1e-2}
+# dweight/dbias are sums over B*L terms whose magnitude scales with
+# sqrt(B*L), so a flat absolute bound is either too tight at large
+# shapes or too loose at small ones. Use (atol, rtol) and check against
+# atol + rtol * ||ref||_inf so a kernel that's systematically off by
+# ~4x still fails. Sized to ~3x headroom over the worst observed diff
+# at seed=0 across the test matrix.
+_DW_TOL = {
+    torch.float16: (2e-2, 2e-3),
+    torch.bfloat16: (5e-2, 1e-2),
+    torch.float32: (1e-4, 5e-6),
+}
+
+
+def _assert_dw_close(actual, ref, dtype, *, name="dw"):
+    """Relative-to-||ref||_inf max-diff check for reduction grads."""
+    atol, rtol = _DW_TOL[dtype]
+    norm = ref.detach().float().abs().max().item()
+    bound = atol + rtol * norm
+    diff = _max_diff(actual, ref)
+    assert diff < bound, (
+        f"{name} max_diff={diff:.3e} (bound={bound:.3e}, ||ref||_inf={norm:.3e})"
+    )
 
 
 def _make_bias(D, *, dtype, device, present, requires_grad=False):

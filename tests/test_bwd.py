@@ -17,8 +17,8 @@ import torch
 import causal_conv1d_mojo
 
 from _helpers import (
-    _DW_TOL,
     _DX_TOL,
+    _assert_dw_close,
     _make_bias,
     _max_diff,
     _ref_grads,
@@ -43,9 +43,9 @@ def test_width_backward(device, dtype, width, bias_present):
 
     dx_ref, dw_ref, db_ref = _ref_grads(x, weight, bias, dout, "silu")
     assert _max_diff(x.grad, dx_ref) < _DX_TOL[dtype]
-    assert _max_diff(weight.grad, dw_ref) < _DW_TOL[dtype]
+    _assert_dw_close(weight.grad, dw_ref, dtype, name="dw")
     if bias_present:
-        assert _max_diff(bias.grad, db_ref) < _DW_TOL[dtype]
+        _assert_dw_close(bias.grad, db_ref, dtype, name="db")
 
 
 # ===---------- backward / autograd ----------=== #
@@ -72,13 +72,9 @@ def test_backward_matches_pytorch_ref(device, dtype, shape, activation, bias_pre
     assert _max_diff(x.grad, dx_ref) < _DX_TOL[dtype], (
         f"dx max_diff={_max_diff(x.grad, dx_ref)}"
     )
-    assert _max_diff(weight.grad, dw_ref) < _DW_TOL[dtype], (
-        f"dw max_diff={_max_diff(weight.grad, dw_ref)} (sums over B*L={B * L} terms)"
-    )
+    _assert_dw_close(weight.grad, dw_ref, dtype, name=f"dw (B*L={B * L})")
     if bias_present:
-        assert _max_diff(bias.grad, db_ref) < _DW_TOL[dtype], (
-            f"db max_diff={_max_diff(bias.grad, db_ref)} (sums over B*L={B * L} terms)"
-        )
+        _assert_dw_close(bias.grad, db_ref, dtype, name=f"db (B*L={B * L})")
     else:
         assert bias is None and db_ref is None
 
@@ -135,9 +131,9 @@ def test_final_states_backward(device, dtype, width, bias_present):
     assert _max_diff(x.grad, dx_ref) < _DX_TOL[dtype], (
         f"dx max_diff={_max_diff(x.grad, dx_ref)}"
     )
-    assert _max_diff(weight.grad, dw_ref) < _DW_TOL[dtype]
+    _assert_dw_close(weight.grad, dw_ref, dtype, name="dw")
     if bias_present:
-        assert _max_diff(bias.grad, db_ref) < _DW_TOL[dtype]
+        _assert_dw_close(bias.grad, db_ref, dtype, name="db")
 
 
 # ===---------- initial_states backward ----------=== #
@@ -184,13 +180,9 @@ def test_initial_states_backward(device, dtype, width, bias_present):
     assert _max_diff(x.grad, x_ref.grad) < _DX_TOL[dtype], (
         f"dx max_diff={_max_diff(x.grad, x_ref.grad)}"
     )
-    assert _max_diff(weight.grad, w_ref.grad) < _DW_TOL[dtype], (
-        f"dw max_diff={_max_diff(weight.grad, w_ref.grad)}"
-    )
+    _assert_dw_close(weight.grad, w_ref.grad, dtype, name="dw")
     if bias_present:
-        assert _max_diff(bias.grad, b_ref.grad) < _DW_TOL[dtype], (
-            f"db max_diff={_max_diff(bias.grad, b_ref.grad)}"
-        )
+        _assert_dw_close(bias.grad, b_ref.grad, dtype, name="db")
     # dinitial_states correctness — main feature. Tighter tolerance than
     # dweight since the sum is over much fewer terms (W-1, not B*L).
     assert _max_diff(init.grad, init_ref.grad) < _DX_TOL[dtype], (
@@ -261,13 +253,9 @@ def test_seq_idx_backward(device, dtype, seq_idx_pattern, activation, bias_prese
     assert _max_diff(x.grad, dx_ref) < _DX_TOL[dtype], (
         f"dx max_diff={_max_diff(x.grad, dx_ref)}, pattern={seq_idx_pattern}"
     )
-    assert _max_diff(weight.grad, dw_ref) < _DW_TOL[dtype], (
-        f"dw max_diff={_max_diff(weight.grad, dw_ref)}, pattern={seq_idx_pattern}"
-    )
+    _assert_dw_close(weight.grad, dw_ref, dtype, name=f"dw[{seq_idx_pattern}]")
     if bias_present:
-        assert _max_diff(bias.grad, db_ref) < _DW_TOL[dtype], (
-            f"db max_diff={_max_diff(bias.grad, db_ref)}, pattern={seq_idx_pattern}"
-        )
+        _assert_dw_close(bias.grad, db_ref, dtype, name=f"db[{seq_idx_pattern}]")
 
 
 # ===---------- zero-sized tensors ----------=== #
