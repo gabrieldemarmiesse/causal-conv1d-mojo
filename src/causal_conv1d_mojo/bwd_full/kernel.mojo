@@ -7,13 +7,24 @@ block reduction helpers it depends on.
 
 from std.gpu import block_idx, thread_idx, barrier
 from std.gpu.memory import AddressSpace
-from std.math import ceildiv, exp
+from std.gpu.primitives.warp import shuffle_xor
+from std.math import ceildiv, exp, recip
 from std.memory import stack_allocation
 from std.atomic import Atomic, Ordering
 from std.sys import llvm_intrinsic
+from std.sys.info import is_nvidia_gpu
 from layout import TileTensor, TensorLayout, Idx, Coord
 
 from common import kNThreads
+
+
+# Atomic scope for the gradient reduce step. CUDA's `atomicAdd(...)`
+# is GPU-scope, relaxed — the LLVM syncscope name for that is "device"
+# on NVPTX and "agent" on AMDGPU. Picking the wrong one fails to lower
+# with "Unsupported non-inclusive atomic synchronization scope" on AMD.
+alias kAtomicScope: StaticString = (
+    "device" if is_nvidia_gpu() else "agent"
+)
 
 
 @always_inline
@@ -28,9 +39,14 @@ def _rcp_approx_f32(x: Float32) -> Float32:
     at fp16-ish precision (more than enough for the silu sigmoid
     backward, whose result is then multiplied by an fp16/bf16 dout).
     On the fwd kernel this was the largest single perf win (1.25x →
-    1.00x ratio).
+    1.00x ratio). The intrinsic is nvvm-only; on AMD targets we fall
+    back to `recip()` (which lowers to `v_rcp_f32` on amdgcn — already
+    a fast approximate reciprocal).
     """
-    return llvm_intrinsic["llvm.nvvm.rcp.approx.ftz.f", Float32](x)
+    comptime if is_nvidia_gpu():
+        return llvm_intrinsic["llvm.nvvm.rcp.approx.ftz.f", Float32](x)
+    else:
+        return recip(x)
 
 
 @always_inline
@@ -43,11 +59,16 @@ def _shfl_xor_f32(val: Float32, offset: UInt32) -> Float32:
     diff vs. upstream's bwd showed 45 `CALL.REL.NOINC` to that helper. By
     issuing the LLVM intrinsic from a single small leaf and force-inlining
     every wrapper around it, ptxas stops outlining and generates the bare
-    SHFL.BFLY (matching upstream).
+    SHFL.BFLY (matching upstream). The nvvm intrinsic is NVIDIA-only;
+    on AMD we use the portable `gpu.warp.shuffle_xor` (lowers to
+    `ds_bpermute_b32` on amdgcn).
     """
-    return llvm_intrinsic["llvm.nvvm.shfl.sync.bfly.f32", Float32](
-        Int32(-1), val, offset, Int32(31)
-    )
+    comptime if is_nvidia_gpu():
+        return llvm_intrinsic["llvm.nvvm.shfl.sync.bfly.f32", Float32](
+            Int32(-1), val, offset, Int32(31)
+        )
+    else:
+        return shuffle_xor(val, offset)
 
 
 @always_inline
@@ -683,7 +704,7 @@ def bwd_full_kernel[
                         local_dweight[k] += dpre[t] * is_v
 
     # === Phase 4: block-reduce dweight, dbias and atomic-add to global ===
-    # `scope="device"` + `ordering=MONOTONIC` is the same memory model as
+    # `scope="agent"` + `ordering=MONOTONIC` is the same memory model as
     # CUDA's `atomicAdd(...)` — relaxed, GPU-scope. The default
     # `Atomic.fetch_add(...)` lowers to `ATOMG.E.ADD.F32.STRONG.SYS`, a
     # *system-scope, sequentially-consistent* atomic that drains L2 and
@@ -715,13 +736,13 @@ def bwd_full_kernel[
         if tidx == 0:
 
             comptime for k in range(width):
-                _ = Atomic[DType.float32, scope="device"].fetch_add[
+                _ = Atomic[DType.float32, scope=kAtomicScope].fetch_add[
                     ordering=Ordering.RELAXED
                 ](
                     dweight_acc_ptr + channel_id * width + k,
                     block_red[k],
                 )
-            _ = Atomic[DType.float32, scope="device"].fetch_add[
+            _ = Atomic[DType.float32, scope=kAtomicScope].fetch_add[
                 ordering=Ordering.RELAXED
             ](dbias_acc_ptr + channel_id, block_red[width])
     else:
@@ -731,7 +752,7 @@ def bwd_full_kernel[
         if tidx == 0:
 
             comptime for k in range(width):
-                _ = Atomic[DType.float32, scope="device"].fetch_add[
+                _ = Atomic[DType.float32, scope=kAtomicScope].fetch_add[
                     ordering=Ordering.RELAXED
                 ](
                     dweight_acc_ptr + channel_id * width + k,
