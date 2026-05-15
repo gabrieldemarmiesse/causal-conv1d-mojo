@@ -8,6 +8,18 @@ call time, compiles it via ``mojo build``, and caches the resulting
 
 Shared codegen + compile + load + cache plumbing lives in
 ``causal_conv1d_mojo._jit_common``.
+
+Performance note (AMD-specific): The Mojo `DeviceContext()`
+constructor issues `hipStreamCreate` and the matching `__del__`
+issues `hipStreamDestroy`. At small-batch shapes the bwd kernel is
+only ~6-10 us of GPU work, so per-call stream churn shows up in
+torch.profiler. Each variant exposes a
+``causal_conv1d_bwd_full_acquire_ctx`` entry point; the first call
+from Python invokes it to obtain a process-lifetime DeviceContext
+handle (refcount-retained so the wrapper destructor is a no-op), and
+caches it. Subsequent dispatches pass that handle in to
+`launch_bwd_full`, which wraps it via the doc-hidden non-owning
+constructor — no new hipStream per call.
 """
 
 from __future__ import annotations
@@ -32,8 +44,10 @@ _KNTHREADS = 128
 
 def call_bwd_full(args: tuple) -> None:
     """JIT-compile (if needed) and dispatch a single bwd_full call."""
-    variant_fn = _get_variant_fn(_config_from_args(args))
-    variant_fn(*args)
+    variant_fn, ctx_handle = _get_variant_fn(_config_from_args(args))
+    # Tack ctx_handle on as the 40th positional arg — the variant
+    # entry point destructures `args[39]` for it.
+    variant_fn(*args, ctx_handle)
 
 
 def _config_from_args(args: tuple) -> tuple:
@@ -85,8 +99,10 @@ def _mod_name(config: tuple) -> str:
 
 @lru_cache(maxsize=None)
 def _get_variant_fn(config: tuple):
+    import sys
+
     mod_name = _mod_name(config)
-    return compile_and_load_variant(
+    fn = compile_and_load_variant(
         subpkg="bwd_full",
         source_dir=_BWD_DIR,
         shared_files=("kernel.mojo", "common.mojo", "launch.mojo"),
@@ -94,6 +110,13 @@ def _get_variant_fn(config: tuple):
         variant_source=_generate_variant_source(mod_name, config),
         entry_point_name="causal_conv1d_bwd_full_variant",
     )
+    # The shared loader stashes the loaded variant module in
+    # sys.modules so we can grab the one-shot ctx-handle helper without
+    # re-importing the .so.
+    module = sys.modules[mod_name]
+    acquire = getattr(module, "causal_conv1d_bwd_full_acquire_ctx")
+    ctx_handle = int(acquire(()))
+    return fn, ctx_handle
 
 
 def _generate_variant_source(mod_name: str, config: tuple) -> str:
@@ -119,7 +142,21 @@ from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from launch import launch_bwd_full
+from launch import launch_bwd_full, acquire_ctx_handle
+
+
+def causal_conv1d_bwd_full_acquire_ctx(
+    mut py_self: PythonObject,
+    mut args: PythonObject,
+) raises -> PythonObject:
+    """Create + retain a process-lifetime DeviceContext.
+
+    Called once per variant from the Python side; the returned address
+    is reused for every subsequent `causal_conv1d_bwd_full_variant`
+    call to avoid `hipStreamCreate`/`Destroy` per launch.
+    """
+    var addr: Int = acquire_ctx_handle()
+    return PythonObject(addr)
 
 
 def causal_conv1d_bwd_full_variant(
@@ -159,6 +196,7 @@ def causal_conv1d_bwd_full_variant(
     var dinitial_states_b_stride: Int = Int(py=args[36])
     var dinitial_states_c_stride: Int = Int(py=args[37])
     var dinitial_states_l_stride: Int = Int(py=args[38])
+    var ctx_handle_addr: Int = Int(py=args[39])
 
     if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
         return PythonObject(None)
@@ -207,6 +245,7 @@ def causal_conv1d_bwd_full_variant(
         dinitial_states_c_stride,
         dinitial_states_l_stride,
         stream_handle_addr,
+        ctx_handle_addr,
     )
     return PythonObject(None)
 
@@ -216,6 +255,7 @@ def PyInit_{mod_name}() -> PythonObject:
     try:
         var m = PythonModuleBuilder("{mod_name}")
         m.def_py_function[causal_conv1d_bwd_full_variant]("causal_conv1d_bwd_full_variant")
+        m.def_py_function[causal_conv1d_bwd_full_acquire_ctx]("causal_conv1d_bwd_full_acquire_ctx")
         return m.finalize()
     except e:
         abort(String("failed to create Python module: ", e))
