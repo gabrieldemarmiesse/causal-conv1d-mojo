@@ -7,10 +7,11 @@ readme = "README.md"
 # Bump once those land.
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "torch==2.8.0",
+    "torch",
     "mojo-compiler==1.0.0b1",
     "mojo-compiler-mojo-libs==1.0.0b1",
     "numpy>=2.4.4",
+    "pytorch-triton-rocm",
 ]
 
 [build-system]
@@ -34,6 +35,30 @@ dev = [
     "packaging",
     "setuptools>=70",
 ]
+
+
+
+# ---------------------------------------------------------
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.4"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+# ROCm support relies on both Triton packages, which should also be installed from
+# the PyTorch index (and included in `project.dependencies`).
+pytorch-triton-rocm = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+triton-rocm = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+
+# ---------------------------------------------------------
 
 [tool.uv]
 # `uv sync` installs `dev` by default; users who want bench wheels run
