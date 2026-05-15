@@ -146,26 +146,42 @@ def launch_fwd[
             block_dim=(kNThreads,),
         )
 
+    # 32-bit strides: the kernel's address arithmetic
+    # (`batch*b_stride + chan*c_stride + seq*l_stride`) drops from i64
+    # multiplies (`s_mul_hi_u32 + s_mul_i32 + s_add`) to a single i32
+    # `s_mul_i32`. Saves ~7 SGPRs of address setup per block, which
+    # the small-shape regime is sensitive to. Mirrors modular's own
+    # `causal_conv1d.mojo` (all stride args are `UInt32`) and upstream
+    # Tri Dao (uses int for ConvParamsBase stride fields). 32-bit
+    # is fine — strides this large would need a single buffer >16GB.
     comptime if contig_inner:
         var x_tt = TileTensor(
             x_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(x_b_stride), Idx(x_c_stride), Idx[1]()),
+                (
+                    Idx(UInt32(x_b_stride)),
+                    Idx(UInt32(x_c_stride)),
+                    Idx[1](),
+                ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
                 (Idx(dim_int), Idx[width]()),
-                (Idx(w_c_stride), Idx[1]()),
+                (Idx(UInt32(w_c_stride)), Idx[1]()),
             ),
         )
         var o_tt = TileTensor(
             o_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(o_b_stride), Idx(o_c_stride), Idx[1]()),
+                (
+                    Idx(UInt32(o_b_stride)),
+                    Idx(UInt32(o_c_stride)),
+                    Idx[1](),
+                ),
             ),
         )
         launch(x_tt.as_immut(), w_tt.as_immut(), o_tt)
@@ -174,21 +190,29 @@ def launch_fwd[
             x_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+                (
+                    Idx(UInt32(x_b_stride)),
+                    Idx(UInt32(x_c_stride)),
+                    Idx(UInt32(x_l_stride)),
+                ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
                 (Idx(dim_int), Idx[width]()),
-                (Idx(w_c_stride), Idx(w_w_stride)),
+                (Idx(UInt32(w_c_stride)), Idx(UInt32(w_w_stride))),
             ),
         )
         var o_tt = TileTensor(
             o_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(o_b_stride), Idx(o_c_stride), Idx(o_l_stride)),
+                (
+                    Idx(UInt32(o_b_stride)),
+                    Idx(UInt32(o_c_stride)),
+                    Idx(UInt32(o_l_stride)),
+                ),
             ),
         )
         launch(x_tt.as_immut(), w_tt.as_immut(), o_tt)
