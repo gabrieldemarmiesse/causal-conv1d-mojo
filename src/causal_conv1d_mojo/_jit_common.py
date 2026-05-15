@@ -122,6 +122,11 @@ def compile_and_load_variant(
     spec = importlib.util.spec_from_loader(mod_name, loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
+    # Stash the module in sys.modules so callers that need extra entry
+    # points (e.g. a one-time setup helper alongside the per-call kernel
+    # launcher) can fetch them via `sys.modules[mod_name]` without
+    # re-importing the .so.
+    sys.modules[mod_name] = module
     return getattr(module, entry_point_name)
 
 

@@ -14,12 +14,33 @@ Caller responsibilities:
 """
 
 from std.gpu.host import DeviceContext
+from std.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
 
 from kernel import bwd_full_kernel
 from common import kNThreads
+
+
+def acquire_ctx_handle() raises -> Int:
+    """Create a DeviceContext, retain its handle, and leak the wrapper.
+
+    On AMD `var ctx = DeviceContext()` per call ends up issuing
+    `hipStreamCreate` + matching `hipStreamDestroy` each launch.
+    Those calls are reported in torch.profiler as CUDA-device events
+    and (per the update-perf agent's measurements) bleed into
+    `self_device_time_total` for the surrounding kernel. The Python
+    side calls this once per variant on first use and threads the
+    returned address through every subsequent launch; we wrap it via
+    the non-owning DeviceContext constructor so no fresh hipStream is
+    created.
+    """
+    var ctx = DeviceContext()
+    # Retain so the handle survives this function's __del__.
+    ctx._retain()
+    var raw_ptr = ctx._handle.value()
+    return Int(raw_ptr)
 
 
 def launch_bwd_full[
@@ -66,8 +87,16 @@ def launch_bwd_full[
     dinitial_states_c_stride: Int,
     dinitial_states_l_stride: Int,
     stream_handle_addr: Int,
+    ctx_handle_addr: Int,
 ) raises:
-    var ctx = DeviceContext()
+    # Reconstruct a non-owning DeviceContext from the cached handle —
+    # avoids the hipStreamCreate/Destroy that would otherwise happen
+    # on every launch with the default `DeviceContext()` constructor.
+    # See `acquire_ctx_handle` above.
+    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutExternalOrigin](
+        unsafe_from_address=ctx_handle_addr
+    )
+    var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
