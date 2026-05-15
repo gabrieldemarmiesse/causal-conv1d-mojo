@@ -106,7 +106,7 @@ def test_backward_shapes_and_dtypes(device, dtype, activation, bias_present):
 # ===---------- final_states backward ----------=== #
 
 
-def test_final_states_backward(device, dtype, bias_present):
+def test_final_states_backward(device, dtype, width, bias_present):
     """Gradient w.r.t. final_states is added to the matching tail of dx.
 
     final_states[b, c, i] = x[b, c, seqlen - (W-1) + i] for the
@@ -114,7 +114,7 @@ def test_final_states_backward(device, dtype, bias_present):
     into dx[b, c, seqlen - (W-1) + i] in addition to the conv-path dx
     contribution.
     """
-    B, D, L, W = 2, 16, 64, 4
+    B, D, L, W = 2, 16, 64, width
     x = torch.randn(B, D, L, dtype=dtype, device=device, requires_grad=True)
     weight = torch.randn(D, W, dtype=dtype, device=device, requires_grad=True)
     bias = _make_bias(
