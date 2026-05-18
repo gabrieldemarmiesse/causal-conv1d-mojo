@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Single-shape / single-impl kernel-time bench, with the GPU lock applied.
+#
+# Examples:
+#   # Default `both impls, all shapes` — slow, prefer single-shape while iterating.
+#   ./tools/bench
+#
+#   # Just the mojo fwd kernel on one shape, 20 iters — fastest feedback loop.
+#   ./tools/bench --kind fwd --impl mojo --shape 1,1024,2048,4 --iters 20
+#
+#   # Compare mojo vs upstream for the bwd kernel on one shape:
+#   ./tools/bench --kind bwd --impl both --shape 4,2048,2048,4 --iters 50
+#
+#   # Update kernel:
+#   ./tools/bench --kind update --impl both --shape 1,2048 --iters 200
+#
+# All flags are forwarded to benchmarks/bench_gpu_kernel_time.py.
+
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(dirname "$here")"
+exec flock /tmp/.gpu_bench_lock \
+    uv run python "$repo/benchmarks/bench_gpu_kernel_time.py" "$@"

@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Automatic AMDGPU ISA dump for one Mojo kernel sub-package.
+#
+# Patches `src/causal_conv1d_mojo/<sub>/launch.mojo` to add
+# `dump_asm=StaticString(...)` + `dump_llvm=StaticString(...)` kwargs
+# to the `ctx.compile_function[...]()` call, clears the JIT cache for
+# that sub-package, runs the bench to JIT-compile the variant, then
+# unpatches the file.
+#
+# Output files land at /tmp/mojo_<sub>_<modname>.asm (AMDGPU ISA) and
+# /tmp/mojo_<sub>_<modname>.ll (LLVM IR). The % is replaced by Mojo
+# with the comptime module name for that variant — so each unique
+# (dtype × width × bias × ...) leaf gets its own file.
+#
+# Usage:
+#   ./tools/dump_isa --sub fwd --shape 1,1024,2048,4
+#   ./tools/dump_isa --sub bwd_full --shape 1,2048,2048,4
+#   ./tools/dump_isa --sub update --shape 1,2048
+#
+# Extra args after `--` are passed through to ./tools/bench.
+
+set -euo pipefail
+
+SUB=""
+SHAPE=""
+EXTRA=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --sub) SUB="$2"; shift 2 ;;
+        --shape) SHAPE="$2"; shift 2 ;;
+        --) shift; EXTRA=("$@"); break ;;
+        *) echo "unknown arg $1" >&2; exit 2 ;;
+    esac
+done
+
+case "$SUB" in
+    fwd|bwd_full|update) ;;
+    *) echo "Usage: $0 --sub {fwd|bwd_full|update} --shape <B,D,L,W or B,D> [-- extra bench args]" >&2; exit 2 ;;
+esac
+
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(dirname "$here")"
+launch="$repo/src/causal_conv1d_mojo/$SUB/launch.mojo"
+backup="$launch.dump_isa_bak"
+
+# Bench --kind name happens to match $SUB except for bwd_full → bwd.
+case "$SUB" in
+    bwd_full) KIND=bwd ;;
+    *) KIND="$SUB" ;;
+esac
+
+if [[ -f "$backup" ]]; then
+    echo "stale backup $backup exists; refusing to overwrite. Inspect and remove it first." >&2
+    exit 1
+fi
+
+cleanup() {
+    if [[ -f "$backup" ]]; then
+        mv "$backup" "$launch"
+        echo "restored $launch"
+    fi
+}
+trap cleanup EXIT
+
+cp "$launch" "$backup"
+
+tag="mojo_${SUB}"
+# Insert two new lines before the unique `    ]()` line. Each
+# launch.mojo has exactly one bare `]()` on its own line — the close
+# of `ctx.compile_function[...]`. We add the dump_asm/dump_llvm kwargs
+# inside the [...] block.
+python3 - "$launch" "$tag" <<'PY'
+import io
+import re
+import sys
+
+path, tag = sys.argv[1], sys.argv[2]
+src = open(path).read()
+# The pattern: a line containing only `]()` (with optional leading whitespace),
+# preceded by lines of comptime arguments. We add new kwargs to that block.
+patch = (
+    f'        dump_asm=StaticString("/tmp/{tag}_%.s"),\n'
+    f'        dump_llvm=StaticString("/tmp/{tag}_%.ll"),\n'
+)
+new_src, n = re.subn(
+    r'(?m)^(\s*\]\(\)$)',
+    patch + r'\1',
+    src,
+    count=1,
+)
+if n != 1:
+    print("could not locate the `]()` anchor to patch", file=sys.stderr)
+    sys.exit(2)
+open(path, 'w').write(new_src)
+PY
+
+# Wipe just this sub-package's JIT cache so we get a fresh variant build
+# with the dump_asm kwargs active.
+rm -rf "$HOME/.cache/causal_conv1d_mojo/$SUB"
+
+# Drop any stale dump files from a previous run.
+rm -f /tmp/${tag}_*.s /tmp/${tag}_*.ll
+
+# Run the bench with --iters 1 to JIT-compile a single variant.
+SHAPE_ARG=()
+[[ -n "$SHAPE" ]] && SHAPE_ARG=(--shape "$SHAPE")
+flock /tmp/.gpu_bench_lock \
+    uv run python "$repo/benchmarks/bench_gpu_kernel_time.py" \
+    --kind "$KIND" --impl mojo --iters 5 --warmup 1 --no-cache \
+    "${SHAPE_ARG[@]}" "${EXTRA[@]}" >/tmp/${tag}_bench.log 2>&1 \
+    || { echo "bench failed; tail of /tmp/${tag}_bench.log:"; tail -20 /tmp/${tag}_bench.log; exit 1; }
+
+echo
+echo "==== AMDGPU ISA dumps for $SUB ===="
+ls -la /tmp/${tag}_*.s /tmp/${tag}_*.ll 2>&1 | head -10 || true
+echo
+echo "Most likely file:"
+ls /tmp/${tag}_*.s 2>/dev/null | head -1 || echo "  (none — check bench log)"
+echo
+echo "Cleanup runs automatically on exit; the launch.mojo file is restored."

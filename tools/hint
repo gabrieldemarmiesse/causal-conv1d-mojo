@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Append a perf-hint entry to /tmp/hints.md so other agents see it.
+#
+# Hints should be _validated_ insights: an idea you tried, measured,
+# and confirmed improved (or hurt) perf. Include the shape, the
+# before/after numbers, and a one-line note on what changed.
+#
+# Usage:
+#     ./tools/hint <agent-name> <<'EOF'
+#     ### fwd: vec4 LDG buys 18% on (1,1024,2048,4)
+#
+#     - Before: 7.2 us/call (1.18x upstream)
+#     - After:  6.0 us/call (0.98x upstream)
+#     - Change: set kNElts=8 for fp16 and load via TileTensor.load[width=8, alignment=16]
+#     EOF
+
+set -euo pipefail
+
+AGENT="${1:-anon}"
+shift || true
+
+ts=$(date -Iseconds)
+{
+    echo
+    echo "---"
+    echo "## $ts — agent=$AGENT"
+    cat
+} >> /tmp/hints.md
+
+echo "appended to /tmp/hints.md"

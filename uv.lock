@@ -27,51 +27,44 @@ name = "causal-conv1d-mojo"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "causal-conv1d" },
     { name = "mojo-compiler" },
     { name = "mojo-compiler-mojo-libs" },
     { name = "numpy" },
-    { name = "nvidia-cuda-nvcc-cu12" },
-    { name = "packaging" },
-    { name = "setuptools" },
     { name = "torch" },
-    { name = "wheel" },
-]
-
-[package.optional-dependencies]
-bench = [
-    { name = "ninja" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "causal-conv1d" },
     { name = "matplotlib" },
+    { name = "nvidia-cuda-nvcc-cu12" },
+    { name = "packaging" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "setuptools" },
+    { name = "wheel" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "causal-conv1d", url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" },
     { name = "mojo-compiler", specifier = "==1.0.0b1" },
     { name = "mojo-compiler-mojo-libs", specifier = "==1.0.0b1" },
-    { name = "ninja", marker = "extra == 'bench'" },
     { name = "numpy", specifier = ">=2.4.4" },
-    { name = "nvidia-cuda-nvcc-cu12", specifier = "==12.8.*" },
-    { name = "packaging" },
-    { name = "setuptools", specifier = ">=70" },
     { name = "torch", specifier = "==2.8.0" },
-    { name = "wheel" },
 ]
-provides-extras = ["bench"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "causal-conv1d", url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" },
     { name = "matplotlib", specifier = ">=3.10.9" },
+    { name = "nvidia-cuda-nvcc-cu12", specifier = "==12.8.*" },
+    { name = "packaging" },
     { name = "pre-commit" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "ruff" },
+    { name = "setuptools", specifier = ">=70" },
+    { name = "wheel" },
 ]
 
 [[package]]

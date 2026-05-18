@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Dump the AMDGPU (gfx942) ISA for upstream Tri Dao causal_conv1d kernels.
+#
+# The upstream `.so` is a fat binary: x86 host code + one ELF code
+# object per GPU arch, concatenated by the HIP offload bundler. We use
+# `roc-obj-extract` to pull out the gfx942 bundle, then `llvm-objdump
+# -d` to disassemble. Output goes to /tmp/upstream_isa/.
+#
+# Examples:
+#   ./tools/dump_upstream_isa                  # dump all kernels
+#   ./tools/dump_upstream_isa fwd_kernel       # only kernels matching regex
+#   ./tools/dump_upstream_isa bwd_kernel       # only bwd
+#   ./tools/dump_upstream_isa update_kernel    # only update
+#
+# The disassembly file (/tmp/upstream_isa/upstream.s) contains all
+# kernels — use `grep -n '<_Z'` to find labels, then read around them.
+# Tip: pair this with `./tools/dump_isa --sub fwd` to compare side by
+# side.
+
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(dirname "$here")"
+filter="${1:-}"
+
+so="$repo/.venv/lib/python3.13/site-packages/causal_conv1d_cuda.cpython-313-x86_64-linux-gnu.so"
+if [[ ! -f "$so" ]]; then
+    echo "upstream .so not found at $so — is the bench env synced?" >&2
+    exit 1
+fi
+
+outdir="/tmp/upstream_isa"
+mkdir -p "$outdir"
+cd "$outdir"
+
+# Use roc-obj-extract to extract the gfx942 code objects. The fat binary
+# has 3 of them (one per __device__ object file). We disassemble each
+# and concatenate.
+asm="$outdir/upstream.s"
+: > "$asm"
+echo "extracting code objects..." >&2
+
+# roc-obj-ls prints `<entry-id>\t<triple>\tfile://...#offset=X&size=Y`.
+# We extract every line tagged with `amdgcn-amd-amdhsa--gfx942`.
+/opt/rocm/bin/roc-obj-ls "$so" 2>/dev/null \
+  | grep 'gfx942' \
+  | awk '{print $NF}' \
+  | while IFS= read -r uri; do
+      /opt/rocm/bin/roc-obj-extract "$uri" >/dev/null 2>&1
+  done
+
+# Disassemble every .co file we just extracted.
+for co in *.co; do
+    [[ -e "$co" ]] || continue
+    {
+        echo "=========================================================="
+        echo "= $co"
+        echo "=========================================================="
+        /opt/rocm/llvm/bin/llvm-objdump -d --mcpu=gfx942 "$co"
+    } >> "$asm"
+done
+
+echo "wrote: $asm"
+
+if [[ -n "$filter" ]]; then
+    out="$outdir/upstream_${filter}.s"
+    # Find each `<_Z..._kernel...>` label that matches the filter, dump
+    # from the label up to the next label.
+    awk -v re="$filter" '
+        /^[0-9a-f]+ <_Z/ {
+            if (in_match) print ""
+            in_match = ($0 ~ re)
+        }
+        in_match { print }
+    ' "$asm" > "$out"
+    echo "filtered to $out (lines: $(wc -l < "$out"))"
+    echo "preview:"
+    head -3 "$out"
+    grep -c '^[0-9a-f]\+ <_Z' "$out" | xargs -I{} echo "kernels matched: {}"
+fi

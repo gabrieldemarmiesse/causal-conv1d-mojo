@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# rocprofv3 --kernel-trace summary for the bench on a single shape.
+#
+# Gives an alternative GPU-time measurement (independent of
+# torch.profiler) plus the exact kernel symbol string rocprof sees —
+# useful when you want to feed it to `--kernel-include-regex` for
+# `rocprof_pmc`.
+#
+# IMPORTANT: rocprofv3 currently intercepts HSA in a way that breaks
+# Mojo's `DeviceContext` (you'll see "HIP architecture query failed:
+# Failed to initialize HSA runtime"). So this tool runs against
+# --impl upstream by default; pass --impl <whatever> at your own risk.
+# For Mojo kernel timing use ./tools/bench (torch.profiler works fine
+# because PyTorch already owns the HSA runtime).
+#
+# Usage:
+#   ./tools/rocprof_kernels --kind fwd --shape 1,1024,2048,4 --iters 100
+#   ./tools/rocprof_kernels --kind bwd --shape 4,2048,2048,4 --iters 100
+#   ./tools/rocprof_kernels --kind update --shape 1,2048 --iters 200
+
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(dirname "$here")"
+outdir="$(mktemp -d /tmp/rocprof_kernels.XXXXXX)"
+
+# Default --impl to upstream (Mojo doesn't survive rocprof instrumentation).
+have_impl=false
+for a in "$@"; do
+    [[ "$a" == "--impl" ]] && have_impl=true
+done
+ARGS=("$@")
+$have_impl || ARGS+=(--impl upstream)
+ARGS+=(--no-cache)
+
+exec flock /tmp/.gpu_bench_lock bash -c "
+    rocprofv3 --kernel-trace --stats -f csv -d '$outdir' -- \
+        '$repo/.venv/bin/python' '$repo/benchmarks/bench_gpu_kernel_time.py' $(printf ' %q' "${ARGS[@]}") \
+        2> '$outdir/rocprof.log'
+    rc=\$?
+    if [ \$rc -ne 0 ]; then
+        echo 'rocprofv3 exit \$rc — log tail:'
+        tail -30 '$outdir/rocprof.log'
+        exit \$rc
+    fi
+    echo
+    echo '--- rocprofv3 kernel summary (sorted by total time) ---'
+    stats=\$(find '$outdir' -name '*kernel_stats*.csv' | head -1)
+    if [ -n \"\$stats\" ]; then
+        head -1 \"\$stats\"
+        # Sort by TotalDurationNs (col 3).
+        awk -F',' 'NR>1' \"\$stats\" | sort -t, -k3 -n -r | head -20
+    else
+        for f in \$(find '$outdir' -name '*.csv' 2>/dev/null); do
+            echo \"# \$f\"; head -5 \"\$f\"; echo
+        done
+    fi
+    echo
+    echo 'Raw output: $outdir'
+"

@@ -185,9 +185,7 @@ def main() -> None:
         )
 
         ratio = mojo_us / up_us if up_us else float("inf")
-        print(
-            f"{shape!s:>22} | {mojo_us:15.1f} | {up_us:19.1f} | {ratio:6.2f}x"
-        )
+        print(f"{shape!s:>22} | {mojo_us:15.1f} | {up_us:19.1f} | {ratio:6.2f}x")
 
     # ------------------------- update kernel bench -------------------------
     print()
@@ -252,7 +250,9 @@ def main() -> None:
                 counts_u[evt.name] += 1
                 if _is_mojo_update(evt.name):
                     mojo_total_u += evt.self_device_time_total
-            print("DEBUG mojo update kernels on first update shape (counts over ITERS):")
+            print(
+                "DEBUG mojo update kernels on first update shape (counts over ITERS):"
+            )
             for n, c in sorted(counts_u.items()):
                 print(f"  {c:5d}  {n}")
             print()
@@ -269,9 +269,7 @@ def main() -> None:
         )
 
         ratio_u = mojo_us_u / up_us_u if up_us_u else float("inf")
-        print(
-            f"{(b, d)!s:>14} | {mojo_us_u:15.2f} | {up_us_u:19.2f} | {ratio_u:6.2f}x"
-        )
+        print(f"{(b, d)!s:>14} | {mojo_us_u:15.2f} | {up_us_u:19.2f} | {ratio_u:6.2f}x")
 
 
 if __name__ == "__main__":
