@@ -19,6 +19,7 @@ Caller responsibilities:
 """
 
 from std.gpu.host import DeviceContext, DeviceStream
+from std.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
@@ -33,6 +34,26 @@ from common import kNThreads
 # caller-supplied CUDA stream.
 fn _has_external_stream(stream_handle_addr: Int) -> Bool:
     return stream_handle_addr != 0
+
+
+def acquire_ctx_handle() raises -> Int:
+    """Create a DeviceContext, leak a refcount so the underlying C++
+    object survives this function's destructor, and return the raw
+    handle address.
+
+    `var ctx = DeviceContext()` on Apple Metal takes ~340 µs per call
+    — newCommandQueue + AsyncRT init dominates. The same kind of cost
+    shows up on AMD (`hipStreamCreate/Destroy`). We acquire one handle
+    per variant on first use and reconstruct a non-owning
+    `DeviceContext` from the cached handle for every subsequent call.
+    Pattern mirrored from `origin/amd_branch`.
+    """
+    var ctx = DeviceContext()
+    # Bump the refcount before the local `ctx` is destroyed — caller
+    # is now responsible for the extra count (process-lifetime in
+    # practice; we never release).
+    ctx._retain()
+    return Int(ctx._handle.value())
 
 
 def launch_fwd[
@@ -68,8 +89,15 @@ def launch_fwd[
     initial_states_c_stride: Int,
     initial_states_l_stride: Int,
     stream_handle_addr: Int,
+    ctx_handle_addr: Int,
 ) raises:
-    var ctx = DeviceContext()
+    # Reconstruct a non-owning DeviceContext from the cached handle —
+    # see `acquire_ctx_handle` above for the rationale (avoids ~340 µs
+    # of newCommandQueue/AsyncRT init per call on Metal).
+    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutExternalOrigin](
+        unsafe_from_address=ctx_handle_addr
+    )
+    var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
     var has_stream = _has_external_stream(stream_handle_addr)
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
@@ -176,14 +204,9 @@ def launch_fwd[
                 grid_dim=grid,
                 block_dim=(kNThreads,),
             )
-            # No external stream: caller is the Mac/MPS path (or a
-            # pure-Mojo test). On MPS we run on Mojo's own command
-            # queue, separate from torch's MPS queue. Block until our
-            # writes are committed so torch's subsequent reads observe
-            # them — torch doesn't track resources written through a
-            # raw `gpuAddress`, so it can't insert the hazard itself.
-            # Measured cost: ~10-30% on large shapes, ~0% on small
-            # ones (launch overhead dominates regardless).
+            # See comment in fwd/launch.mojo header — block on Mojo's
+            # command queue so torch sees our writes (we write through
+            # raw `gpuAddress`, which torch can't hazard-track).
             ctx.synchronize()
 
     comptime if contig_inner:
@@ -232,5 +255,4 @@ def launch_fwd[
             ),
         )
         launch(x_tt.as_immut(), w_tt.as_immut(), o_tt)
-
 

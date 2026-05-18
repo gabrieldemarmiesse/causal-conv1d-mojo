@@ -14,6 +14,7 @@ Caller responsibilities:
 """
 
 from std.gpu.host import DeviceContext, DeviceStream
+from std.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
@@ -28,6 +29,17 @@ from common import kNThreads
 # caller-supplied CUDA stream.
 fn _has_external_stream(stream_handle_addr: Int) -> Bool:
     return stream_handle_addr != 0
+
+
+def acquire_ctx_handle() raises -> Int:
+    """Create a DeviceContext once and leak a refcount — see the
+    matching header in `fwd/launch.mojo` for the rationale. `var ctx =
+    DeviceContext()` per call costs ~340 µs on Apple Metal; reusing
+    the cached handle reduces that to a few hundred ns.
+    """
+    var ctx = DeviceContext()
+    ctx._retain()
+    return Int(ctx._handle.value())
 
 
 def launch_bwd_full[
@@ -74,8 +86,12 @@ def launch_bwd_full[
     dinitial_states_c_stride: Int,
     dinitial_states_l_stride: Int,
     stream_handle_addr: Int,
+    ctx_handle_addr: Int,
 ) raises:
-    var ctx = DeviceContext()
+    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutExternalOrigin](
+        unsafe_from_address=ctx_handle_addr
+    )
+    var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
     var has_stream = _has_external_stream(stream_handle_addr)
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr

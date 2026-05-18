@@ -36,10 +36,14 @@ def call_fwd(args: tuple) -> None:
     """JIT-compile (if needed) and dispatch a single fwd call.
 
     ``args`` is the 29-tuple of runtime values built by
-    ``fwd/__init__.py::native_fwd``.
+    ``fwd/__init__.py::native_fwd``. We append the cached
+    ``ctx_handle`` (an Int address) as the 30th positional arg — the
+    generated variant entry destructures `args[29]` for it and rebuilds
+    a non-owning `DeviceContext` from it instead of paying ~340 µs to
+    construct a fresh one on Apple Metal each call.
     """
-    variant_fn = _get_variant_fn(_config_from_args(args))
-    variant_fn(*args)
+    variant_fn, ctx_handle = _get_variant_fn(_config_from_args(args))
+    variant_fn(*args, ctx_handle)
 
 
 def _config_from_args(args: tuple) -> tuple:
@@ -81,8 +85,10 @@ def _mod_name(config: tuple) -> str:
 
 @lru_cache(maxsize=None)
 def _get_variant_fn(config: tuple):
+    import sys
+
     mod_name = _mod_name(config)
-    return compile_and_load_variant(
+    fn = compile_and_load_variant(
         subpkg="fwd",
         source_dir=_FWD_DIR,
         shared_files=("kernel.mojo", "common.mojo", "launch.mojo"),
@@ -90,6 +96,15 @@ def _get_variant_fn(config: tuple):
         variant_source=_generate_variant_source(mod_name, config),
         entry_point_name="causal_conv1d_fwd_variant",
     )
+    # The shared loader stashes the loaded variant module in
+    # sys.modules so we can grab the one-shot ctx-handle helper without
+    # re-importing the .so. The handle is process-lifetime cached —
+    # subsequent calls for this variant skip the ~340 µs DeviceContext
+    # construction on Metal.
+    module = sys.modules[mod_name]
+    acquire = getattr(module, "causal_conv1d_fwd_acquire_ctx")
+    ctx_handle = int(acquire(()))
+    return fn, ctx_handle
 
 
 def _generate_variant_source(mod_name: str, config: tuple) -> str:
@@ -114,7 +129,20 @@ from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from launch import launch_fwd
+from launch import launch_fwd, acquire_ctx_handle
+
+
+def causal_conv1d_fwd_acquire_ctx(
+    mut py_self: PythonObject,
+    mut args: PythonObject,
+) raises -> PythonObject:
+    """Create + retain a process-lifetime DeviceContext.
+
+    Called once per variant from the Python side; the returned address
+    is reused for every subsequent `causal_conv1d_fwd_variant` call.
+    """
+    var addr: Int = acquire_ctx_handle()
+    return PythonObject(addr)
 
 
 def causal_conv1d_fwd_variant(
@@ -144,6 +172,7 @@ def causal_conv1d_fwd_variant(
     var initial_states_b_stride: Int = Int(py=args[26])
     var initial_states_c_stride: Int = Int(py=args[27])
     var initial_states_l_stride: Int = Int(py=args[28])
+    var ctx_handle_addr: Int = Int(py=args[29])
 
     if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
         return PythonObject(None)
@@ -181,6 +210,7 @@ def causal_conv1d_fwd_variant(
         initial_states_c_stride,
         initial_states_l_stride,
         stream_handle_addr,
+        ctx_handle_addr,
     )
     return PythonObject(None)
 
@@ -190,6 +220,7 @@ def PyInit_{mod_name}() -> PythonObject:
     try:
         var m = PythonModuleBuilder("{mod_name}")
         m.def_py_function[causal_conv1d_fwd_variant]("causal_conv1d_fwd_variant")
+        m.def_py_function[causal_conv1d_fwd_acquire_ctx]("causal_conv1d_fwd_acquire_ctx")
         return m.finalize()
     except e:
         abort(String("failed to create Python module: ", e))

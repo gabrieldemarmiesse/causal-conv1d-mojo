@@ -31,9 +31,13 @@ _KNTHREADS = 128
 
 
 def call_bwd_full(args: tuple) -> None:
-    """JIT-compile (if needed) and dispatch a single bwd_full call."""
-    variant_fn = _get_variant_fn(_config_from_args(args))
-    variant_fn(*args)
+    """JIT-compile (if needed) and dispatch a single bwd_full call.
+
+    The cached `ctx_handle` from `_get_variant_fn` is appended as the
+    extra trailing arg — see fwd/_jit.py for the matching pattern.
+    """
+    variant_fn, ctx_handle = _get_variant_fn(_config_from_args(args))
+    variant_fn(*args, ctx_handle)
 
 
 def _config_from_args(args: tuple) -> tuple:
@@ -85,8 +89,10 @@ def _mod_name(config: tuple) -> str:
 
 @lru_cache(maxsize=None)
 def _get_variant_fn(config: tuple):
+    import sys
+
     mod_name = _mod_name(config)
-    return compile_and_load_variant(
+    fn = compile_and_load_variant(
         subpkg="bwd_full",
         source_dir=_BWD_DIR,
         shared_files=("kernel.mojo", "common.mojo", "launch.mojo"),
@@ -94,6 +100,10 @@ def _get_variant_fn(config: tuple):
         variant_source=_generate_variant_source(mod_name, config),
         entry_point_name="causal_conv1d_bwd_full_variant",
     )
+    module = sys.modules[mod_name]
+    acquire = getattr(module, "causal_conv1d_bwd_full_acquire_ctx")
+    ctx_handle = int(acquire(()))
+    return fn, ctx_handle
 
 
 def _generate_variant_source(mod_name: str, config: tuple) -> str:
@@ -119,7 +129,15 @@ from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from launch import launch_bwd_full
+from launch import launch_bwd_full, acquire_ctx_handle
+
+
+def causal_conv1d_bwd_full_acquire_ctx(
+    mut py_self: PythonObject,
+    mut args: PythonObject,
+) raises -> PythonObject:
+    var addr: Int = acquire_ctx_handle()
+    return PythonObject(addr)
 
 
 def causal_conv1d_bwd_full_variant(
@@ -159,6 +177,7 @@ def causal_conv1d_bwd_full_variant(
     var dinitial_states_b_stride: Int = Int(py=args[36])
     var dinitial_states_c_stride: Int = Int(py=args[37])
     var dinitial_states_l_stride: Int = Int(py=args[38])
+    var ctx_handle_addr: Int = Int(py=args[39])
 
     if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
         return PythonObject(None)
@@ -207,6 +226,7 @@ def causal_conv1d_bwd_full_variant(
         dinitial_states_c_stride,
         dinitial_states_l_stride,
         stream_handle_addr,
+        ctx_handle_addr,
     )
     return PythonObject(None)
 
@@ -216,6 +236,7 @@ def PyInit_{mod_name}() -> PythonObject:
     try:
         var m = PythonModuleBuilder("{mod_name}")
         m.def_py_function[causal_conv1d_bwd_full_variant]("causal_conv1d_bwd_full_variant")
+        m.def_py_function[causal_conv1d_bwd_full_acquire_ctx]("causal_conv1d_bwd_full_acquire_ctx")
         return m.finalize()
     except e:
         abort(String("failed to create Python module: ", e))
