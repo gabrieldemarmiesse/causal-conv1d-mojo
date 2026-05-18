@@ -23,29 +23,23 @@ x values via smem.
 """
 
 from std.gpu import block_idx, thread_idx, barrier
-from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA
 from std.gpu.memory import AddressSpace
 from std.math import ceildiv
 from std.memory import stack_allocation
-from std.utils.index import StaticTuple
 from layout import TileTensor, TensorLayout, Idx, Coord
 
 from common import _silu_f32, kNThreads, kNEltsFwd
 
 
-@__llvm_metadata(
-    MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](Int32(kNThreads))
-)
 def fwd_kernel[
     dtype: DType,
-    kWidth: Int,
+    width: Int,
     has_bias: Bool,
     has_seq_idx: Bool,
     has_initial_states: Bool,
     apply_silu: Bool,
     contig_inner: Bool,
     aligned_seq: Bool,
-    vec_aligned: Bool,
     XLayoutType: TensorLayout,
     WLayoutType: TensorLayout,
     OLayoutType: TensorLayout,
@@ -89,18 +83,6 @@ def fwd_kernel[
     `aligned_seq`: seqlen is a multiple of `kNThreads * kNElts`. When
     True, the per-chunk bounds-checked tail path is dropped — halves
     the kernel's compiled code and eliminates predicated stores.
-
-    `vec_aligned`: weaker — seqlen is a multiple of `kNElts` (always
-    True for power-of-two seqlens). Each thread's `seq_start` is also a
-    multiple of `kNElts`, so `seq_start < seqlen` ⟺ `seq_start +
-    kNElts ≤ seqlen`; the partial-element scalar fallback path
-    becomes statically dead and gets dropped at comptime. This is the
-    case for shapes like `(B, D, 512, W)` where chunk-alignment fails
-    (kChunkSize=1024 for fp16) but vec-alignment still holds — without
-    this gate the compiler emits `kNElts` predicated scalar loads and
-    `kNElts` predicated scalar stores per fully-OOB thread, fattening
-    the kernel and adding ~4× branches versus upstream's vec-load path.
-    Mirrors upstream's `kIsVecLoad` BOOL_SWITCH.
     """
     comptime accum_t = DType.float32
     comptime kNElts: Int = kNEltsFwd[dtype]()
@@ -110,17 +92,17 @@ def fwd_kernel[
     var channel_id: Int = block_idx.x
     var batch_id: Int = block_idx.y
 
-    # ---- Load weight_vals once per block (fp32 registers) ----
-    var weight_vals = SIMD[accum_t, kWidth](0)
+    # ---- Load weights once per block (fp32 registers) ----
+    var weights = SIMD[accum_t, width](0)
 
-    comptime for k in range(kWidth):
-        weight_vals[k] = weight[channel_id, k].cast[accum_t]()
+    comptime for k in range(width):
+        weights[k] = weight[channel_id, k].cast[accum_t]()
 
     # ---- Load bias once per block ----
-    var bias_val: Scalar[accum_t] = 0
+    var cur_bias: Scalar[accum_t] = 0
 
     comptime if has_bias:
-        bias_val = bias_ptr[channel_id].cast[accum_t]()
+        cur_bias = bias_ptr[channel_id].cast[accum_t]()
 
     # ---- Smem exchange buffer for (W-1) halo across chunks ----
     # Slot i holds thread i's last kNElts x values; we read slot
@@ -166,38 +148,29 @@ def fwd_kernel[
             x_curr = x.load[width=kNElts, alignment=16](
                 Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
             )
-        elif contig_inner and vec_aligned:
-            # vec_aligned ⇒ each thread's kNElts slice is either fully
-            # in-bounds or starts past `seqlen`. Either a single 16-byte
-            # vec load or nothing — never partial. The else arm of the
-            # `seq_start + kNElts <= seqlen` test below would be the
-            # scalar fallback, but vec_aligned makes it statically dead.
-            if seq_start + kNElts <= seqlen:
-                x_curr = x.load[width=kNElts, alignment=16](
-                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
-                )
         elif contig_inner:
             # Per-thread vec load when the thread's kNElts slice is fully
-            # in-bounds — even on a partial chunk. Threads at the
-            # boundary fall back to scalar; threads past `seqlen` skip
-            # the load entirely (their `x_curr` stays at 0).
+            # in-bounds — even on a partial chunk. Threads near the end
+            # fall back to scalar. This matters for shapes like
+            # (1, 1024, 512, 4) where seqlen=512 < kChunkSize=1024: 64
+            # of the 128 threads still get 16-byte vec loads here
+            # instead of 8 scalar fp16 loads each.
             if seq_start + kNElts <= seqlen:
                 x_curr = x.load[width=kNElts, alignment=16](
                     Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
                 )
-            elif seq_start < seqlen:
+            else:
 
                 comptime for i in range(kNElts):
                     var t = seq_start + i
                     if t < seqlen:
                         x_curr[i] = x[batch_id, channel_id, t]
         else:
-            if seq_start < seqlen:
 
-                comptime for i in range(kNElts):
-                    var t = seq_start + i
-                    if t < seqlen:
-                        x_curr[i] = x[batch_id, channel_id, t]
+            comptime for i in range(kNElts):
+                var t = seq_start + i
+                if t < seqlen:
+                    x_curr[i] = x[batch_id, channel_id, t]
 
         # ---- [P2] Halo dance ----
         # Slot kNThreads-1 holds the prev chunk's tail (initialised to
@@ -232,8 +205,8 @@ def fwd_kernel[
         comptime if has_initial_states:
             if tidx == 0 and chunk == 0:
 
-                comptime for i in range(kWidth - 1):
-                    x_prev[kNElts - (kWidth - 1) + i] = initial_states_ptr[
+                comptime for i in range(width - 1):
+                    x_prev[kNElts - (width - 1) + i] = initial_states_ptr[
                         initial_states_base + i * initial_states_l_stride
                     ]
 
@@ -267,13 +240,13 @@ def fwd_kernel[
         # ---- [P4] seq_idx window (only when has_seq_idx) ----
         # Needed at positions [seq_start - (W-1) .. seq_start + kNElts - 1].
         # Out-of-range positions get -1 so the gate naturally fails.
-        comptime kSeqWindow: Int = (kWidth - 1) + kNElts
+        comptime kSeqWindow: Int = (width - 1) + kNElts
         var seq_window = InlineArray[Int32, kSeqWindow](uninitialized=True)
 
         comptime if has_seq_idx:
 
             comptime for j in range(kSeqWindow):
-                var t_j = seq_start + j - (kWidth - 1)
+                var t_j = seq_start + j - (width - 1)
                 if 0 <= t_j and t_j < seqlen:
                     seq_window[j] = seq_idx_ptr[
                         seq_idx_base + t_j * seq_idx_l_stride
@@ -281,24 +254,24 @@ def fwd_kernel[
                 else:
                     seq_window[j] = -1
 
-        # ---- [P5] Compute out[i] = bias + sum_w weight_vals[w] * x_vals[kNElts + i - (W-1-w)] ----
+        # ---- [P5] Compute out[i] = bias + sum_w weights[w] * x_vals[kNElts + i - (W-1-w)] ----
         var out_vals = SIMD[accum_t, kNElts](0)
 
         comptime for i in range(kNElts):
-            var acc: Scalar[accum_t] = bias_val
+            var acc: Scalar[accum_t] = cur_bias
             var cur_id: Int32 = 0
 
             comptime if has_seq_idx:
-                cur_id = seq_window[(kWidth - 1) + i]
+                cur_id = seq_window[(width - 1) + i]
 
-            comptime for w in range(kWidth):
-                comptime x_idx: Int = kNElts + i - (kWidth - 1 - w)
+            comptime for w in range(width):
+                comptime x_idx: Int = kNElts + i - (width - 1 - w)
                 var include: Bool = True
 
                 comptime if has_seq_idx:
                     include = seq_window[i + w] == cur_id
                 if include:
-                    acc += weight_vals[w] * x_vals[x_idx]
+                    acc += weights[w] * x_vals[x_idx]
 
             comptime if apply_silu:
                 acc = _silu_f32(Float32(acc))
@@ -312,14 +285,6 @@ def fwd_kernel[
 
         # ---- [P6] Store out_vals to global ----
         comptime if contig_inner and aligned_seq:
-            output.store[alignment=16](
-                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
-                out_vals.cast[dtype](),
-            )
-        elif contig_inner and vec_aligned:
-            # vec_aligned ⇒ no boundary partial. Single vec store guarded
-            # by `seq_start < seqlen` (or equivalently +kNElts ≤ seqlen);
-            # OOB threads were already gated off by the `continue` above.
             output.store[alignment=16](
                 Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
                 out_vals.cast[dtype](),

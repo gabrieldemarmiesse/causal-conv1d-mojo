@@ -1,6 +1,6 @@
 # This is to test what a cold start looks like
 
-FROM rocm/dev-ubuntu-24.04
+FROM ubuntu:24.04
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -16,14 +16,10 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --frozen --no-install-project
 
 COPY . .
-
-# cleanup
-RUN git clean -fdx
-
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-editable --no-dev
+    uv sync --frozen --no-editable
 
 ENTRYPOINT ["bash", "benchmark_compilation/get_timings.sh"]

@@ -16,14 +16,14 @@ repos:
     hooks:
       - id: ruff-check
         name: ruff check
-        entry: pixi run ruff check --fix
+        entry: uv run ruff check --fix
         language: system
         types: [python]
         require_serial: true
 
       - id: ruff-format
         name: ruff format
-        entry: pixi run ruff format
+        entry: uv run ruff format
         language: system
         types: [python]
         require_serial: true
@@ -34,7 +34,7 @@ repos:
       # ~2s on a warm cache, so cheap enough for every commit.
       - id: mojo-build
         name: mojo build (kernel sanity)
-        entry: bash -c 'pixi run mojo build --emit shared-lib src/causal_conv1d_mojo/_native/causal_conv1d_native.mojo -o /tmp/cc1d_precommit_check.so && rm -f /tmp/cc1d_precommit_check.so'
+        entry: bash -c 'uv run mojo build --emit shared-lib src/causal_conv1d_mojo/_native/causal_conv1d_native.mojo -o /tmp/cc1d_precommit_check.so && rm -f /tmp/cc1d_precommit_check.so'
         language: system
         files: ^src/causal_conv1d_mojo/_native/.*\.mojo$
         pass_filenames: false

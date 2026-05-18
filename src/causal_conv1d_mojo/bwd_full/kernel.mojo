@@ -6,28 +6,14 @@ block reduction helpers it depends on.
 """
 
 from std.gpu import block_idx, thread_idx, barrier
-from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA, WARP_SIZE
 from std.gpu.memory import AddressSpace
-from std.gpu.primitives.warp import shuffle_xor
-from std.bit import log2_floor
-from std.math import ceildiv, exp, recip
+from std.math import ceildiv, exp
 from std.memory import stack_allocation
 from std.atomic import Atomic, Ordering
 from std.sys import llvm_intrinsic
-from std.sys.info import is_nvidia_gpu
-from std.utils.index import StaticTuple
 from layout import TileTensor, TensorLayout, Idx, Coord
 
 from common import kNThreads
-
-
-# Atomic scope for the gradient reduce step. CUDA's `atomicAdd(...)`
-# is GPU-scope, relaxed — the LLVM syncscope name for that is "device"
-# on NVPTX and "agent" on AMDGPU. Picking the wrong one fails to lower
-# with "Unsupported non-inclusive atomic synchronization scope" on AMD.
-alias kAtomicScope: StaticString = (
-    "device" if is_nvidia_gpu() else "agent"
-)
 
 
 @always_inline
@@ -42,14 +28,9 @@ def _rcp_approx_f32(x: Float32) -> Float32:
     at fp16-ish precision (more than enough for the silu sigmoid
     backward, whose result is then multiplied by an fp16/bf16 dout).
     On the fwd kernel this was the largest single perf win (1.25x →
-    1.00x ratio). The intrinsic is nvvm-only; on AMD targets we fall
-    back to `recip()` (which lowers to `v_rcp_f32` on amdgcn — already
-    a fast approximate reciprocal).
+    1.00x ratio).
     """
-    comptime if is_nvidia_gpu():
-        return llvm_intrinsic["llvm.nvvm.rcp.approx.ftz.f", Float32](x)
-    else:
-        return recip(x)
+    return llvm_intrinsic["llvm.nvvm.rcp.approx.ftz.f", Float32](x)
 
 
 @always_inline
@@ -62,60 +43,22 @@ def _shfl_xor_f32(val: Float32, offset: UInt32) -> Float32:
     diff vs. upstream's bwd showed 45 `CALL.REL.NOINC` to that helper. By
     issuing the LLVM intrinsic from a single small leaf and force-inlining
     every wrapper around it, ptxas stops outlining and generates the bare
-    SHFL.BFLY (matching upstream). The nvvm intrinsic is NVIDIA-only;
-    on AMD we use the portable `gpu.warp.shuffle_xor` (lowers to
-    `ds_bpermute_b32` on amdgcn).
+    SHFL.BFLY (matching upstream).
     """
-    comptime if is_nvidia_gpu():
-        return llvm_intrinsic["llvm.nvvm.shfl.sync.bfly.f32", Float32](
-            Int32(-1), val, offset, Int32(31)
-        )
-    else:
-        return shuffle_xor(val, offset)
+    return llvm_intrinsic["llvm.nvvm.shfl.sync.bfly.f32", Float32](
+        Int32(-1), val, offset, Int32(31)
+    )
 
 
 @always_inline
 def _warp_sum_f32(val: Float32) -> Float32:
-    """log2(WARP_SIZE)-step butterfly warp reduction, fp32. All lanes
-    hold the full warp's sum. On NVIDIA WARP_SIZE=32 ⇒ 5 steps; on AMD
-    CDNA WARP_SIZE=64 ⇒ 6 steps (the extra step is the cross-half-warp
-    xor=32). The old hand-rolled 5 fixed steps left lanes 32..63 of an
-    AMD wavefront with a half-warp partial — correct only because we
-    then re-bucketed via `lane = tid & 31, warp = tid >> 5`, but that
-    burns smem and barriers we don't need with full-warp shuffles."""
+    """5-step butterfly warp reduction, fp32. All lanes hold the warp's sum."""
     var v = val
-
-    comptime for i in reversed(range(log2_floor(WARP_SIZE))):
-        v += _shfl_xor_f32(v, UInt32(1 << i))
-    return v
-
-
-@always_inline
-def _warp_sum_f32_vec[n: Int](
-    vals: SIMD[DType.float32, n]
-) -> SIMD[DType.float32, n]:
-    """Vectorised butterfly warp reduction over `n` independent fp32
-    values. All lanes return the full warp's sum (component-wise).
-
-    On AMD `_shfl_xor_f32` lowers to `ds_bpermute_b32`, which the
-    compiler bookends with `s_waitcnt lgkmcnt(0)` per call. Reducing
-    each of the `n` values one-at-a-time would therefore issue
-    `n * log2(WARP_SIZE)` serial shuffle + wait pairs. By interleaving
-    the `n` reductions at each butterfly step, the `n` independent
-    shuffles in a step can be issued back-to-back (one LDS instruction
-    queue, no inter-shuffle dep) so the compiler only needs *one*
-    waitcnt before the `n` adds. Cuts the final reduce's wait count
-    by ~`(n - 1) * log2(WARP_SIZE)` — measurable when n is the full
-    `width + 1` packed reduction (5 for width=4, with-bias)."""
-    var v = vals
-
-    comptime for i in reversed(range(log2_floor(WARP_SIZE))):
-        comptime offset = UInt32(1 << i)
-        var shuffled = SIMD[DType.float32, n](0)
-
-        comptime for j in range(n):
-            shuffled[j] = _shfl_xor_f32(v[j], offset)
-        v += shuffled
+    v += _shfl_xor_f32(v, UInt32(16))
+    v += _shfl_xor_f32(v, UInt32(8))
+    v += _shfl_xor_f32(v, UInt32(4))
+    v += _shfl_xor_f32(v, UInt32(2))
+    v += _shfl_xor_f32(v, UInt32(1))
     return v
 
 
@@ -130,10 +73,10 @@ def _block_sum_f32[block_size: Int](val: Float32) -> Float32:
 
     Only thread 0 holds the meaningful result (broadcast=False).
     """
-    comptime assert block_size >= WARP_SIZE and block_size % WARP_SIZE == 0, (
-        "block_size must be a multiple of WARP_SIZE"
+    comptime assert block_size >= 32 and block_size % 32 == 0, (
+        "block_size must be a multiple of warp size (32)"
     )
-    comptime n_warps: Int = block_size // WARP_SIZE
+    comptime n_warps: Int = block_size // 32
 
     # Step 1: per-warp butterfly reduce; all lanes in a warp hold the sum.
     var warp_result = _warp_sum_f32(val)
@@ -142,8 +85,8 @@ def _block_sum_f32[block_size: Int](val: Float32) -> Float32:
         return warp_result
 
     var tid: Int = thread_idx.x
-    var lane: Int = tid & (WARP_SIZE - 1)
-    var warp: Int = tid // WARP_SIZE
+    var lane: Int = tid & 31
+    var warp: Int = tid >> 5
 
     # Step 2: lane 0 of each warp writes its warp's sum to smem.
     var smem = stack_allocation[
@@ -177,21 +120,23 @@ def _block_sum_f32_vec[
     per-warp partials into one smem layout and do a single barrier
     before the cross-warp reduce. Saves `n-1` barriers per kernel.
     """
-    comptime assert block_size >= WARP_SIZE and block_size % WARP_SIZE == 0, (
-        "block_size must be a multiple of WARP_SIZE"
+    comptime assert block_size >= 32 and block_size % 32 == 0, (
+        "block_size must be a multiple of warp size (32)"
     )
-    comptime n_warps: Int = block_size // WARP_SIZE
+    comptime n_warps: Int = block_size // 32
 
-    # Step 1: per-warp butterfly reduce over all n values in lock step
-    # (one shuffle-stage per butterfly level, n shuffles per stage).
-    var warp_result = _warp_sum_f32_vec[n=n](vals)
+    # Step 1: per-warp butterfly reduce, every lane.
+    var warp_result = SIMD[DType.float32, n](0)
+
+    comptime for j in range(n):
+        warp_result[j] = _warp_sum_f32(vals[j])
 
     comptime if n_warps == 1:
         return warp_result
 
     var tid: Int = thread_idx.x
-    var lane: Int = tid & (WARP_SIZE - 1)
-    var warp: Int = tid // WARP_SIZE
+    var lane: Int = tid & 31
+    var warp: Int = tid >> 5
 
     # Step 2: lane 0 of each warp writes its `n` warp-sums to smem
     # at layout smem[warp * n + j]. n_warps * n total fp32 slots.
@@ -205,23 +150,19 @@ def _block_sum_f32_vec[
 
     barrier()
 
-    # Step 3: warp 0 reads the n_warps partials per lane j and reduces
-    # them all in lock-step via the vec warp reduce.
+    # Step 3: warp 0 reads the n_warps partials per lane j and reduces.
     var block_vals = SIMD[DType.float32, n](0)
     if warp == 0:
-        var v = SIMD[DType.float32, n](0)
-        if lane < n_warps:
 
-            comptime for j in range(n):
-                v[j] = smem[lane * n + j]
-        block_vals = _warp_sum_f32_vec[n=n](v)
+        comptime for j in range(n):
+            var v: Float32 = 0
+            if lane < n_warps:
+                v = smem[lane * n + j]
+            block_vals[j] = _warp_sum_f32(v)
 
     return block_vals
 
 
-@__llvm_metadata(
-    MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](Int32(kNThreads))
-)
 def bwd_full_kernel[
     dtype: DType,
     n_elts: Int,
@@ -308,10 +249,8 @@ def bwd_full_kernel[
     comptime kChunkSize: Int = kNThreads * kNElts
 
     var tidx: Int = thread_idx.x
-    # Grid layout matches upstream: blockIdx.x = batch, blockIdx.y =
-    # dim. See launch.mojo for the rationale.
-    var batch_id: Int = block_idx.x
-    var channel_id: Int = block_idx.y
+    var channel_id: Int = block_idx.x
+    var batch_id: Int = block_idx.y
 
     # Load weights into per-block fp32 registers.
     var weights = SIMD[accum_t, width](0)
@@ -350,14 +289,13 @@ def bwd_full_kernel[
 
     var n_chunks: Int = ceildiv(seqlen, kChunkSize)
 
-    # Initialise smem_dout slot 0 to zero. On the first iteration
-    # (last chunk in time) thread kNThreads-1 reads smem_dout[0] for
-    # its halo; for the last chunk that halo is past the seqlen end
-    # and must be zero. No barrier needed here — the first chunk's
-    # smem_x publish barrier (inside the loop) covers this init write
-    # before any thread reads slot 0.
+    # Initialise smem_dout slot 0 to zero. On the first iteration (last
+    # chunk) thread kNThreads-1 reads smem_dout[0] for its halo; for the
+    # last chunk that halo is past the seqlen end and must be zero.
     if tidx == 0:
         smem_dout.store[alignment=16](SIMD[accum_t, kNElts](0))
+
+    barrier()
 
     # Reverse iteration: chunk n_chunks-1 down to 0.
     for chunk_rev in range(n_chunks):
@@ -620,14 +558,25 @@ def bwd_full_kernel[
         if tidx > 0:
             (smem_dout + tidx * kNElts).store[alignment=16](dpre)
 
-        # ---- [P5a] dx terms that don't need the halo ----
-        # The anti-causal conv `dx[i] = sum_w weights[w] * combined[i +
-        # (W-1) - w]` reads from `combined = [dpre || dout_halo]`. Only
-        # terms with `halo_idx = i + (W-1) - w >= kNElts` need the halo;
-        # the rest are pure dpre-times-weights and can be computed
-        # *before* the smem_dout barrier below. That gives the compiler
-        # ~width*(width-1)/2 FMAs to interleave with the LDS barrier
-        # wait, hiding part of the sync latency.
+        barrier()  # tidx>0 writes visible; slot 0 still holds NEXT chunk's data
+
+        var halo_thread = tidx + 1 if tidx < kNThreads - 1 else 0
+        var dout_halo = (smem_dout + halo_thread * kNElts).load[
+            width=kNElts, alignment=16
+        ]()
+
+        barrier()  # all halo reads done; thread 0 may now stomp slot 0
+
+        if tidx == 0:
+            smem_dout.store[alignment=16](dpre)
+
+        # ---- [P5] dx = anti-causal conv on dpre || dout_halo ----
+        # dx[i] = sum_w weights[w] * combined[i + (W-1-w)]
+        # combined = [dpre (kNElts) || dout_halo (kNElts)]
+        # With has_seq_idx: gate each w-term on
+        # `seq_idx[seq_start+i] == seq_idx[seq_start+i+(W-1)-w]` —
+        # x[seq_start+i] only contributed to position
+        # seq_start+i+(W-1)-w in the forward when their ids matched.
         var dx_vals = SIMD[accum_t, kNElts](0)
 
         comptime for i in range(kNElts):
@@ -638,59 +587,17 @@ def bwd_full_kernel[
 
             comptime for k in range(width):
                 comptime halo_idx: Int = i + (width - 1) - k
+                var include_dx: Bool = True
 
-                comptime if halo_idx < kNElts:
-                    var include_dx: Bool = True
+                comptime if has_seq_idx:
+                    include_dx = (
+                        seq_idx_window[i + 2 * (width - 1) - k] == cur_id_dx
+                    )
+                if include_dx:
 
-                    comptime if has_seq_idx:
-                        include_dx = (
-                            seq_idx_window[i + 2 * (width - 1) - k]
-                            == cur_id_dx
-                        )
-                    if include_dx:
+                    comptime if halo_idx < kNElts:
                         dx_vals[i] += weights[k] * dpre[halo_idx]
-
-        barrier()  # tidx>0 writes visible; slot 0 still holds NEXT chunk's data
-
-        var halo_thread = tidx + 1 if tidx < kNThreads - 1 else 0
-        var dout_halo = (smem_dout + halo_thread * kNElts).load[
-            width=kNElts, alignment=16
-        ]()
-
-        # The slot-0 stomp + its barrier only matter for the *next* iter
-        # (chunk-1 in reverse). On the last iter (chunk==0) nothing reads
-        # slot 0 again — drop both. Saves one block-wide sync per kernel
-        # call. The remaining iters still need the barrier so tidx=
-        # kNThreads-1's halo read of slot 0 (NEXT chunk's data) completes
-        # before tidx==0 overwrites slot 0 with the *current* chunk's
-        # dpre.
-        if chunk > 0:
-            barrier()  # all halo reads done; thread 0 may now stomp slot 0
-            if tidx == 0:
-                smem_dout.store[alignment=16](dpre)
-
-        # ---- [P5b] dx halo terms ----
-        # dx[i] += sum_{w: halo_idx>=kNElts} weights[w] *
-        #         dout_halo[halo_idx - kNElts]
-
-        comptime for i in range(kNElts):
-            var cur_id_dx: Int32 = 0
-
-            comptime if has_seq_idx:
-                cur_id_dx = seq_idx_window[(width - 1) + i]
-
-            comptime for k in range(width):
-                comptime halo_idx: Int = i + (width - 1) - k
-
-                comptime if halo_idx >= kNElts:
-                    var include_dx: Bool = True
-
-                    comptime if has_seq_idx:
-                        include_dx = (
-                            seq_idx_window[i + 2 * (width - 1) - k]
-                            == cur_id_dx
-                        )
-                    if include_dx:
+                    else:
                         dx_vals[i] += weights[k] * dout_halo[halo_idx - kNElts]
 
         comptime if contig_inner and aligned_seq:
@@ -776,7 +683,7 @@ def bwd_full_kernel[
                         local_dweight[k] += dpre[t] * is_v
 
     # === Phase 4: block-reduce dweight, dbias and atomic-add to global ===
-    # `scope="agent"` + `ordering=MONOTONIC` is the same memory model as
+    # `scope="device"` + `ordering=MONOTONIC` is the same memory model as
     # CUDA's `atomicAdd(...)` — relaxed, GPU-scope. The default
     # `Atomic.fetch_add(...)` lowers to `ATOMG.E.ADD.F32.STRONG.SYS`, a
     # *system-scope, sequentially-consistent* atomic that drains L2 and
@@ -808,13 +715,13 @@ def bwd_full_kernel[
         if tidx == 0:
 
             comptime for k in range(width):
-                _ = Atomic[DType.float32, scope=kAtomicScope].fetch_add[
+                _ = Atomic[DType.float32, scope="device"].fetch_add[
                     ordering=Ordering.RELAXED
                 ](
                     dweight_acc_ptr + channel_id * width + k,
                     block_red[k],
                 )
-            _ = Atomic[DType.float32, scope=kAtomicScope].fetch_add[
+            _ = Atomic[DType.float32, scope="device"].fetch_add[
                 ordering=Ordering.RELAXED
             ](dbias_acc_ptr + channel_id, block_red[width])
     else:
@@ -824,7 +731,7 @@ def bwd_full_kernel[
         if tidx == 0:
 
             comptime for k in range(width):
-                _ = Atomic[DType.float32, scope=kAtomicScope].fetch_add[
+                _ = Atomic[DType.float32, scope="device"].fetch_add[
                     ordering=Ordering.RELAXED
                 ](
                     dweight_acc_ptr + channel_id * width + k,
