@@ -182,6 +182,8 @@ def launch_fwd[
             # writes are committed so torch's subsequent reads observe
             # them — torch doesn't track resources written through a
             # raw `gpuAddress`, so it can't insert the hazard itself.
+            # Measured cost: ~10-30% on large shapes, ~0% on small
+            # ones (launch overhead dominates regardless).
             ctx.synchronize()
 
     comptime if contig_inner:

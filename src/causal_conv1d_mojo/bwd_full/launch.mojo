@@ -209,10 +209,9 @@ def launch_bwd_full[
                 grid_dim=grid,
                 block_dim=(kNThreads,),
             )
-            # No external stream: see comment in fwd/launch.mojo's
-            # equivalent branch — block on Mojo's command queue so
-            # torch sees our writes (we wrote through raw `gpuAddress`
-            # which torch can't hazard-track).
+            # See comment in fwd/launch.mojo's equivalent branch — block
+            # on Mojo's command queue so torch sees our writes (we wrote
+            # through a raw `gpuAddress`, which torch can't hazard-track).
             ctx.synchronize()
 
     comptime if contig_inner:

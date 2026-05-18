@@ -172,7 +172,7 @@ def launch_update[
             grid_dim=grid,
             block_dim=(kNThreadsUpdate,),
         )
-        # No external stream: see comment in fwd/launch.mojo's
-        # equivalent branch — block on Mojo's command queue so torch
-        # sees our writes (we wrote through raw `gpuAddress`).
+        # See comment in fwd/launch.mojo's equivalent branch — block
+        # on Mojo's command queue so torch sees our writes (we wrote
+        # through a raw `gpuAddress`, which torch can't hazard-track).
         ctx.synchronize()
