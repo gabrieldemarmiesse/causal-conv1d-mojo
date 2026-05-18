@@ -15,9 +15,9 @@ from __future__ import annotations
 import torch
 
 from causal_conv1d_mojo._dtype import _DTYPE_CODE
-from causal_conv1d_mojo.bwd_full import native_bwd_full
+from causal_conv1d_mojo.bwd_full import native_bwd_full, native_bwd_full_mps
 from causal_conv1d_mojo.bwd_full_cpu import native_bwd_full_cpu
-from causal_conv1d_mojo.fwd import native_fwd
+from causal_conv1d_mojo.fwd import native_fwd, native_fwd_mps
 from causal_conv1d_mojo.fwd_cpu import native_fwd_cpu
 
 
@@ -62,6 +62,8 @@ class _CausalConv1dFn(torch.autograd.Function):
         out = torch.empty_like(x)
         if x.is_cuda:
             native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu)
+        elif x.device.type == "mps":
+            native_fwd_mps(x, weight, bias, seq_idx, initial_states, out, apply_silu)
         else:
             native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu)
         if final_states_out is not None:
@@ -113,6 +115,20 @@ class _CausalConv1dFn(torch.autograd.Function):
 
         if x.is_cuda:
             native_bwd_full(
+                x,
+                weight,
+                bias,
+                dout,
+                seq_idx,
+                initial_states,
+                dx,
+                dweight_acc,
+                dbias_acc,
+                dinitial_states,
+                apply_silu,
+            )
+        elif x.device.type == "mps":
+            native_bwd_full_mps(
                 x,
                 weight,
                 bias,

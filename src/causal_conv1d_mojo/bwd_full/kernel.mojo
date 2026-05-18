@@ -7,10 +7,12 @@ block reduction helpers it depends on.
 
 from std.gpu import block_idx, thread_idx, barrier
 from std.gpu.memory import AddressSpace
+from std.gpu.primitives.warp import shuffle_xor
 from std.math import ceildiv, exp
 from std.memory import stack_allocation
 from std.atomic import Atomic, Ordering
 from std.sys import llvm_intrinsic
+from std.sys.info import is_nvidia_gpu
 from layout import TileTensor, TensorLayout, Idx, Coord
 
 from common import kNThreads
@@ -18,36 +20,50 @@ from common import kNThreads
 
 @always_inline
 def _rcp_approx_f32(x: Float32) -> Float32:
-    """Single-instruction `rcp.approx.ftz.f32`, fp32 reciprocal.
+    """Fast fp32 reciprocal — on NVIDIA, a single
+    `rcp.approx.ftz.f32` PTX intrinsic; elsewhere falls back to
+    `1.0 / x` (lowers to whatever the target backend uses).
 
-    The default `1.0 / x` lowers to `div.rn.f32` (IEEE-accurate, several
-    cycles latency on H100). The bwd's silu' computation chains a
-    reciprocal onto `1.0 + exp(-pre)` per element — kNElts of them per
-    chunk-iter per thread. Swapping the IEEE-accurate divide for the
-    `rcp.approx.ftz` PTX intrinsic gets us a single-cycle reciprocal
-    at fp16-ish precision (more than enough for the silu sigmoid
-    backward, whose result is then multiplied by an fp16/bf16 dout).
-    On the fwd kernel this was the largest single perf win (1.25x →
-    1.00x ratio).
+    The default `1.0 / x` on NVIDIA lowers to `div.rn.f32` (IEEE-
+    accurate, several cycles latency on H100). The bwd's silu'
+    computation chains a reciprocal onto `1.0 + exp(-pre)` per element
+    — kNElts of them per chunk-iter per thread. Swapping the IEEE-
+    accurate divide for the `rcp.approx.ftz` PTX intrinsic gets us a
+    single-cycle reciprocal at fp16-ish precision (more than enough
+    for the silu sigmoid backward, whose result is then multiplied by
+    an fp16/bf16 dout). On the fwd kernel this was the largest single
+    perf win (1.25x → 1.00x ratio).
+
+    On Apple Metal we just use the portable divide — there's no nvvm
+    intrinsic and Metal's `1/x` is itself a single MAD-style op on
+    Apple's GPU IR.
     """
-    return llvm_intrinsic["llvm.nvvm.rcp.approx.ftz.f", Float32](x)
+    comptime if is_nvidia_gpu():
+        return llvm_intrinsic["llvm.nvvm.rcp.approx.ftz.f", Float32](x)
+    else:
+        return Float32(1) / x
 
 
 @always_inline
 def _shfl_xor_f32(val: Float32, offset: UInt32) -> Float32:
-    """One inlined `shfl.sync.bfly.b32`, fp32.
+    """One warp-level butterfly shuffle, fp32.
 
-    Why: the stdlib chain `block.sum -> warp.sum -> shuffle_xor -> _shuffle`
-    is `@always_inline` at every level on the Mojo side, but on sm_89 ptxas
-    still outlines each shfl into a `__cuda_sm70_shflsync_bfly` helper. SASS
-    diff vs. upstream's bwd showed 45 `CALL.REL.NOINC` to that helper. By
-    issuing the LLVM intrinsic from a single small leaf and force-inlining
-    every wrapper around it, ptxas stops outlining and generates the bare
-    SHFL.BFLY (matching upstream).
+    On NVIDIA we issue `llvm.nvvm.shfl.sync.bfly.f32` from a single
+    small leaf with everything `@always_inline`d so ptxas stops
+    outlining each shfl into a `__cuda_sm70_shflsync_bfly` helper —
+    SASS diff vs. upstream's bwd showed 45 `CALL.REL.NOINC` to that
+    helper before this change, 0 after.
+
+    On Apple Metal / AMD we fall back to the stdlib's portable
+    `shuffle_xor` (warp size 32 across NVIDIA/AMD/Apple — see
+    `mojo/stdlib/std/gpu/host/info.mojo`).
     """
-    return llvm_intrinsic["llvm.nvvm.shfl.sync.bfly.f32", Float32](
-        Int32(-1), val, offset, Int32(31)
-    )
+    comptime if is_nvidia_gpu():
+        return llvm_intrinsic["llvm.nvvm.shfl.sync.bfly.f32", Float32](
+            Int32(-1), val, offset, Int32(31)
+        )
+    else:
+        return shuffle_xor(val, offset)
 
 
 @always_inline

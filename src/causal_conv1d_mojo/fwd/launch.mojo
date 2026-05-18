@@ -6,19 +6,33 @@ launch logic here keeps each JIT variant template small (~30 lines
 instead of the full ~150-line launcher), so codegen + compile per
 new variant stays cheap.
 
+`stream_handle_addr == 0` is the "no external stream" sentinel —
+used both by pure-Mojo callers (tests) and by the Mac/Metal route
+(Metal has no CUDA-style streams; `DeviceStream` raises "Metal
+stream not implemented" on Apple). We then enqueue on `ctx`
+directly. Otherwise we wrap the caller-supplied CUDA stream.
+
 Caller responsibilities:
 - Bail out on any zero-sized dim (`batch == 0 || dim == 0 || seqlen == 0`)
   *before* calling — DeviceContext + enqueue_function reject grid_dim==0.
 - Pass the comptime params that select the right kernel specialisation.
 """
 
-from std.gpu.host import DeviceContext
+from std.gpu.host import DeviceContext, DeviceStream
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
 
 from kernel import fwd_kernel
 from common import kNThreads
+
+
+# When `stream_handle_addr == 0` (Mac/Metal — Metal has no CUDA-style
+# streams and `DeviceStream` raises "Metal stream not implemented" on
+# the Apple backend), enqueue on `ctx` directly. Otherwise wrap the
+# caller-supplied CUDA stream.
+fn _has_external_stream(stream_handle_addr: Int) -> Bool:
+    return stream_handle_addr != 0
 
 
 def launch_fwd[
@@ -56,10 +70,10 @@ def launch_fwd[
     stream_handle_addr: Int,
 ) raises:
     var ctx = DeviceContext()
+    var has_stream = _has_external_stream(stream_handle_addr)
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
-    var stream = ctx.create_external_stream(stream_opaque)
 
     # One block per (channel, batch); block walks all chunks of seqlen.
     var grid = (dim_int, batch_int)
@@ -125,23 +139,50 @@ def launch_fwd[
                 OLT,
             ],
         ]()
-        stream.enqueue_function(
-            compiled,
-            seqlen_int,
-            x_tt,
-            w_tt,
-            b_ptr,
-            seq_idx_ptr,
-            initial_states_ptr,
-            o_tt,
-            seq_idx_b_stride,
-            seq_idx_l_stride,
-            initial_states_b_stride,
-            initial_states_c_stride,
-            initial_states_l_stride,
-            grid_dim=grid,
-            block_dim=(kNThreads,),
-        )
+        if has_stream:
+            var stream = ctx.create_external_stream(stream_opaque)
+            stream.enqueue_function(
+                compiled,
+                seqlen_int,
+                x_tt,
+                w_tt,
+                b_ptr,
+                seq_idx_ptr,
+                initial_states_ptr,
+                o_tt,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
+                grid_dim=grid,
+                block_dim=(kNThreads,),
+            )
+        else:
+            ctx.enqueue_function(
+                compiled,
+                seqlen_int,
+                x_tt,
+                w_tt,
+                b_ptr,
+                seq_idx_ptr,
+                initial_states_ptr,
+                o_tt,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
+                grid_dim=grid,
+                block_dim=(kNThreads,),
+            )
+            # No external stream: caller is the Mac/MPS path (or a
+            # pure-Mojo test). On MPS we run on Mojo's own command
+            # queue, separate from torch's MPS queue. Block until our
+            # writes are committed so torch's subsequent reads observe
+            # them — torch doesn't track resources written through a
+            # raw `gpuAddress`, so it can't insert the hazard itself.
+            ctx.synchronize()
 
     comptime if contig_inner:
         var x_tt = TileTensor(
@@ -189,3 +230,5 @@ def launch_fwd[
             ),
         )
         launch(x_tt.as_immut(), w_tt.as_immut(), o_tt)
+
+

@@ -13,13 +13,21 @@ Caller responsibilities:
 - Pass the comptime params that select the right kernel specialisation.
 """
 
-from std.gpu.host import DeviceContext
+from std.gpu.host import DeviceContext, DeviceStream
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
 
 from kernel import bwd_full_kernel
 from common import kNThreads
+
+
+# When `stream_handle_addr == 0` (Mac/Metal — Metal has no CUDA-style
+# streams and `DeviceStream` raises "Metal stream not implemented" on
+# the Apple backend), enqueue on `ctx` directly. Otherwise wrap the
+# caller-supplied CUDA stream.
+fn _has_external_stream(stream_handle_addr: Int) -> Bool:
+    return stream_handle_addr != 0
 
 
 def launch_bwd_full[
@@ -68,10 +76,10 @@ def launch_bwd_full[
     stream_handle_addr: Int,
 ) raises:
     var ctx = DeviceContext()
+    var has_stream = _has_external_stream(stream_handle_addr)
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
-    var stream = ctx.create_external_stream(stream_opaque)
 
     var grid = (dim_int, batch_int)
 
@@ -150,30 +158,62 @@ def launch_bwd_full[
                 DxLT,
             ],
         ]()
-        stream.enqueue_function(
-            compiled,
-            seqlen_int,
-            x_tt,
-            w_tt,
-            b_ptr,
-            dout_tt,
-            seq_idx_ptr,
-            initial_states_ptr,
-            dx_tt,
-            dweight_acc_ptr,
-            dbias_acc_ptr,
-            dinitial_states_ptr,
-            seq_idx_b_stride,
-            seq_idx_l_stride,
-            initial_states_b_stride,
-            initial_states_c_stride,
-            initial_states_l_stride,
-            dinitial_states_b_stride,
-            dinitial_states_c_stride,
-            dinitial_states_l_stride,
-            grid_dim=grid,
-            block_dim=(kNThreads,),
-        )
+        if has_stream:
+            var stream = ctx.create_external_stream(stream_opaque)
+            stream.enqueue_function(
+                compiled,
+                seqlen_int,
+                x_tt,
+                w_tt,
+                b_ptr,
+                dout_tt,
+                seq_idx_ptr,
+                initial_states_ptr,
+                dx_tt,
+                dweight_acc_ptr,
+                dbias_acc_ptr,
+                dinitial_states_ptr,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
+                dinitial_states_b_stride,
+                dinitial_states_c_stride,
+                dinitial_states_l_stride,
+                grid_dim=grid,
+                block_dim=(kNThreads,),
+            )
+        else:
+            ctx.enqueue_function(
+                compiled,
+                seqlen_int,
+                x_tt,
+                w_tt,
+                b_ptr,
+                dout_tt,
+                seq_idx_ptr,
+                initial_states_ptr,
+                dx_tt,
+                dweight_acc_ptr,
+                dbias_acc_ptr,
+                dinitial_states_ptr,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
+                dinitial_states_b_stride,
+                dinitial_states_c_stride,
+                dinitial_states_l_stride,
+                grid_dim=grid,
+                block_dim=(kNThreads,),
+            )
+            # No external stream: see comment in fwd/launch.mojo's
+            # equivalent branch — block on Mojo's command queue so
+            # torch sees our writes (we wrote through raw `gpuAddress`
+            # which torch can't hazard-track).
+            ctx.synchronize()
 
     comptime if contig_inner:
         var x_tt = TileTensor(
@@ -235,3 +275,5 @@ def launch_bwd_full[
             ),
         )
         launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)
+
+

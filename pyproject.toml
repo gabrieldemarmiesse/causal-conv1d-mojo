@@ -23,13 +23,15 @@ dev = [
     "pytest>=9.0.3",
     "ruff",
     "pre-commit",
-    # Provides an external `ptxas` so MAX 26.3+ (linked against CUDA-13's
-    # libnvptxcompiler) can run on NVIDIA driver <580. The package itself
-    # exposes a real `nvidia.cuda_nvcc` Python module; we read its
-    # `__file__` at import time to set MODULAR_NVPTX_COMPILER_PATH. See
-    # src/causal_conv1d_mojo/__init__.py.
-    "nvidia-cuda-nvcc-cu12==12.8.*",
-    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl",
+    # Linux x86_64 / NVIDIA-only dev deps: ptxas (for MAX 26.3+ on
+    # NVIDIA driver <580) and the upstream Tri Dao causal-conv1d wheel
+    # (used by the bench env's reference impl). The published wheel is
+    # linux_x86_64 only, and ptxas only matters on NVIDIA, so we gate
+    # both on `sys_platform == 'linux' and platform_machine == 'x86_64'`.
+    # The Mojo GPU code paths on this branch work on Apple Metal via
+    # torch.mps — see `src/causal_conv1d_mojo/_mps.py`.
+    "nvidia-cuda-nvcc-cu12==12.8.*; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "wheel",
     "packaging",
     "setuptools>=70",

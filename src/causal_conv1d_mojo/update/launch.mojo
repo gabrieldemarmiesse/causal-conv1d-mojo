@@ -8,13 +8,21 @@ Caller responsibilities:
 - Pass the comptime params that select the right kernel specialisation.
 """
 
-from std.gpu.host import DeviceContext
+from std.gpu.host import DeviceContext, DeviceStream
 from std.math import ceildiv
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx
 from layout.tile_layout import Layout
 
 from kernel import kNThreadsUpdate, update_kernel
+
+
+# When `stream_handle_addr == 0` (Mac/Metal — Metal has no CUDA-style
+# streams and `DeviceStream` raises "Metal stream not implemented" on
+# the Apple backend), enqueue on `ctx` directly. Otherwise wrap the
+# caller-supplied CUDA stream.
+fn _has_external_stream(stream_handle_addr: Int) -> Bool:
+    return stream_handle_addr != 0
 
 
 def launch_update[
@@ -50,10 +58,10 @@ def launch_update[
     stream_handle_addr: Int,
 ) raises:
     var ctx = DeviceContext()
+    var has_stream = _has_external_stream(stream_handle_addr)
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
-    var stream = ctx.create_external_stream(stream_opaque)
 
     var grid = (batch_int, ceildiv(dim_int, kNThreadsUpdate))
 
@@ -133,17 +141,38 @@ def launch_update[
             type_of(o_tt).LayoutType,
         ],
     ]()
-    stream.enqueue_function(
-        compiled,
-        seqlen_int,
-        state_len_int,
-        x_tt.as_immut(),
-        w_tt.as_immut(),
-        b_ptr,
-        state_tt,
-        state_indices_ptr,
-        cache_seqlens_ptr,
-        o_tt,
-        grid_dim=grid,
-        block_dim=(kNThreadsUpdate,),
-    )
+    if has_stream:
+        var stream = ctx.create_external_stream(stream_opaque)
+        stream.enqueue_function(
+            compiled,
+            seqlen_int,
+            state_len_int,
+            x_tt.as_immut(),
+            w_tt.as_immut(),
+            b_ptr,
+            state_tt,
+            state_indices_ptr,
+            cache_seqlens_ptr,
+            o_tt,
+            grid_dim=grid,
+            block_dim=(kNThreadsUpdate,),
+        )
+    else:
+        ctx.enqueue_function(
+            compiled,
+            seqlen_int,
+            state_len_int,
+            x_tt.as_immut(),
+            w_tt.as_immut(),
+            b_ptr,
+            state_tt,
+            state_indices_ptr,
+            cache_seqlens_ptr,
+            o_tt,
+            grid_dim=grid,
+            block_dim=(kNThreadsUpdate,),
+        )
+        # No external stream: see comment in fwd/launch.mojo's
+        # equivalent branch — block on Mojo's command queue so torch
+        # sees our writes (we wrote through raw `gpuAddress`).
+        ctx.synchronize()
