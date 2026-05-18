@@ -25,8 +25,7 @@ dependencies = [
     { name = "mojo-compiler" },
     { name = "mojo-compiler-mojo-libs" },
     { name = "numpy" },
-    { name = "pytorch-triton-rocm", version = "0.0.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
-    { name = "pytorch-triton-rocm", version = "3.5.1", source = { registry = "https://download.pytorch.org/whl/rocm6.4" }, marker = "sys_platform == 'linux'" },
+    { name = "pytorch-triton-rocm", marker = "sys_platform == 'linux'" },
     { name = "torch", version = "2.9.1+rocm6.4", source = { registry = "https://download.pytorch.org/whl/rocm6.4" }, marker = "sys_platform == 'linux'" },
     { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
 ]
@@ -50,7 +49,6 @@ requires-dist = [
     { name = "mojo-compiler", specifier = "==1.0.0b1" },
     { name = "mojo-compiler-mojo-libs", specifier = "==1.0.0b1" },
     { name = "numpy", specifier = ">=2.4.4" },
-    { name = "pytorch-triton-rocm", marker = "sys_platform != 'linux'" },
     { name = "pytorch-triton-rocm", marker = "sys_platform == 'linux'", index = "https://download.pytorch.org/whl/rocm6.4" },
     { name = "torch", marker = "sys_platform != 'linux'" },
     { name = "torch", marker = "sys_platform == 'linux'", index = "https://download.pytorch.org/whl/rocm6.4" },
@@ -547,22 +545,8 @@ wheels = [
 
 [[package]]
 name = "pytorch-triton-rocm"
-version = "0.0.1"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform != 'linux'",
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/28/82fdf09243fd736aef56b7992f78413745658d1e8363847391771aeaeaba/pytorch_triton_rocm-0.0.1-py3-none-any.whl", hash = "sha256:707d7b9cc424d83e8e83f74dad9deb80df288efbb439f7827fe05a87cd67751d", size = 1530, upload-time = "2023-01-31T00:41:53.276Z" },
-]
-
-[[package]]
-name = "pytorch-triton-rocm"
 version = "3.5.1"
 source = { registry = "https://download.pytorch.org/whl/rocm6.4" }
-resolution-markers = [
-    "sys_platform == 'linux'",
-]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/pytorch_triton_rocm-3.5.1-cp313-cp313-linux_x86_64.whl", upload-time = "2025-11-11T19:18:19Z" },
     { url = "https://download-r2.pytorch.org/whl/pytorch_triton_rocm-3.5.1-cp313-cp313t-linux_x86_64.whl", upload-time = "2025-11-11T19:18:19Z" },
@@ -668,7 +652,7 @@ dependencies = [
     { name = "fsspec", marker = "sys_platform == 'linux'" },
     { name = "jinja2", marker = "sys_platform == 'linux'" },
     { name = "networkx", marker = "sys_platform == 'linux'" },
-    { name = "pytorch-triton-rocm", version = "3.5.1", source = { registry = "https://download.pytorch.org/whl/rocm6.4" }, marker = "sys_platform == 'linux'" },
+    { name = "pytorch-triton-rocm", marker = "sys_platform == 'linux'" },
     { name = "setuptools", version = "82.0.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
     { name = "sympy", marker = "sys_platform == 'linux'" },
     { name = "typing-extensions", marker = "sys_platform == 'linux'" },
