@@ -33,9 +33,45 @@ import causal_conv1d_mojo
 from causal_conv1d_mojo.reference import causal_conv1d_ref, causal_conv1d_update_ref
 from _baseline import BaselineCache
 
-# pixi run -e bench ...
-from causal_conv1d import causal_conv1d_fn as upstream_fn
-from causal_conv1d import causal_conv1d_update as upstream_update_fn
+# Tri Dao upstream (CUDA-only wheel; not on Apple Silicon).
+try:
+    from causal_conv1d import causal_conv1d_fn as upstream_fn
+    from causal_conv1d import causal_conv1d_update as upstream_update_fn
+    _HAS_UPSTREAM = True
+except ImportError:
+    upstream_fn = upstream_update_fn = None
+    _HAS_UPSTREAM = False
+
+
+# `cuda` or `mps`. Selected once at import.
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+elif torch.backends.mps.is_available():
+    DEVICE = "mps"
+else:
+    raise SystemExit("plot_bench needs CUDA or MPS")
+
+
+def _gpu_sync():
+    if DEVICE == "cuda":
+        torch.cuda.synchronize()
+    else:
+        torch.mps.synchronize()
+
+
+def _gpu_name() -> str:
+    if DEVICE == "cuda":
+        return torch.cuda.get_device_name(0)
+    # MPS: on Apple Silicon the GPU is integrated, so report the SoC
+    # name (Apple M4, etc.) from `sysctl machdep.cpu.brand_string`.
+    import subprocess
+
+    try:
+        return subprocess.check_output(
+            ["sysctl", "-n", "machdep.cpu.brand_string"]
+        ).decode().strip()
+    except (OSError, subprocess.SubprocessError):
+        return f"Apple Silicon ({platform.processor() or 'arm64'})"
 
 SHAPES = [
     # Tiny / low-occupancy: kChunkSize=1024 (fp16) so L<=1024 → 1 chunk,
@@ -138,35 +174,56 @@ def pytorch_fwd(x, weight, bias):
 # through the bench, which silently makes the last shapes match pure
 # PyTorch exactly. 64 is comfortably above our shape × grad count.
 torch._dynamo.config.recompile_limit = 64
-pytorch_fwd_compiled = torch.compile(pytorch_fwd)
-update_ref_compiled = torch.compile(causal_conv1d_update_ref)
+# torch.compile's inductor MPS backend (torch 2.8) chokes on the
+# dynamic-shape sympy guards in this conv1d body — `cannot determine
+# truth value of Relational: s53 + 3 <= 1024` from codegen/mps.py.
+# Fall back to eager on MPS; users running on CUDA still get the
+# compiled comparison line on the plot.
+if DEVICE == "cuda":
+    pytorch_fwd_compiled = torch.compile(pytorch_fwd)
+    update_ref_compiled = torch.compile(causal_conv1d_update_ref)
+else:
+    pytorch_fwd_compiled = pytorch_fwd
+    update_ref_compiled = causal_conv1d_update_ref
 
 
 def bench_kernel(fn, warmup: int, iters: int) -> float:
-    """Mean GPU time per call, μs, via torch.profiler (CUPTI).
+    """Mean GPU time per call, μs.
 
-    Warmup runs outside the profiler scope; ITERS calls inside; we sum
-    `self_device_time_total` (μs) over every CUDA event in the trace
-    and divide by ITERS. Captures ALL kernels launched by `fn` — for
-    the PyTorch reference this includes the conv1d + silu fusion, and
-    for the +bwd path it includes the gradient kernels too — which is
-    exactly what we want to compare.
+    CUDA path: `torch.profiler` via CUPTI — sums
+    `self_device_time_total` over every CUDA event in the trace.
+    Captures every kernel `fn` launches (PyTorch's conv1d + silu
+    fusion, gradient kernels, etc.) — exactly the comparison we want.
+
+    MPS path: `torch.profiler.ProfilerActivity.MPS` doesn't exist in
+    torch 2.8 (CPU/CUDA/HPU/MTIA/XPU only), and there's no per-kernel
+    Metal time accessible from Python. Fall back to wall-clock around
+    `iters` sync'd calls — Python+launch overhead is included but at
+    `iters=200` for fwd / 500 for update it's amortised. Same number
+    is reported across impls so ratios stay meaningful.
     """
     for _ in range(warmup):
         fn()
-    torch.cuda.synchronize()
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        record_shapes=False,
-    ) as prof:
-        for _ in range(iters):
-            fn()
-        torch.cuda.synchronize()
-    total_us = 0.0
-    for evt in prof.events():
-        if evt.device_type == torch.autograd.DeviceType.CUDA:
-            total_us += evt.self_device_time_total
-    return total_us / iters
+    _gpu_sync()
+    if DEVICE == "cuda":
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=False,
+        ) as prof:
+            for _ in range(iters):
+                fn()
+            torch.cuda.synchronize()
+        total_us = 0.0
+        for evt in prof.events():
+            if evt.device_type == torch.autograd.DeviceType.CUDA:
+                total_us += evt.self_device_time_total
+        return total_us / iters
+    # MPS wall-clock fallback.
+    t0 = time.perf_counter_ns()
+    for _ in range(iters):
+        fn()
+    torch.mps.synchronize()
+    return (time.perf_counter_ns() - t0) / 1_000.0 / iters
 
 
 def bench_kernel_cpu(fn, warmup: int, iters: int) -> float:
@@ -243,10 +300,8 @@ def grouped_bar(labels, groups, *, title, out_path, baseline_label):
 
 
 def main() -> None:
-    if not torch.cuda.is_available():
-        raise SystemExit("CUDA required")
     g = torch.Generator(device="cpu").manual_seed(0)
-    gpu_name = torch.cuda.get_device_name(0)
+    gpu_name = _gpu_name()
     gpu_slug = _device_slug(gpu_name)
     labels = [f"({b},{d},{l},{w})" for b, d, l, w in SHAPES]
 
@@ -257,9 +312,9 @@ def main() -> None:
 
     for b, d, l, w in SHAPES:
         # ------- forward only -------
-        x = torch.randn(b, d, l, generator=g).to("cuda", torch.float16)
-        weight = torch.randn(d, w, generator=g).to("cuda", torch.float16)
-        bias = torch.randn(d, generator=g).to("cuda", torch.float16)
+        x = torch.randn(b, d, l, generator=g).to(DEVICE, torch.float16)
+        weight = torch.randn(d, w, generator=g).to(DEVICE, torch.float16)
+        bias = torch.randn(d, generator=g).to(DEVICE, torch.float16)
         kw = dict(bias=bias, activation="silu")
         cfg_fwd = {
             "dtype": "fp16",
@@ -273,13 +328,17 @@ def main() -> None:
             WARMUP_FWD,
             ITERS_FWD,
         )
-        u_f = cache.get_or_run(
-            impl="upstream",
-            shape=(b, d, l, w),
-            config=cfg_fwd,
-            run=lambda: bench_kernel(
-                lambda: upstream_fn(x, weight, **kw), WARMUP_FWD, ITERS_FWD
-            ),
+        u_f = (
+            cache.get_or_run(
+                impl="upstream",
+                shape=(b, d, l, w),
+                config=cfg_fwd,
+                run=lambda: bench_kernel(
+                    lambda: upstream_fn(x, weight, **kw), WARMUP_FWD, ITERS_FWD
+                ),
+            )
+            if _HAS_UPSTREAM
+            else 0.0
         )
         p_f = cache.get_or_run(
             impl="pytorch",
@@ -305,7 +364,7 @@ def main() -> None:
         fwd_pt_c.append(pc_f)
 
         # ------- forward + backward -------
-        dout = torch.randn(b, d, l, generator=g).to("cuda", torch.float16)
+        dout = torch.randn(b, d, l, generator=g).to(DEVICE, torch.float16)
         cfg_bwd = {
             "dtype": "fp16",
             "activation": "silu",
@@ -334,11 +393,17 @@ def main() -> None:
             return step
 
         m_b = bench_kernel(make_fwd_bwd("mojo"), WARMUP_BWD, ITERS_BWD)
-        u_b = cache.get_or_run(
-            impl="upstream",
-            shape=(b, d, l, w),
-            config=cfg_bwd,
-            run=lambda: bench_kernel(make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD),
+        u_b = (
+            cache.get_or_run(
+                impl="upstream",
+                shape=(b, d, l, w),
+                config=cfg_bwd,
+                run=lambda: bench_kernel(
+                    make_fwd_bwd("upstream"), WARMUP_BWD, ITERS_BWD
+                ),
+            )
+            if _HAS_UPSTREAM
+            else 0.0
         )
         p_b = cache.get_or_run(
             impl="pytorch",
@@ -365,35 +430,53 @@ def main() -> None:
             f"fwd+bwd: mojo={m_b:7.1f} up={u_b:7.1f} pt={p_b:7.1f} pt-c={pc_b:7.1f}"
         )
 
-    grouped_bar(
-        labels,
-        [
-            ("pure PyTorch (F.conv1d + F.silu)", "#bbbbbb", fwd_pt),
-            ("torch.compile(pure PyTorch)", "#88c070", fwd_pt_c),
-            ("upstream (Tri Dao CUDA)", "#3a78c2", fwd_up),
-            ("mojo (this repo)", "#d05050", fwd_mojo),
-        ],
-        title=(
-            f"causal_conv1d FORWARD — {gpu_name}\n"
-            f"fp16, bias, silu, {ITERS_FWD} iters, GPU kernel time via torch.profiler"
-        ),
-        out_path=DOCS / f"bench_forward__{gpu_slug}.png",
-        baseline_label="upstream (Tri Dao CUDA)",
+    # If upstream Tri Dao isn't installed (e.g. Apple Silicon, where
+    # the wheel is linux_x86_64 only), drop the bar and rebaseline
+    # against pure PyTorch — every plot stays publishable.
+    _bench_method = (
+        "GPU kernel time via torch.profiler"
+        if DEVICE == "cuda"
+        else "wall-clock (mps.synchronize-bracketed)"
+    )
+    fwd_groups = [("pure PyTorch (F.conv1d + F.silu)", "#bbbbbb", fwd_pt)]
+    if DEVICE == "cuda":
+        # torch.compile's inductor MPS backend can't lower this conv,
+        # so on MPS we silently aliased pytorch_fwd_compiled = pytorch_fwd
+        # at module load — drop the duplicate bar to avoid lying.
+        fwd_groups.append(("torch.compile(pure PyTorch)", "#88c070", fwd_pt_c))
+    if _HAS_UPSTREAM:
+        fwd_groups.append(("upstream (Tri Dao CUDA)", "#3a78c2", fwd_up))
+    fwd_groups.append(("mojo (this repo)", "#d05050", fwd_mojo))
+
+    fwd_baseline = (
+        "upstream (Tri Dao CUDA)" if _HAS_UPSTREAM else "pure PyTorch (F.conv1d + F.silu)"
     )
     grouped_bar(
         labels,
-        [
-            ("pure PyTorch (F.conv1d + F.silu)", "#bbbbbb", bwd_pt),
-            ("torch.compile(pure PyTorch)", "#88c070", bwd_pt_c),
-            ("upstream (Tri Dao CUDA)", "#3a78c2", bwd_up),
-            ("mojo (this repo)", "#d05050", bwd_mojo),
-        ],
+        fwd_groups,
+        title=(
+            f"causal_conv1d FORWARD — {gpu_name}\n"
+            f"fp16, bias, silu, {ITERS_FWD} iters, {_bench_method}"
+        ),
+        out_path=DOCS / f"bench_forward__{gpu_slug}.png",
+        baseline_label=fwd_baseline,
+    )
+
+    bwd_groups = [("pure PyTorch (F.conv1d + F.silu)", "#bbbbbb", bwd_pt)]
+    if DEVICE == "cuda":
+        bwd_groups.append(("torch.compile(pure PyTorch)", "#88c070", bwd_pt_c))
+    if _HAS_UPSTREAM:
+        bwd_groups.append(("upstream (Tri Dao CUDA)", "#3a78c2", bwd_up))
+    bwd_groups.append(("mojo (this repo)", "#d05050", bwd_mojo))
+    grouped_bar(
+        labels,
+        bwd_groups,
         title=(
             f"causal_conv1d FORWARD + BACKWARD — {gpu_name}\n"
-            f"fp16, bias, silu, {ITERS_BWD} iters, GPU kernel time via torch.profiler"
+            f"fp16, bias, silu, {ITERS_BWD} iters, {_bench_method}"
         ),
         out_path=DOCS / f"bench_backward__{gpu_slug}.png",
-        baseline_label="upstream (Tri Dao CUDA)",
+        baseline_label=fwd_baseline,
     )
 
     # ---- single-step update bench ----
@@ -411,14 +494,14 @@ def main() -> None:
         "state_len": state_len,
     }
     for b, d in UPDATE_SHAPES:
-        x = torch.randn(b, d, generator=g).to("cuda", torch.float16)
-        weight = torch.randn(d, W, generator=g).to("cuda", torch.float16)
-        bias = torch.randn(d, generator=g).to("cuda", torch.float16)
+        x = torch.randn(b, d, generator=g).to(DEVICE, torch.float16)
+        weight = torch.randn(d, W, generator=g).to(DEVICE, torch.float16)
+        bias = torch.randn(d, generator=g).to(DEVICE, torch.float16)
 
         def make_step(impl, x=x, weight=weight, bias=bias):
             # Each call needs its own state (mutated in place); reset
             # before timing so the per-call cost is consistent.
-            state = torch.randn(b, d, state_len, generator=g).to("cuda", torch.float16)
+            state = torch.randn(b, d, state_len, generator=g).to(DEVICE, torch.float16)
             if impl == "mojo":
                 fn = causal_conv1d_mojo.causal_conv1d_update
             elif impl == "upstream":
@@ -434,13 +517,17 @@ def main() -> None:
             return step
 
         m_u = bench_kernel(make_step("mojo"), WARMUP_UPDATE, ITERS_UPDATE)
-        u_u = cache.get_or_run(
-            impl="upstream",
-            shape=(b, d),
-            config=cfg_upd,
-            run=lambda: bench_kernel(
-                make_step("upstream"), WARMUP_UPDATE, ITERS_UPDATE
-            ),
+        u_u = (
+            cache.get_or_run(
+                impl="upstream",
+                shape=(b, d),
+                config=cfg_upd,
+                run=lambda: bench_kernel(
+                    make_step("upstream"), WARMUP_UPDATE, ITERS_UPDATE
+                ),
+            )
+            if _HAS_UPSTREAM
+            else 0.0
         )
         r_u = cache.get_or_run(
             impl="ref",
@@ -465,21 +552,31 @@ def main() -> None:
             f"ref={r_u:7.1f} ref-c={rc_u:7.1f}"
         )
 
+    update_groups = [
+        ("pure PyTorch (causal_conv1d_update_ref)", "#bbbbbb", update_ref),
+    ]
+    if DEVICE == "cuda":
+        update_groups.append(
+            ("torch.compile(causal_conv1d_update_ref)", "#88c070", update_ref_c)
+        )
+    if _HAS_UPSTREAM:
+        update_groups.append(("upstream (Tri Dao CUDA)", "#3a78c2", update_up))
+    update_groups.append(("mojo (this repo)", "#d05050", update_mojo))
+    update_baseline = (
+        "upstream (Tri Dao CUDA)"
+        if _HAS_UPSTREAM
+        else "pure PyTorch (causal_conv1d_update_ref)"
+    )
     grouped_bar(
         update_labels,
-        [
-            ("pure PyTorch (causal_conv1d_update_ref)", "#bbbbbb", update_ref),
-            ("torch.compile(causal_conv1d_update_ref)", "#88c070", update_ref_c),
-            ("upstream (Tri Dao CUDA)", "#3a78c2", update_up),
-            ("mojo (this repo)", "#d05050", update_mojo),
-        ],
+        update_groups,
         title=(
             f"causal_conv1d_update (single-step decode) — {gpu_name}\n"
             f"fp16, bias, silu, seqlen=1, state_len=3, "
-            f"{ITERS_UPDATE} iters, GPU kernel time via torch.profiler"
+            f"{ITERS_UPDATE} iters, {_bench_method}"
         ),
         out_path=DOCS / f"bench_update__{gpu_slug}.png",
-        baseline_label="upstream (Tri Dao CUDA)",
+        baseline_label=update_baseline,
     )
 
     run_cpu_benches(g, cache)
