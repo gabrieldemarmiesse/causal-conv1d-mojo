@@ -7,10 +7,11 @@ readme = "README.md"
 # Bump once those land.
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "torch==2.8.0",
+    "torch",
     "mojo-compiler==1.0.0b1",
     "mojo-compiler-mojo-libs==1.0.0b1",
     "numpy>=2.4.4",
+    "pytorch-triton-rocm",
 ]
 
 [build-system]
@@ -23,24 +24,48 @@ dev = [
     "pytest>=9.0.3",
     "ruff",
     "pre-commit",
-    # Linux x86_64 / NVIDIA-only dev deps: ptxas (for MAX 26.3+ on
-    # NVIDIA driver <580) and the upstream Tri Dao causal-conv1d wheel
-    # (used by the bench env's reference impl). The published wheel is
-    # linux_x86_64 only, and ptxas only matters on NVIDIA, so we gate
-    # both on `sys_platform == 'linux' and platform_machine == 'x86_64'`.
-    # The Mojo GPU code paths on this branch work on Apple Metal via
-    # torch.mps — see `src/causal_conv1d_mojo/_mps.py`.
+    # Linux-only dev deps (NVIDIA ptxas + the upstream Tri Dao reference
+    # impl, which is built from source against the local torch). On
+    # Apple Silicon / macOS arm64 the Mojo GPU code paths run on Metal
+    # via `torch.mps` — see `src/causal_conv1d_mojo/_mps.py`.
     "nvidia-cuda-nvcc-cu12==12.8.*; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "causal-conv1d; sys_platform == 'linux'",
     "wheel",
     "packaging",
     "setuptools>=70",
 ]
 
+
+
+# ---------------------------------------------------------
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.4"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+# ROCm support relies on both Triton packages, which should also be installed from
+# the PyTorch index (and included in `project.dependencies`).
+pytorch-triton-rocm = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+triton-rocm = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+
+# ---------------------------------------------------------
+
 [tool.uv]
 # `uv sync` installs `dev` by default; users who want bench wheels run
 # `uv sync --extra bench`.
 default-groups = ["dev"]
+# causal-conv1d's setup.py imports torch at build time to detect CUDA vs
+# HIP, so it needs the env's torch — not a fresh PEP-517 build env.
+no-build-isolation-package = ["causal-conv1d"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -8,6 +8,21 @@ the resulting ``.so`` on disk.
 
 Shared codegen + compile + load + cache plumbing lives in
 ``causal_conv1d_mojo._jit_common``.
+
+Performance note (AMD-specific): The Mojo `DeviceContext()` constructor
+calls `hipStreamCreate` under the hood, and the matching `__del__`
+calls `hipStreamDestroy`. At decode shapes the update kernel is only
+~3 us of GPU work, so a per-call stream churn (1 ms+ on the CPU side)
+dwarfs everything else — every iteration shows up as a pair of
+`hipStreamCreate`/`Destroy` calls in the torch.profiler trace, and on
+the GPU side rocprof reports ~5 us per kernel vs ~3 us for upstream.
+
+To avoid this, each variant exposes a `causal_conv1d_update_acquire_ctx`
+entry point. The first call from Python invokes it to obtain a
+process-lifetime DeviceContext handle (refcount-retained so the wrapper
+destructor is a no-op), and caches it. Subsequent dispatches pass that
+handle in to `launch_update`, which wraps it via the doc-hidden
+non-owning constructor — no new hipStream is created per call.
 """
 
 from __future__ import annotations
@@ -24,12 +39,11 @@ _DTYPE_EXPR = {0: "DType.float16", 1: "DType.bfloat16", 2: "DType.float32"}
 
 
 def call_update(args: tuple) -> None:
-    """JIT-compile (if needed) and dispatch a single update call.
-
-    Appends the cached `ctx_handle` from `_get_variant_fn` as the
-    trailing arg — see fwd/_jit.py for the matching pattern.
-    """
-    variant_fn, ctx_handle = _get_variant_fn(_config_from_args(args))
+    """JIT-compile (if needed) and dispatch a single update call."""
+    config = _config_from_args(args)
+    variant_fn, ctx_handle = _get_variant_fn(config)
+    # Tack ctx_handle on as the 30th positional arg — the variant
+    # entry point destructures `args[29]` for it.
     variant_fn(*args, ctx_handle)
 
 
@@ -68,6 +82,9 @@ def _get_variant_fn(config: tuple):
         variant_source=_generate_variant_source(mod_name, config),
         entry_point_name="causal_conv1d_update_variant",
     )
+    # The shared loader stashes the loaded variant module in
+    # sys.modules so we can grab the one-shot ctx-handle helper without
+    # re-importing the .so.
     module = sys.modules[mod_name]
     acquire = getattr(module, "causal_conv1d_update_acquire_ctx")
     ctx_handle = int(acquire(()))
@@ -101,6 +118,11 @@ def causal_conv1d_update_acquire_ctx(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
+    """Create + retain a process-lifetime DeviceContext.
+
+    Called once per variant from the Python side; the returned address
+    is reused for every subsequent `causal_conv1d_update_variant` call.
+    """
     var addr: Int = acquire_ctx_handle()
     return PythonObject(addr)
 
