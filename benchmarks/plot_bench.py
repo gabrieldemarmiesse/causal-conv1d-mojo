@@ -205,25 +205,13 @@ def bench_kernel(fn, warmup: int, iters: int) -> float:
     for _ in range(warmup):
         fn()
     _gpu_sync()
-    if DEVICE == "cuda":
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            record_shapes=False,
-        ) as prof:
-            for _ in range(iters):
-                fn()
-            torch.cuda.synchronize()
-        total_us = 0.0
-        for evt in prof.events():
-            if evt.device_type == torch.autograd.DeviceType.CUDA:
-                total_us += evt.self_device_time_total
-        return total_us / iters
-    # MPS wall-clock fallback.
-    t0 = time.perf_counter_ns()
+    
+    t = time.clock_gettime_ns()
     for _ in range(iters):
         fn()
-    torch.mps.synchronize()
-    return (time.perf_counter_ns() - t0) / 1_000.0 / iters
+    _gpu_sync()
+    total_us = (time.clock_gettime_ns() - t) / 1_000.0
+    return total_us / iters
 
 
 def bench_kernel_cpu(fn, warmup: int, iters: int) -> float:
