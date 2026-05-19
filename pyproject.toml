@@ -1,7 +1,7 @@
 [project]
 name = "causal-conv1d-mojo"
 version = "0.0.1"
-description = "Add your description here"
+description = "A wheel for causal-conv1d that works everywhere."
 readme = "README.md"
 # Pinned to 3.13: torch 2.8.0 ships prebuilt cp313 wheels but not cp314.
 # Bump once those land.
