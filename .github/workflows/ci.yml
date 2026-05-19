@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel any in-flight run on the same ref when a new commit lands — avoids
+# burning runner minutes on superseded PR pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies
+        run: uv sync
+      - name: Run pre-commit
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+  test:
+    # One job per test file so the four files run in parallel — total
+    # wall-clock is `max(per-file time)` rather than the sum. fail-fast=false
+    # so a single failing file still surfaces the rest of the results.
+    name: pytest ${{ matrix.test_file }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test_file:
+          - tests/test_bwd.py
+          - tests/test_fwd.py
+          - tests/test_imports.py
+          - tests/test_update.py
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies
+        run: uv sync
+      - name: Run tests
+        run: uv run pytest ${{ matrix.test_file }} -v
