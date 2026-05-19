@@ -187,31 +187,33 @@ else:
     update_ref_compiled = causal_conv1d_update_ref
 
 
-def bench_kernel(fn, warmup: int, iters: int) -> float:
-    """Mean GPU time per call, μs.
+def bench_kernel(fn, warmup: int, iters: int, *, batches: int = 5) -> float:
+    """Min mean GPU time per call, μs.
 
-    CUDA path: `torch.profiler` via CUPTI — sums
-    `self_device_time_total` over every CUDA event in the trace.
-    Captures every kernel `fn` launches (PyTorch's conv1d + silu
-    fusion, gradient kernels, etc.) — exactly the comparison we want.
-
-    MPS path: `torch.profiler.ProfilerActivity.MPS` doesn't exist in
-    torch 2.8 (CPU/CUDA/HPU/MTIA/XPU only), and there's no per-kernel
-    Metal time accessible from Python. Fall back to wall-clock around
-    `iters` sync'd calls — Python+launch overhead is included but at
-    `iters=200` for fwd / 500 for update it's amortised. Same number
-    is reported across impls so ratios stay meaningful.
+    Splits `iters` into `batches` sub-batches and returns the min
+    sub-batch mean. Wall-clock measurements on a busy GPU are bimodal —
+    one slow run (e.g. an allocator hiccup, GPU clock dip, or the
+    profiler-induced freeze) inflates the mean of all `iters` together
+    even when the underlying steady-state is fine. Min-of-batches
+    rejects those outliers without losing accuracy on the fast shapes
+    (each sub-batch is still `iters // batches` calls, large enough to
+    amortise the per-iter `perf_counter` overhead).
     """
     for _ in range(warmup):
         fn()
     _gpu_sync()
-    
-    t = time.perf_counter_ns()
-    for _ in range(iters):
-        fn()
-    _gpu_sync()
-    total_us = (time.perf_counter_ns() - t) / 1_000.0
-    return total_us / iters
+
+    sub = max(1, iters // batches)
+    best_ns = float("inf")
+    for _ in range(batches):
+        t = time.perf_counter_ns()
+        for _ in range(sub):
+            fn()
+        _gpu_sync()
+        dt = time.perf_counter_ns() - t
+        if dt < best_ns:
+            best_ns = dt
+    return best_ns / 1_000.0 / sub
 
 
 def bench_kernel_cpu(fn, warmup: int, iters: int) -> float:
