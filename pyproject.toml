@@ -14,6 +14,18 @@ dependencies = [
     #"pytorch-triton-rocm; sys_platform == 'linux'",
 ]
 
+[project.optional-dependencies]
+nvidia = [
+    "torch==2.8.0 ; sys_platform == 'linux'",
+    "nvidia-cuda-nvcc-cu12==12.8.* ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux'",
+]
+rocm = [
+    "torch==2.8.0 ; sys_platform == 'linux'",
+    "pytorch-triton-rocm ; sys_platform == 'linux'",
+    "causal-conv1d ; sys_platform == 'linux'",
+]
+
 [build-system]
 requires = ["setuptools>=70"]
 build-backend = "setuptools.build_meta"
@@ -24,12 +36,6 @@ dev = [
     "pytest>=9.0.3",
     "ruff",
     "pre-commit",
-    # Linux-only dev deps (NVIDIA ptxas + the upstream Tri Dao reference
-    # impl, which is built from source against the local torch). On
-    # Apple Silicon / macOS arm64 the Mojo GPU code paths run on Metal
-    # via `torch.mps` — see `src/causal_conv1d_mojo/_mps.py`.
-    "nvidia-cuda-nvcc-cu12==12.8.*; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl; sys_platform == 'linux'",
     "wheel",
     "packaging",
     "setuptools>=70",
@@ -71,12 +77,45 @@ torch = [
 # ---------------------------------------------------------
 
 [tool.uv]
-# `uv sync` installs `dev` by default; users who want bench wheels run
-# `uv sync --extra bench`.
 default-groups = ["dev"]
+<<<<<<< HEAD
 # causal-conv1d's setup.py imports torch at build time to detect CUDA vs
 # HIP, so it needs the env's torch — not a fresh PEP-517 build env.
 no-build-isolation-package = ["causal-conv1d"]
+=======
+# nvidia and rocm both want to source torch from a different PyTorch
+# index, so they cannot be resolved together — declare them as a
+# conflicting extras pair.
+conflicts = [
+    [
+        { extra = "nvidia" },
+        { extra = "rocm" },
+    ],
+]
+# causal-conv1d's setup.py imports torch at build time to detect CUDA vs
+# HIP, so it needs the env's torch — not a fresh PEP-517 build env.
+no-build-isolation-package = ["causal-conv1d"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", extra = "nvidia" },
+    { index = "pytorch-rocm", extra = "rocm" },
+]
+# ROCm Triton ships on the same index as the ROCm torch wheels.
+pytorch-triton-rocm = [
+    { index = "pytorch-rocm", extra = "rocm" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.4"
+explicit = true
+>>>>>>> main
 
 [tool.setuptools.packages.find]
 where = ["src"]
