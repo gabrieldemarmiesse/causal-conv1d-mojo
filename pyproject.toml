@@ -41,48 +41,9 @@ dev = [
     "setuptools>=70",
 ]
 
-# ---------------------------------------------------------
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
-]
-
-
-# ---------------------------------------------------------
-
-# [[tool.uv.index]]
-# name = "pytorch-rocm"
-# url = "https://download.pytorch.org/whl/rocm6.4"
-# explicit = true
-# 
-# [tool.uv.sources]
-# torch = [
-#   { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-# ]
-# # ROCm support relies on both Triton packages, which should also be installed from
-# # the PyTorch index (and included in `project.dependencies`).
-# pytorch-triton-rocm = [
-#   { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-# ]
-# triton-rocm = [
-#   { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-# ]
-
-# ---------------------------------------------------------
-
 [tool.uv]
 default-groups = ["dev"]
-<<<<<<< HEAD
-# causal-conv1d's setup.py imports torch at build time to detect CUDA vs
-# HIP, so it needs the env's torch — not a fresh PEP-517 build env.
-no-build-isolation-package = ["causal-conv1d"]
-=======
+
 # nvidia and rocm both want to source torch from a different PyTorch
 # index, so they cannot be resolved together — declare them as a
 # conflicting extras pair.
@@ -115,7 +76,6 @@ explicit = true
 name = "pytorch-rocm"
 url = "https://download.pytorch.org/whl/rocm6.4"
 explicit = true
->>>>>>> main
 
 [tool.setuptools.packages.find]
 where = ["src"]
