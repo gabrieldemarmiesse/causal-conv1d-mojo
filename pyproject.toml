@@ -1,6 +1,6 @@
 [project]
 name = "causal-conv1d-mojo"
-version = "0.1.0"
+version = "0.0.1"
 description = "Add your description here"
 readme = "README.md"
 # Pinned to 3.13: torch 2.8.0 ships prebuilt cp313 wheels but not cp314.
@@ -10,8 +10,6 @@ dependencies = [
     "torch==2.8.0",
     "mojo-compiler==1.0.0b1",
     "mojo-compiler-mojo-libs==1.0.0b1",
-    "numpy>=2.4.4",
-    #"pytorch-triton-rocm; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +37,7 @@ dev = [
     "wheel",
     "packaging",
     "setuptools>=70",
+    "numpy>=2.0.0",
 ]
 
 [tool.uv]
