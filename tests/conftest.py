@@ -1,6 +1,17 @@
 import pytest
 import torch
 
+import causal_conv1d_mojo._fn as _fn_mod
+import causal_conv1d_mojo._update as _update_mod
+
+
+# Disable the MPS small-shape fallback for tests so we actually exercise
+# the Mojo kernels at every shape — otherwise the small-shape suite
+# would just be testing causal_conv1d_ref against itself. Setting the
+# threshold to 0 makes the `n_elts < threshold` gate never fire.
+_fn_mod._MPS_FWD_FALLBACK_THRESHOLD = 0
+_update_mod._MPS_UPDATE_FALLBACK_THRESHOLD = 0
+
 
 # Make every test deterministic. Failures near the tolerance threshold
 # should be reproducible — without this, a flaky test would only fail
