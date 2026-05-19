@@ -48,7 +48,39 @@ def causal_conv1d_update(
         redirected coord (matching upstream).
 
     Returns: out tensor with the same shape as `x`.
+
+    Accepts either `torch.Tensor` or `jax.Array` inputs. jax arrays
+    are bridged to torch views via DLPack (zero-copy), the torch
+    impl runs (mutating `conv_state` in place — the mutation is
+    visible to jax through the shared buffer), and `out` is
+    converted back to jax.
     """
+    from causal_conv1d_mojo._jax_bridge import any_jax, jax_to_torch, torch_to_jax
+
+    if any_jax(x, conv_state, weight, bias, cache_seqlens, conv_state_indices):
+        # See `_fn.py`'s causal_conv1d_fn jax bridge for the rationale —
+        # torch tensors pass through unchanged so callers can mix
+        # backends. `conv_state` is the in-place arg; the DLPack view
+        # shares storage with the jax array, so the kernel's writes
+        # are visible to jax through the same buffer.
+        from causal_conv1d_mojo._jax_bridge import is_jax_array
+
+        def _to_t(a):
+            if a is None or not is_jax_array(a):
+                return a
+            return jax_to_torch(a)
+
+        out_t = causal_conv1d_update(
+            _to_t(x),
+            _to_t(conv_state),
+            _to_t(weight),
+            _to_t(bias),
+            activation,
+            _to_t(cache_seqlens),
+            _to_t(conv_state_indices),
+        )
+        return torch_to_jax(out_t)
+
     if activation not in (None, "silu", "swish"):
         raise NotImplementedError(
             "only activation in {None, 'silu', 'swish'} is supported"

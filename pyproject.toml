@@ -38,6 +38,11 @@ dev = [
     "pre-commit",
     "wheel",
     "packaging",
+    # Used by tests/test_jax.py to verify the public Python API accepts
+    # jax.Array inputs. CUDA-enabled wheel is Linux-only; on macOS the
+    # plain `jax` (CPU/Metal) is fine for cross-platform verification.
+    "jax[cuda12] ; sys_platform == 'linux'",
+    "jax ; sys_platform != 'linux'",
     "setuptools>=70",
 ]
 

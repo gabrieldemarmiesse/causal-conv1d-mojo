@@ -203,7 +203,44 @@ def causal_conv1d_fn(
     activation: either None or "silu" or "swish"
 
     out: (batch, dim, seqlen)
+
+    Accepts either `torch.Tensor` or `jax.Array` inputs. jax arrays
+    are bridged to torch views via DLPack (zero-copy), the torch
+    impl runs, and outputs are converted back to jax. No autograd
+    on the jax path — for differentiable use from jax, wrap in your
+    own `jax.custom_vjp`.
     """
+    from causal_conv1d_mojo._jax_bridge import any_jax, jax_to_torch, torch_to_jax
+
+    if any_jax(x, weight, bias, seq_idx, initial_states, final_states_out):
+        # DLPack-bridge any jax inputs to torch views, recurse through
+        # the torch path, then bridge results back. `final_states_out`
+        # is written in place by the torch impl — its jax view sees
+        # the mutation because the underlying buffer is shared.
+        # Torch tensors are passed through untouched so callers can
+        # mix backends (e.g. a long-lived torch weight + a per-step
+        # jax activation).
+        from causal_conv1d_mojo._jax_bridge import is_jax_array
+
+        def _to_t(a):
+            if a is None or not is_jax_array(a):
+                return a
+            return jax_to_torch(a)
+
+        result = causal_conv1d_fn(
+            _to_t(x),
+            _to_t(weight),
+            _to_t(bias),
+            _to_t(seq_idx),
+            _to_t(initial_states),
+            return_final_states,
+            _to_t(final_states_out),
+            activation,
+        )
+        if return_final_states:
+            return torch_to_jax(result[0]), torch_to_jax(result[1])
+        return torch_to_jax(result)
+
     if activation not in (None, "silu", "swish"):
         raise NotImplementedError(
             "only activation in {None, 'silu', 'swish'} is supported"
