@@ -55,7 +55,9 @@ def main() -> None:
     args = ap.parse_args()
 
     print(f"per-package caches under: {ROOT}/<subpkg>/__mojocache__/")
-    print(f"global mojo cache:        {GLOBAL_CACHE} ({_dir_size_mb(GLOBAL_CACHE):.0f} MB)")
+    print(
+        f"global mojo cache:        {GLOBAL_CACHE} ({_dir_size_mb(GLOBAL_CACHE):.0f} MB)"
+    )
     print()
 
     for sub in SUBPKGS:

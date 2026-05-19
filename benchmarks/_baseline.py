@@ -62,9 +62,7 @@ class BaselineCache:
         name = Path(bench_path).stem  # e.g. "bench_forward_extensive"
         _BASELINE_DIR.mkdir(parents=True, exist_ok=True)
         self.path = _BASELINE_DIR / f"{name}.json"
-        self.gpu = (
-            torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
-        )
+        self.gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
         self._records: list[dict[str, Any]] = []
         self._index: dict[tuple, float] = {}
         self._refresh = _refresh_set()

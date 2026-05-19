@@ -27,7 +27,6 @@ iteration:
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 from typing import Callable
 
 import torch
@@ -150,11 +149,7 @@ def _make_bwd_call(impl: str, shape, *, dtype, activation, device, g):
     bias = torch.randn(d, generator=g).to(device=device, dtype=dtype)
     dout = torch.randn(b, d, l, generator=g).to(device=device, dtype=dtype)
 
-    fwd = (
-        causal_conv1d_mojo.causal_conv1d_fn
-        if impl == "mojo"
-        else upstream_fn
-    )
+    fwd = causal_conv1d_mojo.causal_conv1d_fn if impl == "mojo" else upstream_fn
 
     def call():
         x_ = x.detach().requires_grad_()
@@ -214,22 +209,32 @@ def run_fwd(args, shapes, device, dtype, g) -> None:
 
         if want in ("mojo", "both"):
             call = _make_fwd_call(
-                "mojo", shape,
-                dtype=dtype, activation=args.activation, device=device, g=g,
+                "mojo",
+                shape,
+                dtype=dtype,
+                activation=args.activation,
+                device=device,
+                g=g,
             )
             mojo_us = _bench(call, _is_mojo_fwd, args.iters, args.warmup)
 
         if want in ("upstream", "both"):
+
             def run_up():
                 call = _make_fwd_call(
-                    "upstream", shape,
-                    dtype=dtype, activation=args.activation, device=device, g=g,
+                    "upstream",
+                    shape,
+                    dtype=dtype,
+                    activation=args.activation,
+                    device=device,
+                    g=g,
                 )
                 return _bench(call, _is_upstream_fwd, args.iters, args.warmup)
 
             up_us = (
                 cache.get_or_run(impl="upstream", shape=shape, config=cfg, run=run_up)
-                if cache is not None else run_up()
+                if cache is not None
+                else run_up()
             )
 
         ratio = (mojo_us / up_us) if (want == "both" and up_us) else float("nan")
@@ -266,22 +271,34 @@ def run_bwd(args, shapes, device, dtype, g) -> None:
 
         if want in ("mojo", "both"):
             call = _make_bwd_call(
-                "mojo", shape,
-                dtype=dtype, activation=args.activation, device=device, g=g,
+                "mojo",
+                shape,
+                dtype=dtype,
+                activation=args.activation,
+                device=device,
+                g=g,
             )
             mojo_us = _bench(call, _is_mojo_bwd, args.iters, args.warmup)
 
         if want in ("upstream", "both"):
+
             def run_up():
                 call = _make_bwd_call(
-                    "upstream", shape,
-                    dtype=dtype, activation=args.activation, device=device, g=g,
+                    "upstream",
+                    shape,
+                    dtype=dtype,
+                    activation=args.activation,
+                    device=device,
+                    g=g,
                 )
                 return _bench(call, _is_upstream_bwd, args.iters, args.warmup)
 
             up_us = (
-                cache.get_or_run(impl="upstream_bwd", shape=shape, config=cfg, run=run_up)
-                if cache is not None else run_up()
+                cache.get_or_run(
+                    impl="upstream_bwd", shape=shape, config=cfg, run=run_up
+                )
+                if cache is not None
+                else run_up()
             )
 
         ratio = (mojo_us / up_us) if (want == "both" and up_us) else float("nan")
@@ -321,22 +338,34 @@ def run_update(args, shapes, device, dtype, g) -> None:
 
         if want in ("mojo", "both"):
             call = _make_update_call(
-                "mojo", shape,
-                dtype=dtype, activation=args.activation, device=device, g=g,
+                "mojo",
+                shape,
+                dtype=dtype,
+                activation=args.activation,
+                device=device,
+                g=g,
             )
             mojo_us = _bench(call, _is_mojo_update, args.iters, args.warmup)
 
         if want in ("upstream", "both"):
+
             def run_up():
                 call = _make_update_call(
-                    "upstream", shape,
-                    dtype=dtype, activation=args.activation, device=device, g=g,
+                    "upstream",
+                    shape,
+                    dtype=dtype,
+                    activation=args.activation,
+                    device=device,
+                    g=g,
                 )
                 return _bench(call, _is_upstream_update, args.iters, args.warmup)
 
             up_us = (
-                cache.get_or_run(impl="upstream_update", shape=shape, config=cfg, run=run_up)
-                if cache is not None else run_up()
+                cache.get_or_run(
+                    impl="upstream_update", shape=shape, config=cfg, run=run_up
+                )
+                if cache is not None
+                else run_up()
             )
 
         ratio = (mojo_us / up_us) if (want == "both" and up_us) else float("nan")
@@ -361,14 +390,14 @@ def main() -> None:
         choices=("fwd", "bwd", "update", "all"),
         default="all",
         help="Which kernel(s) to bench. Default `all` runs fwd + update "
-             "(bwd needs the autograd graph and is opt-in).",
+        "(bwd needs the autograd graph and is opt-in).",
     )
     p.add_argument(
         "--impl",
         choices=("mojo", "upstream", "both"),
         default="both",
         help="Which implementation to time. `mojo` is the fast-feedback mode "
-             "when iterating on the Mojo kernel.",
+        "when iterating on the Mojo kernel.",
     )
     p.add_argument(
         "--shape",

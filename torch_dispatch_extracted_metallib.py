@@ -40,11 +40,15 @@ METALLIB.write_bytes(data[start : start + size])
 print(f"extracted metallib: {METALLIB} ({size} bytes)")
 
 # Read the kernel symbol from the metallib.
-sym = subprocess.run(
-    ["xcrun", "--sdk", "macosx", "metal-nm", str(METALLIB)],
-    capture_output=True,
-    text=True,
-).stdout.strip().split()[-1]
+sym = (
+    subprocess.run(
+        ["xcrun", "--sdk", "macosx", "metal-nm", str(METALLIB)],
+        capture_output=True,
+        text=True,
+    )
+    .stdout.strip()
+    .split()[-1]
+)
 print(f"kernel symbol: {sym}")
 
 # --- 3. Obj-C plumbing --------------------------------------------------------
@@ -69,9 +73,7 @@ def msg(restype, sender, sel_name, argtypes=(), args=()):
 _ = torch.zeros(1, device="mps")
 torch.mps.synchronize()
 
-torch_lib = ctypes.cdll.LoadLibrary(
-    f"{torch.__file__[:-12]}/lib/libtorch_cpu.dylib"
-)
+torch_lib = ctypes.cdll.LoadLibrary(f"{torch.__file__[:-12]}/lib/libtorch_cpu.dylib")
 torch_lib._ZN2at3mps19getCurrentMPSStreamEv.restype = ctypes.c_void_p
 torch_lib._ZN2at3mps19getCurrentMPSStreamEv.argtypes = []
 stream_ptr = torch_lib._ZN2at3mps19getCurrentMPSStreamEv()
@@ -87,33 +89,48 @@ ns_str_cls = libobjc.objc_getClass(b"NSString")
 ns_url_cls = libobjc.objc_getClass(b"NSURL")
 
 ns_path = msg(
-    ctypes.c_void_p, ns_str_cls, "stringWithUTF8String:",
-    argtypes=(ctypes.c_char_p,), args=(str(METALLIB).encode(),),
+    ctypes.c_void_p,
+    ns_str_cls,
+    "stringWithUTF8String:",
+    argtypes=(ctypes.c_char_p,),
+    args=(str(METALLIB).encode(),),
 )
 url = msg(
-    ctypes.c_void_p, ns_url_cls, "fileURLWithPath:",
-    argtypes=(ctypes.c_void_p,), args=(ns_path,),
+    ctypes.c_void_p,
+    ns_url_cls,
+    "fileURLWithPath:",
+    argtypes=(ctypes.c_void_p,),
+    args=(ns_path,),
 )
 err = ctypes.c_void_p(0)
 library = msg(
-    ctypes.c_void_p, mtl_device, "newLibraryWithURL:error:",
+    ctypes.c_void_p,
+    mtl_device,
+    "newLibraryWithURL:error:",
     argtypes=(ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
     args=(url, ctypes.byref(err)),
 )
 assert library, "newLibraryWithURL failed"
 
 fn_name_ns = msg(
-    ctypes.c_void_p, ns_str_cls, "stringWithUTF8String:",
-    argtypes=(ctypes.c_char_p,), args=(sym.encode(),),
+    ctypes.c_void_p,
+    ns_str_cls,
+    "stringWithUTF8String:",
+    argtypes=(ctypes.c_char_p,),
+    args=(sym.encode(),),
 )
 mtl_function = msg(
-    ctypes.c_void_p, library, "newFunctionWithName:",
-    argtypes=(ctypes.c_void_p,), args=(fn_name_ns,),
+    ctypes.c_void_p,
+    library,
+    "newFunctionWithName:",
+    argtypes=(ctypes.c_void_p,),
+    args=(fn_name_ns,),
 )
 assert mtl_function, f"newFunctionWithName failed for {sym!r}"
 err = ctypes.c_void_p(0)
 pso = msg(
-    ctypes.c_void_p, mtl_device,
+    ctypes.c_void_p,
+    mtl_device,
     "newComputePipelineStateWithFunction:error:",
     argtypes=(ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
     args=(mtl_function, ctypes.byref(err)),
@@ -131,9 +148,7 @@ SEL_CMD_BUF = libobjc.sel_registerName(b"commandBuffer")
 SEL_ENCODER = libobjc.sel_registerName(b"computeCommandEncoder")
 SEL_SET_PSO = libobjc.sel_registerName(b"setComputePipelineState:")
 SEL_SET_BYTES = libobjc.sel_registerName(b"setBytes:length:atIndex:")
-SEL_DISPATCH = libobjc.sel_registerName(
-    b"dispatchThreadgroups:threadsPerThreadgroup:"
-)
+SEL_DISPATCH = libobjc.sel_registerName(b"dispatchThreadgroups:threadsPerThreadgroup:")
 SEL_END = libobjc.sel_registerName(b"endEncoding")
 SEL_COMMIT = libobjc.sel_registerName(b"commit")
 
@@ -156,8 +171,11 @@ def launch_noop():
     send(enc, SEL_SET_PSO, pso)
 
     send.argtypes = [
-        ctypes.c_void_p, ctypes.c_void_p,
-        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
     ]
     send(enc, SEL_SET_BYTES, DUMMY_PTR, 8, 0)
 

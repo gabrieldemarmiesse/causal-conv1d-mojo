@@ -28,15 +28,18 @@ import torch.nn.functional as F
 # OMP_NUM_THREADS in env). Pin to physical cores: hyperthread siblings
 # don't help compute-bound kernels and just add scheduling noise.
 torch.set_num_threads(max(1, (os.cpu_count() or 2) // 2))
-from torch.profiler import ProfilerActivity, profile
-import causal_conv1d_mojo
-from causal_conv1d_mojo.reference import causal_conv1d_ref, causal_conv1d_update_ref
-from _baseline import BaselineCache
+import causal_conv1d_mojo  # noqa: E402
+from causal_conv1d_mojo.reference import (  # noqa: E402
+    causal_conv1d_ref,
+    causal_conv1d_update_ref,
+)
+from _baseline import BaselineCache  # noqa: E402
 
 # Tri Dao upstream (CUDA-only wheel; not on Apple Silicon).
 try:
     from causal_conv1d import causal_conv1d_fn as upstream_fn
     from causal_conv1d import causal_conv1d_update as upstream_update_fn
+
     _HAS_UPSTREAM = True
 except ImportError:
     upstream_fn = upstream_update_fn = None
@@ -67,11 +70,14 @@ def _gpu_name() -> str:
     import subprocess
 
     try:
-        return subprocess.check_output(
-            ["sysctl", "-n", "machdep.cpu.brand_string"]
-        ).decode().strip()
+        return (
+            subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"])
+            .decode()
+            .strip()
+        )
     except (OSError, subprocess.SubprocessError):
         return f"Apple Silicon ({platform.processor() or 'arm64'})"
+
 
 SHAPES = [
     # Tiny / low-occupancy: kChunkSize=1024 (fp16) so L<=1024 → 1 chunk,
@@ -439,7 +445,9 @@ def main() -> None:
     fwd_groups.append(("mojo (this repo)", "#d05050", fwd_mojo))
 
     fwd_baseline = (
-        "upstream (Tri Dao CUDA)" if _HAS_UPSTREAM else "pure PyTorch (F.conv1d + F.silu)"
+        "upstream (Tri Dao CUDA)"
+        if _HAS_UPSTREAM
+        else "pure PyTorch (F.conv1d + F.silu)"
     )
     grouped_bar(
         labels,

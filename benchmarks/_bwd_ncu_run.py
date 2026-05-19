@@ -31,30 +31,16 @@ def main() -> None:
     W = int(os.environ.get("BENCH_W", 4))
 
     g = torch.Generator(device="cpu").manual_seed(0)
-    x = (
-        torch.randn(B, D, L, generator=g)
-        .to("cuda", torch.float16)
-        .requires_grad_()
-    )
-    weight = (
-        torch.randn(D, W, generator=g)
-        .to("cuda", torch.float16)
-        .requires_grad_()
-    )
-    bias = (
-        torch.randn(D, generator=g)
-        .to("cuda", torch.float16)
-        .requires_grad_()
-    )
+    x = torch.randn(B, D, L, generator=g).to("cuda", torch.float16).requires_grad_()
+    weight = torch.randn(D, W, generator=g).to("cuda", torch.float16).requires_grad_()
+    bias = torch.randn(D, generator=g).to("cuda", torch.float16).requires_grad_()
     dout = torch.randn(B, D, L, generator=g).to("cuda", torch.float16)
 
     for _ in range(5):
         x_ = x.detach().requires_grad_()
         w_ = weight.detach().requires_grad_()
         b_ = bias.detach().requires_grad_()
-        out = causal_conv1d_mojo.causal_conv1d_fn(
-            x_, w_, bias=b_, activation="silu"
-        )
+        out = causal_conv1d_mojo.causal_conv1d_fn(x_, w_, bias=b_, activation="silu")
         out.backward(dout)
     torch.cuda.synchronize()
 
@@ -63,9 +49,7 @@ def main() -> None:
         x_ = x.detach().requires_grad_()
         w_ = weight.detach().requires_grad_()
         b_ = bias.detach().requires_grad_()
-        out = causal_conv1d_mojo.causal_conv1d_fn(
-            x_, w_, bias=b_, activation="silu"
-        )
+        out = causal_conv1d_mojo.causal_conv1d_fn(x_, w_, bias=b_, activation="silu")
         out.backward(dout)
     torch.cuda.synchronize()
 

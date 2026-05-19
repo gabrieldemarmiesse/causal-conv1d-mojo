@@ -10,6 +10,7 @@ Usage:
 or:
     uv run python benchmarks/bench_small_fwd.py
 """
+
 from __future__ import annotations
 
 import time
@@ -77,6 +78,7 @@ def main():
     bench("torch.empty_like(x) only", lambda: torch.empty_like(x))
 
     from causal_conv1d_mojo._mps import gpu_address  # noqa
+
     bench(
         "gpu_address(x) (Obj-C msgSend cost)",
         lambda: gpu_address(x),
@@ -86,6 +88,7 @@ def main():
     # `_CausalConv1dFn.apply(x, weight, bias, ...)` — exercise the
     # path bypasses (no autograd op needed).
     from causal_conv1d_mojo.fwd import native_fwd_mps
+
     out_buf = torch.empty_like(x)
     bench(
         "native_fwd_mps direct (skip autograd)",
@@ -95,7 +98,7 @@ def main():
     # Strip torch.mps.synchronize from native_fwd_mps to see what its
     # call_fwd costs in isolation.
     from causal_conv1d_mojo.fwd._jit import call_fwd
-    from causal_conv1d_mojo._dtype import _DTYPE_CODE, _ptr
+    from causal_conv1d_mojo._dtype import _DTYPE_CODE
 
     def call_fwd_only():
         call_fwd(
@@ -104,14 +107,31 @@ def main():
                 gpu_address(weight),
                 gpu_address(bias),
                 gpu_address(out_buf),
-                x.shape[0], x.shape[1], x.shape[2],
-                x.stride(0), x.stride(1), x.stride(2),
-                weight.stride(0), weight.stride(1),
-                out_buf.stride(0), out_buf.stride(1), out_buf.stride(2),
-                1, 1, _DTYPE_CODE[x.dtype], 0,
-                0, 0, 0, 0,
+                x.shape[0],
+                x.shape[1],
+                x.shape[2],
+                x.stride(0),
+                x.stride(1),
+                x.stride(2),
+                weight.stride(0),
+                weight.stride(1),
+                out_buf.stride(0),
+                out_buf.stride(1),
+                out_buf.stride(2),
+                1,
+                1,
+                _DTYPE_CODE[x.dtype],
+                0,
+                0,
+                0,
+                0,
+                0,
                 weight.shape[1],
-                0, 0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
+                0,
             )
         )
 
@@ -126,7 +146,9 @@ def main():
     bench("call_fwd x10 (each call internally syncs)", call_fwd_x10)
 
     # No-op Mojo kernel — measures launch + sync floor with no work.
-    import importlib.machinery, importlib.util
+    import importlib.machinery
+    import importlib.util
+
     loader = importlib.machinery.ExtensionFileLoader("noop_ext", "/tmp/noop_ext.so")
     spec = importlib.util.spec_from_loader("noop_ext", loader)
     noop_ext = importlib.util.module_from_spec(spec)
@@ -135,19 +157,25 @@ def main():
     print("Mojo no-op floor:")
     print("-" * 56)
     bench("just DeviceContext()", lambda: noop_ext.just_devicecontext())
-    bench("DeviceContext + compile_function (cached)",
-          lambda: noop_ext.launch_noop_no_enqueue())
-    bench("+ enqueue noop (no sync)",
-          lambda: noop_ext.launch_noop_no_sync())
-    bench("+ ctx.synchronize() (full noop path)",
-          lambda: noop_ext.launch_noop())
+    bench(
+        "DeviceContext + compile_function (cached)",
+        lambda: noop_ext.launch_noop_no_enqueue(),
+    )
+    bench("+ enqueue noop (no sync)", lambda: noop_ext.launch_noop_no_sync())
+    bench("+ ctx.synchronize() (full noop path)", lambda: noop_ext.launch_noop())
 
     # Vary the shape to see if time scales with the work or stays
     # constant (indicating launch / driver overhead dominates).
     print()
     print("Scaling probe (mojo current):")
     print("-" * 56)
-    for shape in [(1, 64, 64, 4), (1, 256, 64, 4), (1, 256, 256, 4), (1, 1024, 256, 4), (1, 1024, 1024, 4)]:
+    for shape in [
+        (1, 64, 64, 4),
+        (1, 256, 64, 4),
+        (1, 256, 256, 4),
+        (1, 1024, 256, 4),
+        (1, 1024, 1024, 4),
+    ]:
         Bs, Ds, Ls, Ws = shape
         xx = torch.randn(Bs, Ds, Ls, dtype=DTYPE, device=DEVICE)
         ww = torch.randn(Ds, Ws, dtype=DTYPE, device=DEVICE)

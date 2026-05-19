@@ -10,8 +10,15 @@ from __future__ import annotations
 import torch
 
 from causal_conv1d_mojo._dtype import _DTYPE_CODE
+from causal_conv1d_mojo.reference import causal_conv1d_update_ref
 from causal_conv1d_mojo.update import native_update, native_update_mps
 from causal_conv1d_mojo.update_cpu import native_update_cpu
+
+# MPS launch overhead dominates for small decode shapes — below this
+# many elements (B*D*seqlen) the pure-PyTorch update_ref is faster than
+# the Mojo update kernel on Apple GPUs. Empirically (Apple M4, fp16):
+# mojo is ~0.35× ref at B*D=32K and ~3.4× at 128K. 64K is the crossover.
+_MPS_UPDATE_FALLBACK_THRESHOLD = 64 * 1024
 
 
 def causal_conv1d_update(
@@ -49,6 +56,32 @@ def causal_conv1d_update(
 
     Returns: out tensor with the same shape as `x`.
     """
+    # MPS small-shape fast path — bypass all validation so tiny decode
+    # calls don't pay Python overhead on top of an already-cheap conv.
+    # The Mojo update kernel only beats pure-PyTorch above B*D ~ 64K on
+    # Apple GPUs. Ref handles both 2-D and 3-D x internally. Only safe
+    # when conv_state_indices is None (ref doesn't support paged caches)
+    # and dim > 0 (F.conv1d rejects groups=0).
+    if x.device.type == "mps" and conv_state_indices is None:
+        # x is (B, D) or (B, D, L); D and the element count are what
+        # gate the fallback, and ref handles both ranks.
+        x_shape = x.shape
+        if len(x_shape) == 2:
+            n_elts = x_shape[0] * x_shape[1]
+            D = x_shape[1]
+        else:
+            n_elts = x_shape[0] * x_shape[1] * x_shape[2]
+            D = x_shape[1]
+        if D > 0 and 0 < n_elts < _MPS_UPDATE_FALLBACK_THRESHOLD:
+            return causal_conv1d_update_ref(
+                x,
+                conv_state,
+                weight,
+                bias=bias,
+                activation=activation,
+                cache_seqlens=cache_seqlens,
+            )
+
     if activation not in (None, "silu", "swish"):
         raise NotImplementedError(
             "only activation in {None, 'silu', 'swish'} is supported"

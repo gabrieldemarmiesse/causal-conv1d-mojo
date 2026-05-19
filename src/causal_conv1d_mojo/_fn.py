@@ -19,6 +19,13 @@ from causal_conv1d_mojo.bwd_full import native_bwd_full, native_bwd_full_mps
 from causal_conv1d_mojo.bwd_full_cpu import native_bwd_full_cpu
 from causal_conv1d_mojo.fwd import native_fwd, native_fwd_mps
 from causal_conv1d_mojo.fwd_cpu import native_fwd_cpu
+from causal_conv1d_mojo.reference import causal_conv1d_ref
+
+# MPS launch overhead dominates the kernel for small shapes — below this
+# many elements (B*D*L) the pure-PyTorch path (F.conv1d) is faster on
+# Apple GPUs. Empirically (Apple M4, fp16): mojo is ~0.3× pyTorch at
+# B*D*L=2M and ~1.4× at 8M. 4M is the conservative crossover.
+_MPS_FWD_FALLBACK_THRESHOLD = 4 * 1024 * 1024
 
 
 def _write_final_states(x, final_states_out, width):
@@ -204,6 +211,28 @@ def causal_conv1d_fn(
 
     out: (batch, dim, seqlen)
     """
+    # MPS small-shape fast path — bypass all validation so tiny calls
+    # don't pay ~9μs of Python checks on top of an already-cheap conv.
+    # The Mojo kernel beats pure-PyTorch only at B*D*L >= ~4M on Apple
+    # GPUs, so below that we route straight to causal_conv1d_ref.
+    # `causal_conv1d_ref` and the F.conv1d it calls do their own input
+    # validation, so malformed inputs still error (with less specific
+    # messages than the wrapper would give). Only safe when seq_idx is
+    # None (ref doesn't support packed sequences) and dim > 0 (F.conv1d
+    # rejects groups=0).
+    if x.device.type == "mps" and seq_idx is None:
+        B, D, L = x.shape
+        if D > 0 and 0 < B * D * L < _MPS_FWD_FALLBACK_THRESHOLD:
+            return causal_conv1d_ref(
+                x,
+                weight,
+                bias=bias,
+                initial_states=initial_states,
+                return_final_states=return_final_states,
+                final_states_out=final_states_out,
+                activation=activation,
+            )
+
     if activation not in (None, "silu", "swish"):
         raise NotImplementedError(
             "only activation in {None, 'silu', 'swish'} is supported"
