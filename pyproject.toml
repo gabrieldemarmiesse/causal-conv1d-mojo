@@ -5,9 +5,9 @@ description = "A wheel for causal-conv1d that works everywhere."
 readme = "README.md"
 # Pinned to 3.13: torch 2.8.0 ships prebuilt cp313 wheels but not cp314.
 # Bump once those land.
-requires-python = ">=3.13,<3.14"
+requires-python = ">=3.10,<3.14"
 dependencies = [
-    "torch==2.8.0",
+    "torch",
     "mojo-compiler==1.0.0b1",
     "mojo-compiler-mojo-libs==1.0.0b1",
 ]
