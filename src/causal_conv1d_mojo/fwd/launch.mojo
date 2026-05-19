@@ -60,6 +60,7 @@ def launch_fwd[
     contig_inner: Bool,
     aligned_seq: Bool,
     vec_aligned: Bool,
+    use_external_stream: Bool,
 ](
     batch_int: Int,
     dim_int: Int,
@@ -93,13 +94,15 @@ def launch_fwd[
         unsafe_from_address=ctx_handle_addr
     )
     var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
-    # `stream_handle_addr == 0` is the "no external stream" sentinel
-    # used by the Mac/Metal path (Metal has no CUDA-style streams; the
-    # stdlib's `DeviceStream` raises "Metal stream not implemented")
-    # and by pure-Mojo callers. We then enqueue on `ctx` directly and
-    # `ctx.synchronize()` after, since torch's MPS hazard tracker
-    # can't see writes through a raw `gpuAddress`.
-    var has_stream = stream_handle_addr != 0
+    # `use_external_stream` is a *comptime* gate: CUDA/HIP variants pass
+    # True (always wrap torch's stream and `enqueue_function` on it);
+    # Metal variants pass False (Metal has no CUDA-style stream; we
+    # `enqueue_function` on `ctx` directly and sync after). Keeping
+    # this comptime instead of a runtime `if stream_handle_addr != 0`
+    # check is load-bearing for NVIDIA wall-clock perf — even a
+    # predictable runtime branch around enqueue_function adds ~30 μs
+    # per call (probably because both branches' enqueue_function arg
+    # packs get codegen'd, defeating some inlining).
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
@@ -170,7 +173,7 @@ def launch_fwd[
                 OLT,
             ],
         ]()
-        if has_stream:
+        comptime if use_external_stream:
             var stream = ctx.create_external_stream(stream_opaque)
             stream.enqueue_function(
                 compiled,

@@ -57,6 +57,7 @@ def launch_update[
     apply_silu: Bool,
     has_state_indices: Bool,
     is_circular: Bool,
+    use_external_stream: Bool,
 ](
     batch_int: Int,
     dim_int: Int,
@@ -90,8 +91,8 @@ def launch_update[
         unsafe_from_address=ctx_handle_addr
     )
     var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
-    # `stream_handle_addr == 0` → Mac/Metal path; see fwd/launch.mojo.
-    var has_stream = stream_handle_addr != 0
+    # `use_external_stream` is comptime — see fwd/launch.mojo for why
+    # this can't be a runtime branch without regressing wall-clock.
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
@@ -138,7 +139,7 @@ def launch_update[
             is_circular,
         ],
     ]()
-    if has_stream:
+    comptime if use_external_stream:
         var stream = ctx.create_external_stream(stream_opaque)
         stream.enqueue_function(
             compiled,

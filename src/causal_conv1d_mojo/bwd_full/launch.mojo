@@ -53,6 +53,7 @@ def launch_bwd_full[
     apply_silu: Bool,
     contig_inner: Bool,
     aligned_seq: Bool,
+    use_external_stream: Bool,
 ](
     batch_int: Int,
     dim_int: Int,
@@ -97,9 +98,9 @@ def launch_bwd_full[
         unsafe_from_address=ctx_handle_addr
     )
     var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
-    # `stream_handle_addr == 0` selects the Mac/Metal path — see the
-    # matching block in fwd/launch.mojo.
-    var has_stream = stream_handle_addr != 0
+    # `use_external_stream` is a comptime gate — see the matching
+    # block in `fwd/launch.mojo` for why this can't be a runtime if
+    # without regressing NVIDIA wall-clock by ~30 μs/call.
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
@@ -188,7 +189,7 @@ def launch_bwd_full[
                 DxLT,
             ],
         ]()
-        if has_stream:
+        comptime if use_external_stream:
             var stream = ctx.create_external_stream(stream_opaque)
             stream.enqueue_function(
                 compiled,

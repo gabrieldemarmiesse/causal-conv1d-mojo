@@ -48,6 +48,7 @@ def native_update(
             _ptr(state_indices),
             int(cache_seqlens is not None),
             _ptr(cache_seqlens),
+            1,  # use_external_stream: CUDA path wraps torch's stream
         )
     )
 
@@ -93,5 +94,6 @@ def native_update_mps(
             gpu_address_or_zero(state_indices),
             int(cache_seqlens is not None),
             gpu_address_or_zero(cache_seqlens),
+            0,  # use_external_stream: Metal path enqueues on ctx
         )
     )

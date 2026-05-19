@@ -42,8 +42,9 @@ def call_update(args: tuple) -> None:
     """JIT-compile (if needed) and dispatch a single update call."""
     config = _config_from_args(args)
     variant_fn, ctx_handle = _get_variant_fn(config)
-    # Tack ctx_handle on as the 30th positional arg — the variant
-    # entry point destructures `args[29]` for it.
+    # Tack ctx_handle on as the 31st positional arg — the variant
+    # entry point destructures `args[30]` for it. (args[29] is the
+    # `use_external_stream` flag, already baked into comptime params.)
     variant_fn(*args, ctx_handle)
 
 
@@ -55,14 +56,17 @@ def _config_from_args(args: tuple) -> tuple:
         bool(args[21]),  # apply_silu
         bool(args[25]),  # has_state_indices
         bool(args[27]),  # is_circular
+        # See fwd/_jit.py for why this is comptime, not runtime branch.
+        bool(args[29]),  # use_external_stream (1 for CUDA, 0 for Metal)
     )
 
 
 def _mod_name(config: tuple) -> str:
-    (dt, w, hb, silu, hi, circ) = config
+    (dt, w, hb, silu, hi, circ, ues) = config
     return (
         f"{_DTYPE_NAME[dt]}_w{w}"
         f"_hb{int(hb)}_silu{int(silu)}_hi{int(hi)}_circ{int(circ)}"
+        f"_extstr{int(ues)}"
     )
 
 
@@ -99,6 +103,7 @@ def _generate_variant_source(mod_name: str, config: tuple) -> str:
         apply_silu,
         has_state_indices,
         is_circular,
+        use_external_stream,
     ) = config
     return f'''\
 """JIT-generated variant for causal_conv1d_update (config-frozen).
@@ -154,7 +159,9 @@ def causal_conv1d_update_variant(
     var stream_handle_addr: Int = Int(py=args[23])
     var state_indices_addr: Int = Int(py=args[26])
     var cache_seqlens_addr: Int = Int(py=args[28])
-    var ctx_handle_addr: Int = Int(py=args[29])
+    # args[29] is `use_external_stream` (baked into comptime params);
+    # ctx_handle is appended as args[30] by `call_update`.
+    var ctx_handle_addr: Int = Int(py=args[30])
 
     if batch_int == 0 or dim_int == 0:
         return PythonObject(None)
@@ -166,6 +173,7 @@ def causal_conv1d_update_variant(
         {apply_silu},
         {has_state_indices},
         {is_circular},
+        {use_external_stream},
     ](
         batch_int,
         dim_int,

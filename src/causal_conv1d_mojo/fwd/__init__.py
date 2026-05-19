@@ -47,6 +47,7 @@ def native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu):
             initial_states.stride(0) if initial_states is not None else 0,
             initial_states.stride(1) if initial_states is not None else 0,
             initial_states.stride(2) if initial_states is not None else 0,
+            1,  # use_external_stream: CUDA path wraps torch's stream
         )
     )
 
@@ -98,6 +99,7 @@ def native_fwd_mps(x, weight, bias, seq_idx, initial_states, out, apply_silu):
             initial_states.stride(0) if initial_states is not None else 0,
             initial_states.stride(1) if initial_states is not None else 0,
             initial_states.stride(2) if initial_states is not None else 0,
+            0,  # use_external_stream: Metal path enqueues on ctx
         )
     )
 

@@ -62,6 +62,16 @@ def _config_from_args(args: tuple) -> tuple:
     # fallback path in the kernel becomes statically dead. Mirrors
     # upstream's `kIsVecLoad` BOOL_SWITCH (gated on the same condition).
     vec_aligned = (seqlen % _KN_ELTS[dtype_code]) == 0
+    # `use_external_stream` is a comptime gate: True for CUDA/HIP (wrap
+    # torch's CUstream/hipStream and enqueue on it), False for Metal
+    # (no CUDA-style streams; enqueue on the DeviceContext directly +
+    # sync after). Passed as comptime so the variant only codegens one
+    # branch — a runtime `if` here costs ~30 μs/call on NVIDIA, even
+    # when the branch is perfectly predictable. `args[29]` is set by
+    # the Python wrappers (`native_fwd` passes 1, `native_fwd_mps`
+    # passes 0). Can't be derived from `stream_handle_addr` itself
+    # because torch's default CUDA stream has cuda_stream == 0.
+    use_external_stream = bool(args[29])
     return (
         dtype_code,
         width,
@@ -72,6 +82,7 @@ def _config_from_args(args: tuple) -> tuple:
         contig_inner,
         aligned_seq,
         vec_aligned,
+        use_external_stream,
     )
 
 
@@ -82,11 +93,11 @@ def _mod_name(config: tuple) -> str:
     PyInit symbol suffix in the generated `.so`. Reading it should be
     enough to reproduce the config by hand.
     """
-    (dt, w, hb, hs, hi, silu, c, a, va) = config
+    (dt, w, hb, hs, hi, silu, c, a, va, ues) = config
     return (
         f"{_DTYPE_NAME[dt]}_w{w}"
         f"_hb{int(hb)}_hs{int(hs)}_hi{int(hi)}_silu{int(silu)}"
-        f"_contig{int(c)}_aligned{int(a)}_vec{int(va)}"
+        f"_contig{int(c)}_aligned{int(a)}_vec{int(va)}_extstr{int(ues)}"
     )
 
 
@@ -123,6 +134,7 @@ def _generate_variant_source(mod_name: str, config: tuple) -> str:
         contig_inner,
         aligned_seq,
         vec_aligned,
+        use_external_stream,
     ) = config
     return f'''\
 """JIT-generated variant for causal_conv1d_fwd (config-frozen).
@@ -178,7 +190,10 @@ def causal_conv1d_fwd_variant(
     var initial_states_b_stride: Int = Int(py=args[26])
     var initial_states_c_stride: Int = Int(py=args[27])
     var initial_states_l_stride: Int = Int(py=args[28])
-    var ctx_handle_addr: Int = Int(py=args[29])
+    # args[29] is `use_external_stream` (already baked into the comptime
+    # template params — we don't read it at runtime); ctx_handle is the
+    # 30th positional, appended by `call_fwd`.
+    var ctx_handle_addr: Int = Int(py=args[30])
 
     if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
         return PythonObject(None)
@@ -193,6 +208,7 @@ def causal_conv1d_fwd_variant(
         {contig_inner},
         {aligned_seq},
         {vec_aligned},
+        {use_external_stream},
     ](
         batch_int,
         dim_int,

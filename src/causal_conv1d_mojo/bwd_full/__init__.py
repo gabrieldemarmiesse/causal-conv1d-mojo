@@ -68,6 +68,7 @@ def native_bwd_full(
             dinitial_states.stride(0) if dinitial_states is not None else 0,
             dinitial_states.stride(1) if dinitial_states is not None else 0,
             dinitial_states.stride(2) if dinitial_states is not None else 0,
+            1,  # use_external_stream: CUDA path wraps torch's stream
         )
     )
 
@@ -133,6 +134,7 @@ def native_bwd_full_mps(
             dinitial_states.stride(0) if dinitial_states is not None else 0,
             dinitial_states.stride(1) if dinitial_states is not None else 0,
             dinitial_states.stride(2) if dinitial_states is not None else 0,
+            0,  # use_external_stream: Metal path enqueues on ctx
         )
     )
 
