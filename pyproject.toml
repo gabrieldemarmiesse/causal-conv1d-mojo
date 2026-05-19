@@ -7,11 +7,11 @@ readme = "README.md"
 # Bump once those land.
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "torch",
+    "torch==2.8.0",
     "mojo-compiler==1.0.0b1",
     "mojo-compiler-mojo-libs==1.0.0b1",
     "numpy>=2.4.4",
-    "pytorch-triton-rocm; sys_platform == 'linux'",
+    #"pytorch-triton-rocm; sys_platform == 'linux'",
 ]
 
 [build-system]
@@ -29,33 +29,44 @@ dev = [
     # Apple Silicon / macOS arm64 the Mojo GPU code paths run on Metal
     # via `torch.mps` — see `src/causal_conv1d_mojo/_mps.py`.
     "nvidia-cuda-nvcc-cu12==12.8.*; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "causal-conv1d; sys_platform == 'linux'",
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl; sys_platform == 'linux'",
     "wheel",
     "packaging",
     "setuptools>=70",
 ]
 
-
-
 # ---------------------------------------------------------
 
 [[tool.uv.index]]
-name = "pytorch-rocm"
-url = "https://download.pytorch.org/whl/rocm6.4"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
 ]
-# ROCm support relies on both Triton packages, which should also be installed from
-# the PyTorch index (and included in `project.dependencies`).
-pytorch-triton-rocm = [
-  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-]
-triton-rocm = [
-  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-]
+
+
+# ---------------------------------------------------------
+
+# [[tool.uv.index]]
+# name = "pytorch-rocm"
+# url = "https://download.pytorch.org/whl/rocm6.4"
+# explicit = true
+# 
+# [tool.uv.sources]
+# torch = [
+#   { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+# ]
+# # ROCm support relies on both Triton packages, which should also be installed from
+# # the PyTorch index (and included in `project.dependencies`).
+# pytorch-triton-rocm = [
+#   { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+# ]
+# triton-rocm = [
+#   { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+# ]
 
 # ---------------------------------------------------------
 

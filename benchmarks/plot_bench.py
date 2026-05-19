@@ -206,11 +206,11 @@ def bench_kernel(fn, warmup: int, iters: int) -> float:
         fn()
     _gpu_sync()
     
-    t = time.clock_gettime_ns()
+    t = time.perf_counter_ns()
     for _ in range(iters):
         fn()
     _gpu_sync()
-    total_us = (time.clock_gettime_ns() - t) / 1_000.0
+    total_us = (time.perf_counter_ns() - t) / 1_000.0
     return total_us / iters
 
 
