@@ -14,12 +14,33 @@ Caller responsibilities:
 """
 
 from std.gpu.host import DeviceContext
+from std.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
 
 from kernel import bwd_full_kernel
 from common import kNThreads
+
+
+def acquire_ctx_handle() raises -> Int:
+    """Create a DeviceContext, retain its handle, and leak the wrapper.
+
+    On AMD `var ctx = DeviceContext()` per call ends up issuing
+    `hipStreamCreate` + matching `hipStreamDestroy` each launch.
+    Those calls are reported in torch.profiler as CUDA-device events
+    and (per the update-perf agent's measurements) bleed into
+    `self_device_time_total` for the surrounding kernel. The Python
+    side calls this once per variant on first use and threads the
+    returned address through every subsequent launch; we wrap it via
+    the non-owning DeviceContext constructor so no fresh hipStream is
+    created.
+    """
+    var ctx = DeviceContext()
+    # Retain so the handle survives this function's __del__.
+    ctx._retain()
+    var raw_ptr = ctx._handle.value()
+    return Int(raw_ptr)
 
 
 def launch_bwd_full[
@@ -32,6 +53,7 @@ def launch_bwd_full[
     apply_silu: Bool,
     contig_inner: Bool,
     aligned_seq: Bool,
+    use_external_stream: Bool,
 ](
     batch_int: Int,
     dim_int: Int,
@@ -66,14 +88,31 @@ def launch_bwd_full[
     dinitial_states_c_stride: Int,
     dinitial_states_l_stride: Int,
     stream_handle_addr: Int,
+    ctx_handle_addr: Int,
 ) raises:
-    var ctx = DeviceContext()
+    # Reconstruct a non-owning DeviceContext from the cached handle —
+    # avoids the hipStreamCreate/Destroy that would otherwise happen
+    # on every launch with the default `DeviceContext()` constructor.
+    # See `acquire_ctx_handle` above.
+    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutExternalOrigin](
+        unsafe_from_address=ctx_handle_addr
+    )
+    var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
+    # `use_external_stream` is a comptime gate — see the matching
+    # block in `fwd/launch.mojo` for why this can't be a runtime if
+    # without regressing NVIDIA wall-clock by ~30 μs/call.
     var stream_opaque = OpaquePointer[MutAnyOrigin](
         unsafe_from_address=stream_handle_addr
     )
-    var stream = ctx.create_external_stream(stream_opaque)
 
-    var grid = (dim_int, batch_int)
+    # Grid layout (batch, dim) matches upstream Tri Dao. On AMD with a
+    # single batch (the small-shape regime we care about), this means
+    # gridDim.x = 1 and gridDim.y = dim — and AMD's CU dispatcher
+    # scans gridDim.x first when filling the GPU, so adjacent dim_id
+    # blocks land on adjacent CUs (better channel-stride locality on
+    # the dweight atomics). With (dim, batch) the order is inverted
+    # and the dweight atomics scatter more across L2 partitions.
+    var grid = (batch_int, dim_int)
 
     var x_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
         unsafe_from_address=x_addr
@@ -150,58 +189,106 @@ def launch_bwd_full[
                 DxLT,
             ],
         ]()
-        stream.enqueue_function(
-            compiled,
-            seqlen_int,
-            x_tt,
-            w_tt,
-            b_ptr,
-            dout_tt,
-            seq_idx_ptr,
-            initial_states_ptr,
-            dx_tt,
-            dweight_acc_ptr,
-            dbias_acc_ptr,
-            dinitial_states_ptr,
-            seq_idx_b_stride,
-            seq_idx_l_stride,
-            initial_states_b_stride,
-            initial_states_c_stride,
-            initial_states_l_stride,
-            dinitial_states_b_stride,
-            dinitial_states_c_stride,
-            dinitial_states_l_stride,
-            grid_dim=grid,
-            block_dim=(kNThreads,),
-        )
+        comptime if use_external_stream:
+            var stream = ctx.create_external_stream(stream_opaque)
+            stream.enqueue_function(
+                compiled,
+                seqlen_int,
+                x_tt,
+                w_tt,
+                b_ptr,
+                dout_tt,
+                seq_idx_ptr,
+                initial_states_ptr,
+                dx_tt,
+                dweight_acc_ptr,
+                dbias_acc_ptr,
+                dinitial_states_ptr,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
+                dinitial_states_b_stride,
+                dinitial_states_c_stride,
+                dinitial_states_l_stride,
+                grid_dim=grid,
+                block_dim=(kNThreads,),
+            )
+        else:
+            ctx.enqueue_function(
+                compiled,
+                seqlen_int,
+                x_tt,
+                w_tt,
+                b_ptr,
+                dout_tt,
+                seq_idx_ptr,
+                initial_states_ptr,
+                dx_tt,
+                dweight_acc_ptr,
+                dbias_acc_ptr,
+                dinitial_states_ptr,
+                seq_idx_b_stride,
+                seq_idx_l_stride,
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
+                dinitial_states_b_stride,
+                dinitial_states_c_stride,
+                dinitial_states_l_stride,
+                grid_dim=grid,
+                block_dim=(kNThreads,),
+            )
+            ctx.synchronize()
 
+    # Pass strides as `UInt32` to keep the kernel-side address math at
+    # 32 bits. The default `Int` (64-bit) routes every stride-times-
+    # index multiply through `s_mul_i32` + `s_mul_hi_u32` (a 64×32 →
+    # 64 multiply pair on AMD); with `UInt32` the high-half multiplies
+    # are dead-code-eliminated and we get a single `s_mul_i32`. Saves
+    # ~7 SGPRs of address setup per block, which the small-shape
+    # regime is sensitive to. Mirrors the fwd launcher. 32-bit is fine
+    # — strides this large would need a single buffer >16 GB.
     comptime if contig_inner:
         var x_tt = TileTensor(
             x_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(x_b_stride), Idx(x_c_stride), Idx[1]()),
+                (
+                    Idx(UInt32(x_b_stride)),
+                    Idx(UInt32(x_c_stride)),
+                    Idx[1](),
+                ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
                 (Idx(dim_int), Idx[width]()),
-                (Idx(w_c_stride), Idx[1]()),
+                (Idx(UInt32(w_c_stride)), Idx[1]()),
             ),
         )
         var dout_tt = TileTensor(
             dout_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(dout_b_stride), Idx(dout_c_stride), Idx[1]()),
+                (
+                    Idx(UInt32(dout_b_stride)),
+                    Idx(UInt32(dout_c_stride)),
+                    Idx[1](),
+                ),
             ),
         )
         var dx_tt = TileTensor(
             dx_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(dx_b_stride), Idx(dx_c_stride), Idx[1]()),
+                (
+                    Idx(UInt32(dx_b_stride)),
+                    Idx(UInt32(dx_c_stride)),
+                    Idx[1](),
+                ),
             ),
         )
         launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)
@@ -210,28 +297,40 @@ def launch_bwd_full[
             x_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+                (
+                    Idx(UInt32(x_b_stride)),
+                    Idx(UInt32(x_c_stride)),
+                    Idx(UInt32(x_l_stride)),
+                ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
                 (Idx(dim_int), Idx[width]()),
-                (Idx(w_c_stride), Idx(w_w_stride)),
+                (Idx(UInt32(w_c_stride)), Idx(UInt32(w_w_stride))),
             ),
         )
         var dout_tt = TileTensor(
             dout_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(dout_b_stride), Idx(dout_c_stride), Idx(dout_l_stride)),
+                (
+                    Idx(UInt32(dout_b_stride)),
+                    Idx(UInt32(dout_c_stride)),
+                    Idx(UInt32(dout_l_stride)),
+                ),
             ),
         )
         var dx_tt = TileTensor(
             dx_ptr,
             Layout(
                 (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-                (Idx(dx_b_stride), Idx(dx_c_stride), Idx(dx_l_stride)),
+                (
+                    Idx(UInt32(dx_b_stride)),
+                    Idx(UInt32(dx_c_stride)),
+                    Idx(UInt32(dx_l_stride)),
+                ),
             ),
         )
         launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)

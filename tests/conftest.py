@@ -13,13 +13,17 @@ def _seed_rng():
         torch.cuda.manual_seed_all(0)
 
 
-# Devices to run every test against. CPU is always available; CUDA is
-# parametrised in but skipped per-test if the box has no GPU. fp16/bf16
-# on CPU are supported on PyTorch 2.x — the native CPU kernel computes
-# everything in fp32 internally and casts back at the boundary.
+# Devices to run every test against. CPU is always available; CUDA
+# and MPS are parametrised in only if the box has the matching
+# accelerator. The Mojo GPU kernels are dispatched on Apple Metal via
+# `DeviceContext`; the MPS path in `_fn.py` extracts each tensor's
+# Metal-3.1 `gpuAddress` from its `MTLBuffer` so the kernels read /
+# write torch's tensors directly (no host roundtrip). See `_mps.py`.
 _DEVICES = ["cpu"]
 if torch.cuda.is_available():
     _DEVICES.append("cuda")
+if torch.backends.mps.is_available():
+    _DEVICES.append("mps")
 
 
 @pytest.fixture(params=_DEVICES)

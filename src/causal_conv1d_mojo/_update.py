@@ -10,7 +10,7 @@ from __future__ import annotations
 import torch
 
 from causal_conv1d_mojo._dtype import _DTYPE_CODE
-from causal_conv1d_mojo.update import native_update
+from causal_conv1d_mojo.update import native_update, native_update_mps
 from causal_conv1d_mojo.update_cpu import native_update_cpu
 
 
@@ -154,6 +154,17 @@ def causal_conv1d_update(
 
     if x.is_cuda:
         native_update(
+            x,
+            weight,
+            bias,
+            conv_state,
+            conv_state_indices,
+            cache_seqlens,
+            out,
+            apply_silu,
+        )
+    elif x.device.type == "mps":
+        native_update_mps(
             x,
             weight,
             bias,

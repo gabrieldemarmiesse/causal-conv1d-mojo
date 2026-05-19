@@ -8,6 +8,18 @@ call time, compiles it via ``mojo build``, and caches the resulting
 
 Shared codegen + compile + load + cache plumbing lives in
 ``causal_conv1d_mojo._jit_common``.
+
+Performance note (AMD-specific): The Mojo `DeviceContext()`
+constructor issues `hipStreamCreate` and the matching `__del__`
+issues `hipStreamDestroy`. At small-batch shapes the bwd kernel is
+only ~6-10 us of GPU work, so per-call stream churn shows up in
+torch.profiler. Each variant exposes a
+``causal_conv1d_bwd_full_acquire_ctx`` entry point; the first call
+from Python invokes it to obtain a process-lifetime DeviceContext
+handle (refcount-retained so the wrapper destructor is a no-op), and
+caches it. Subsequent dispatches pass that handle in to
+`launch_bwd_full`, which wraps it via the doc-hidden non-owning
+constructor — no new hipStream per call.
 """
 
 from __future__ import annotations
@@ -32,8 +44,12 @@ _KNTHREADS = 128
 
 def call_bwd_full(args: tuple) -> None:
     """JIT-compile (if needed) and dispatch a single bwd_full call."""
-    variant_fn = _get_variant_fn(_config_from_args(args))
-    variant_fn(*args)
+    variant_fn, ctx_handle = _get_variant_fn(_config_from_args(args))
+    # Tack ctx_handle on as the 41st positional arg — the variant
+    # entry point destructures `args[40]` for it. (args[39] is the
+    # `use_external_stream` flag, already baked into the variant's
+    # comptime params.)
+    variant_fn(*args, ctx_handle)
 
 
 def _config_from_args(args: tuple) -> tuple:
@@ -60,6 +76,10 @@ def _config_from_args(args: tuple) -> tuple:
     )
     n_elts = n_elts_wide if use_wide else _KN_ELTS_NARROW
     aligned_seq = (seqlen % (_KNTHREADS * n_elts)) == 0
+    # See fwd/_jit.py for why this is comptime instead of a runtime
+    # branch on `stream_handle_addr`. Python wrapper sets 1 for CUDA,
+    # 0 for Metal.
+    use_external_stream = bool(args[39])
 
     return (
         dtype_code,
@@ -71,22 +91,25 @@ def _config_from_args(args: tuple) -> tuple:
         apply_silu,
         contig_inner,
         aligned_seq,
+        use_external_stream,
     )
 
 
 def _mod_name(config: tuple) -> str:
-    (dt, ne, w, hb, hs, hi, silu, c, a) = config
+    (dt, ne, w, hb, hs, hi, silu, c, a, ues) = config
     return (
         f"{_DTYPE_NAME[dt]}_n{ne}_w{w}"
         f"_hb{int(hb)}_hs{int(hs)}_hi{int(hi)}_silu{int(silu)}"
-        f"_contig{int(c)}_aligned{int(a)}"
+        f"_contig{int(c)}_aligned{int(a)}_extstr{int(ues)}"
     )
 
 
 @lru_cache(maxsize=None)
 def _get_variant_fn(config: tuple):
+    import sys
+
     mod_name = _mod_name(config)
-    return compile_and_load_variant(
+    fn = compile_and_load_variant(
         subpkg="bwd_full",
         source_dir=_BWD_DIR,
         shared_files=("kernel.mojo", "common.mojo", "launch.mojo"),
@@ -94,6 +117,13 @@ def _get_variant_fn(config: tuple):
         variant_source=_generate_variant_source(mod_name, config),
         entry_point_name="causal_conv1d_bwd_full_variant",
     )
+    # The shared loader stashes the loaded variant module in
+    # sys.modules so we can grab the one-shot ctx-handle helper without
+    # re-importing the .so.
+    module = sys.modules[mod_name]
+    acquire = getattr(module, "causal_conv1d_bwd_full_acquire_ctx")
+    ctx_handle = int(acquire(()))
+    return fn, ctx_handle
 
 
 def _generate_variant_source(mod_name: str, config: tuple) -> str:
@@ -107,6 +137,7 @@ def _generate_variant_source(mod_name: str, config: tuple) -> str:
         apply_silu,
         contig_inner,
         aligned_seq,
+        use_external_stream,
     ) = config
     return f'''\
 """JIT-generated variant for causal_conv1d_bwd_full (config-frozen).
@@ -119,7 +150,21 @@ from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from launch import launch_bwd_full
+from launch import launch_bwd_full, acquire_ctx_handle
+
+
+def causal_conv1d_bwd_full_acquire_ctx(
+    mut py_self: PythonObject,
+    mut args: PythonObject,
+) raises -> PythonObject:
+    """Create + retain a process-lifetime DeviceContext.
+
+    Called once per variant from the Python side; the returned address
+    is reused for every subsequent `causal_conv1d_bwd_full_variant`
+    call to avoid `hipStreamCreate`/`Destroy` per launch.
+    """
+    var addr: Int = acquire_ctx_handle()
+    return PythonObject(addr)
 
 
 def causal_conv1d_bwd_full_variant(
@@ -159,6 +204,9 @@ def causal_conv1d_bwd_full_variant(
     var dinitial_states_b_stride: Int = Int(py=args[36])
     var dinitial_states_c_stride: Int = Int(py=args[37])
     var dinitial_states_l_stride: Int = Int(py=args[38])
+    # args[39] is `use_external_stream` (baked into comptime params);
+    # ctx_handle is appended as args[40] by `call_bwd_full`.
+    var ctx_handle_addr: Int = Int(py=args[40])
 
     if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
         return PythonObject(None)
@@ -173,6 +221,7 @@ def causal_conv1d_bwd_full_variant(
         {apply_silu},
         {contig_inner},
         {aligned_seq},
+        {use_external_stream},
     ](
         batch_int,
         dim_int,
@@ -207,6 +256,7 @@ def causal_conv1d_bwd_full_variant(
         dinitial_states_c_stride,
         dinitial_states_l_stride,
         stream_handle_addr,
+        ctx_handle_addr,
     )
     return PythonObject(None)
 
@@ -216,6 +266,7 @@ def PyInit_{mod_name}() -> PythonObject:
     try:
         var m = PythonModuleBuilder("{mod_name}")
         m.def_py_function[causal_conv1d_bwd_full_variant]("causal_conv1d_bwd_full_variant")
+        m.def_py_function[causal_conv1d_bwd_full_acquire_ctx]("causal_conv1d_bwd_full_acquire_ctx")
         return m.finalize()
     except e:
         abort(String("failed to create Python module: ", e))

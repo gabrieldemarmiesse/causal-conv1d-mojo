@@ -38,8 +38,11 @@ def call_fwd(args: tuple) -> None:
     ``args`` is the 29-tuple of runtime values built by
     ``fwd/__init__.py::native_fwd``.
     """
-    variant_fn = _get_variant_fn(_config_from_args(args))
-    variant_fn(*args)
+    variant_fn, ctx_handle = _get_variant_fn(_config_from_args(args))
+    # Tack ctx_handle on as the 30th positional arg — the variant
+    # entry point destructures `args[29]` for it. Avoids the per-call
+    # hipStreamCreate/Destroy churn from `var ctx = DeviceContext()`.
+    variant_fn(*args, ctx_handle)
 
 
 def _config_from_args(args: tuple) -> tuple:
@@ -52,6 +55,23 @@ def _config_from_args(args: tuple) -> tuple:
     seqlen = args[6]
     contig_inner = args[9] == 1 and args[11] == 1 and args[14] == 1
     aligned_seq = (seqlen % (_KNTHREADS * _KN_ELTS[dtype_code])) == 0
+    # `vec_aligned` is the weaker "seqlen % kNElts == 0" — true for any
+    # power-of-two seqlen on fp16/bf16 (kNElts=8) and fp32 (kNElts=4).
+    # When this holds, every thread's kNElts slice either fits entirely
+    # inside [0, seqlen) or starts past it, so the partial-chunk scalar
+    # fallback path in the kernel becomes statically dead. Mirrors
+    # upstream's `kIsVecLoad` BOOL_SWITCH (gated on the same condition).
+    vec_aligned = (seqlen % _KN_ELTS[dtype_code]) == 0
+    # `use_external_stream` is a comptime gate: True for CUDA/HIP (wrap
+    # torch's CUstream/hipStream and enqueue on it), False for Metal
+    # (no CUDA-style streams; enqueue on the DeviceContext directly +
+    # sync after). Passed as comptime so the variant only codegens one
+    # branch — a runtime `if` here costs ~30 μs/call on NVIDIA, even
+    # when the branch is perfectly predictable. `args[29]` is set by
+    # the Python wrappers (`native_fwd` passes 1, `native_fwd_mps`
+    # passes 0). Can't be derived from `stream_handle_addr` itself
+    # because torch's default CUDA stream has cuda_stream == 0.
+    use_external_stream = bool(args[29])
     return (
         dtype_code,
         width,
@@ -61,6 +81,8 @@ def _config_from_args(args: tuple) -> tuple:
         apply_silu,
         contig_inner,
         aligned_seq,
+        vec_aligned,
+        use_external_stream,
     )
 
 
@@ -71,18 +93,20 @@ def _mod_name(config: tuple) -> str:
     PyInit symbol suffix in the generated `.so`. Reading it should be
     enough to reproduce the config by hand.
     """
-    (dt, w, hb, hs, hi, silu, c, a) = config
+    (dt, w, hb, hs, hi, silu, c, a, va, ues) = config
     return (
         f"{_DTYPE_NAME[dt]}_w{w}"
         f"_hb{int(hb)}_hs{int(hs)}_hi{int(hi)}_silu{int(silu)}"
-        f"_contig{int(c)}_aligned{int(a)}"
+        f"_contig{int(c)}_aligned{int(a)}_vec{int(va)}_extstr{int(ues)}"
     )
 
 
 @lru_cache(maxsize=None)
 def _get_variant_fn(config: tuple):
+    import sys
+
     mod_name = _mod_name(config)
-    return compile_and_load_variant(
+    fn = compile_and_load_variant(
         subpkg="fwd",
         source_dir=_FWD_DIR,
         shared_files=("kernel.mojo", "common.mojo", "launch.mojo"),
@@ -90,6 +114,13 @@ def _get_variant_fn(config: tuple):
         variant_source=_generate_variant_source(mod_name, config),
         entry_point_name="causal_conv1d_fwd_variant",
     )
+    # The shared loader stashes the loaded variant module in
+    # sys.modules so we can grab the one-shot ctx-handle helper without
+    # re-importing the .so.
+    module = sys.modules[mod_name]
+    acquire = getattr(module, "causal_conv1d_fwd_acquire_ctx")
+    ctx_handle = int(acquire(()))
+    return fn, ctx_handle
 
 
 def _generate_variant_source(mod_name: str, config: tuple) -> str:
@@ -102,6 +133,8 @@ def _generate_variant_source(mod_name: str, config: tuple) -> str:
         apply_silu,
         contig_inner,
         aligned_seq,
+        vec_aligned,
+        use_external_stream,
     ) = config
     return f'''\
 """JIT-generated variant for causal_conv1d_fwd (config-frozen).
@@ -114,7 +147,20 @@ from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from launch import launch_fwd
+from launch import launch_fwd, acquire_ctx_handle
+
+
+def causal_conv1d_fwd_acquire_ctx(
+    mut py_self: PythonObject,
+    mut args: PythonObject,
+) raises -> PythonObject:
+    """Create + retain a process-lifetime DeviceContext.
+
+    Called once per variant from the Python side; the returned address
+    is reused for every subsequent `causal_conv1d_fwd_variant` call.
+    """
+    var addr: Int = acquire_ctx_handle()
+    return PythonObject(addr)
 
 
 def causal_conv1d_fwd_variant(
@@ -144,6 +190,10 @@ def causal_conv1d_fwd_variant(
     var initial_states_b_stride: Int = Int(py=args[26])
     var initial_states_c_stride: Int = Int(py=args[27])
     var initial_states_l_stride: Int = Int(py=args[28])
+    # args[29] is `use_external_stream` (already baked into the comptime
+    # template params — we don't read it at runtime); ctx_handle is the
+    # 30th positional, appended by `call_fwd`.
+    var ctx_handle_addr: Int = Int(py=args[30])
 
     if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
         return PythonObject(None)
@@ -157,6 +207,8 @@ def causal_conv1d_fwd_variant(
         {apply_silu},
         {contig_inner},
         {aligned_seq},
+        {vec_aligned},
+        {use_external_stream},
     ](
         batch_int,
         dim_int,
@@ -181,6 +233,7 @@ def causal_conv1d_fwd_variant(
         initial_states_c_stride,
         initial_states_l_stride,
         stream_handle_addr,
+        ctx_handle_addr,
     )
     return PythonObject(None)
 
@@ -190,6 +243,7 @@ def PyInit_{mod_name}() -> PythonObject:
     try:
         var m = PythonModuleBuilder("{mod_name}")
         m.def_py_function[causal_conv1d_fwd_variant]("causal_conv1d_fwd_variant")
+        m.def_py_function[causal_conv1d_fwd_acquire_ctx]("causal_conv1d_fwd_acquire_ctx")
         return m.finalize()
     except e:
         abort(String("failed to create Python module: ", e))
