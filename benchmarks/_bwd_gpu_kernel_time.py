@@ -163,9 +163,7 @@ def main() -> None:
         up_us = _bench_bwd(call_upstream, mojo=False)
 
         ratio = mojo_us / up_us if up_us else float("inf")
-        print(
-            f"{shape!s:>22} | {mojo_us:15.1f} | {up_us:19.1f} | {ratio:6.2f}x"
-        )
+        print(f"{shape!s:>22} | {mojo_us:15.1f} | {up_us:19.1f} | {ratio:6.2f}x")
 
 
 if __name__ == "__main__":

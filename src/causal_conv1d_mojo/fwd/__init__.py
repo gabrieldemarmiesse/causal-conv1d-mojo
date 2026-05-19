@@ -102,4 +102,3 @@ def native_fwd_mps(x, weight, bias, seq_idx, initial_states, out, apply_silu):
             0,  # use_external_stream: Metal path enqueues on ctx
         )
     )
-
