@@ -32,24 +32,6 @@ from kernel import fwd_kernel
 from common import kNThreads
 
 
-def acquire_ctx_handle() raises -> Int:
-    """Create a DeviceContext, retain its handle, and leak the wrapper.
-
-    The Python side calls this once per variant and caches the returned
-    integer. The handle stays alive for the duration of the process —
-    the matching release happens at process exit (or never).
-
-    Returns the address of the underlying C++ DeviceContext as an Int.
-    """
-    var ctx = DeviceContext()
-    # Retain to bump the refcount so `ctx.__del__` (when this function
-    # returns) doesn't free the underlying resource. The caller is now
-    # responsible for the extra refcount.
-    ctx._retain()
-    var raw_ptr = ctx._handle.value()
-    return Int(raw_ptr)
-
-
 def launch_fwd[
     dtype: DType,
     width: Int,

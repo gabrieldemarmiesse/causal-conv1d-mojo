@@ -21,6 +21,7 @@ from pathlib import Path
 from causal_conv1d_mojo._jit_common import compile_and_load_variant
 
 _FWD_DIR = Path(__file__).resolve().parent
+_PKG_DIR = _FWD_DIR.parent
 
 _DTYPE_NAME = {0: "fp16", 1: "bf16", 2: "fp32"}
 _DTYPE_EXPR = {0: "DType.float16", 1: "DType.bfloat16", 2: "DType.float32"}
@@ -108,8 +109,7 @@ def _get_variant_fn(config: tuple):
     mod_name = _mod_name(config)
     fn = compile_and_load_variant(
         subpkg="fwd",
-        source_dir=_FWD_DIR,
-        shared_files=("kernel.mojo", "common.mojo", "launch.mojo"),
+        include_dirs=(_FWD_DIR, _PKG_DIR),
         mod_name=mod_name,
         variant_source=_generate_variant_source(mod_name, config),
         entry_point_name="causal_conv1d_fwd_variant",
@@ -147,7 +147,8 @@ from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from launch import launch_fwd, acquire_ctx_handle
+from launch import launch_fwd
+from _ctx import acquire_ctx_handle
 
 
 def causal_conv1d_fwd_acquire_ctx(

@@ -4,7 +4,6 @@ Mirrors upstream's `causal_conv1d_common.h`. Imported by the
 `fwd`, `bwd`, `cpu`, and `native` (dispatcher) sibling modules.
 """
 
-from std.math import exp
 from std.sys import size_of
 
 
@@ -25,7 +24,3 @@ comptime kNElts: Int = 4
 # chunk element count for fp16/bf16 vs the old uniform-4 setting.
 fn kNEltsBwd_for[dtype: DType]() -> Int:
     return 16 // size_of[dtype]()
-
-
-def _silu_f32(x: Float32) -> Float32:
-    return x / (Float32(1) + exp(-x))
