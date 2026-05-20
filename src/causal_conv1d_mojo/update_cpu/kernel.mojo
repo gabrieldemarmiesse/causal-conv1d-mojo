@@ -14,7 +14,7 @@ write head. `has_state_indices` redirects the state row via
 from std.algorithm import sync_parallelize
 from layout import TileTensor, TensorLayout
 
-from common import _silu_f32
+from _silu import _silu_f32
 
 
 def update_kernel_cpu[

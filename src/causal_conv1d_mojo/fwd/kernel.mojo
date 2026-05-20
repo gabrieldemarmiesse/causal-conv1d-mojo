@@ -30,7 +30,8 @@ from std.memory import stack_allocation
 from std.utils.index import StaticTuple
 from layout import TileTensor, TensorLayout, Idx, Coord
 
-from common import _silu_f32, kNThreads, kNEltsFwd
+from common import kNThreads, kNEltsFwd
+from _silu import _silu_f32
 
 
 @__llvm_metadata(
