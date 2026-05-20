@@ -30,7 +30,7 @@ from pathlib import Path
 from causal_conv1d_mojo._jit_common import compile_and_load_variant
 
 _BWD_DIR = Path(__file__).resolve().parent
-_CTX_MOJO = _BWD_DIR.parent / "_ctx.mojo"
+_PKG_DIR = _BWD_DIR.parent
 
 _DTYPE_NAME = {0: "fp16", 1: "bf16", 2: "fp32"}
 _DTYPE_EXPR = {0: "DType.float16", 1: "DType.bfloat16", 2: "DType.float32"}
@@ -112,8 +112,7 @@ def _get_variant_fn(config: tuple):
     mod_name = _mod_name(config)
     fn = compile_and_load_variant(
         subpkg="bwd_full",
-        source_dir=_BWD_DIR,
-        shared_files=("kernel.mojo", "common.mojo", "launch.mojo", _CTX_MOJO),
+        include_dirs=(_BWD_DIR, _PKG_DIR),
         mod_name=mod_name,
         variant_source=_generate_variant_source(mod_name, config),
         entry_point_name="causal_conv1d_bwd_full_variant",
