@@ -141,7 +141,7 @@ def _bench_update(device, dtype, shape, iters, warmup):
 
 def _device_label(device: str) -> str:
     if device == "cuda":
-        return f"CUDA ({torch.cuda.get_device_name(0)})"
+        return f"GPU ({torch.cuda.get_device_name(0)})"
     if device == "mps":
         return "MPS (Apple GPU)"
     return "CPU"
