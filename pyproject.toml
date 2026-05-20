@@ -38,6 +38,7 @@ dev = [
     "packaging",
     "setuptools>=70",
     "numpy>=2.0.0",
+    "tomli-w",
 ]
 
 [tool.uv]
