@@ -1,4 +1,8 @@
-"""Static per-config variant entry point for causal_conv1d_update_cpu."""
+"""Static per-config variant entry point for causal_conv1d_update_cpu.
+
+Runtime args tuple (22 positionals) is built in
+``update_cpu/__init__.py``; comptime values come from `-D` defines.
+"""
 
 from std.os import abort
 from std.python import PythonObject
@@ -41,8 +45,8 @@ def causal_conv1d_update_cpu_variant(
     var o_b_stride: Int = Int(py=args[17])
     var o_c_stride: Int = Int(py=args[18])
     var o_l_stride: Int = Int(py=args[19])
-    var state_indices_addr: Int = Int(py=args[25])
-    var cache_seqlens_addr: Int = Int(py=args[27])
+    var state_indices_addr: Int = Int(py=args[20])
+    var cache_seqlens_addr: Int = Int(py=args[21])
 
     if batch_int == 0 or dim_int == 0:
         return PythonObject(None)

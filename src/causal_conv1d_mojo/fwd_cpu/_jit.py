@@ -1,11 +1,15 @@
 """JIT-on-first-use dispatcher for the CPU forward.
 
-Mirrors `fwd/_jit.py`: each unique runtime config (dtype × width ×
-has_bias × has_seq_idx × has_initial_states × apply_silu) compiles the
-static ``fwd_cpu/variant.mojo`` once via ``mojo build -D KEY=VALUE …``
-and caches the resulting ``.so`` on disk. Replaces the old AOT
-comptime-sweep dispatcher, which took ~30 s on first import even when
-the caller only needed one variant.
+Mirrors `fwd/_jit.py`: each unique config (dtype × width × has_bias ×
+has_seq_idx × has_initial_states × apply_silu) compiles the static
+``fwd_cpu/variant.mojo`` once via ``mojo build -D KEY=VALUE …`` and
+caches the resulting ``.so`` on disk. Replaces the old AOT comptime-
+sweep dispatcher, which took ~30 s on first import even when the
+caller only needed one variant.
+
+`config` and `runtime_args` are deliberately split: comptime values
+are baked into the `.so` via `-D`, so the variant `.mojo` only ever
+sees runtime values.
 """
 
 from __future__ import annotations
@@ -23,21 +27,17 @@ _DTYPE_NAME = {0: "fp16", 1: "bf16", 2: "fp32"}
 _DTYPE_DEFINE = {0: "float16", 1: "bfloat16", 2: "float32"}
 
 
-def call_fwd_cpu(args: tuple) -> None:
-    """JIT-compile (if needed) and dispatch a single CPU fwd call."""
-    variant_fn = _get_variant_fn(_config_from_args(args))
-    variant_fn(*args)
+def call_fwd_cpu(config: tuple, runtime_args: tuple) -> None:
+    """JIT-compile (if needed) and dispatch a single CPU fwd call.
 
-
-def _config_from_args(args: tuple) -> tuple:
-    return (
-        args[17],  # dtype_code
-        args[22],  # width
-        bool(args[15]),  # has_bias
-        bool(args[18]),  # has_seq_idx
-        bool(args[23]),  # has_initial_states
-        bool(args[16]),  # apply_silu
-    )
+    Args:
+        config: 6-tuple
+            (dtype_code, width, has_bias, has_seq_idx,
+             has_initial_states, apply_silu).
+        runtime_args: positional args forwarded to the variant `.mojo`.
+    """
+    variant_fn = _get_variant_fn(config)
+    variant_fn(*runtime_args)
 
 
 def _mod_name(config: tuple) -> str:

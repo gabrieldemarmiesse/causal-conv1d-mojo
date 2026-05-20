@@ -1,4 +1,8 @@
-"""Static per-config variant entry point for causal_conv1d_bwd_full_cpu."""
+"""Static per-config variant entry point for causal_conv1d_bwd_full_cpu.
+
+Runtime args tuple (32 positionals) is built in
+``bwd_full_cpu/__init__.py``; comptime values come from `-D` defines.
+"""
 
 from std.os import abort
 from std.python import PythonObject
@@ -42,17 +46,17 @@ def causal_conv1d_bwd_full_cpu_variant(
     var dx_b_stride: Int = Int(py=args[18])
     var dx_c_stride: Int = Int(py=args[19])
     var dx_l_stride: Int = Int(py=args[20])
-    var seq_idx_addr: Int = Int(py=args[26])
-    var seq_idx_b_stride: Int = Int(py=args[27])
-    var seq_idx_l_stride: Int = Int(py=args[28])
-    var initial_states_addr: Int = Int(py=args[30])
-    var initial_states_b_stride: Int = Int(py=args[31])
-    var initial_states_c_stride: Int = Int(py=args[32])
-    var initial_states_l_stride: Int = Int(py=args[33])
-    var dinitial_states_addr: Int = Int(py=args[34])
-    var dinitial_states_b_stride: Int = Int(py=args[35])
-    var dinitial_states_c_stride: Int = Int(py=args[36])
-    var dinitial_states_l_stride: Int = Int(py=args[37])
+    var seq_idx_addr: Int = Int(py=args[21])
+    var seq_idx_b_stride: Int = Int(py=args[22])
+    var seq_idx_l_stride: Int = Int(py=args[23])
+    var initial_states_addr: Int = Int(py=args[24])
+    var initial_states_b_stride: Int = Int(py=args[25])
+    var initial_states_c_stride: Int = Int(py=args[26])
+    var initial_states_l_stride: Int = Int(py=args[27])
+    var dinitial_states_addr: Int = Int(py=args[28])
+    var dinitial_states_b_stride: Int = Int(py=args[29])
+    var dinitial_states_c_stride: Int = Int(py=args[30])
+    var dinitial_states_l_stride: Int = Int(py=args[31])
 
     if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
         return PythonObject(None)

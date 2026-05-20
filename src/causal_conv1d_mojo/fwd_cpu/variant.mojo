@@ -3,6 +3,10 @@
 Replaces the old AOT comptime-sweep `dispatch.mojo`. All comptime
 params (dtype, width, has_bias, …) come from `-D` defines set by
 `_jit.py`, so we compile only the variant the caller actually needs.
+
+Runtime args tuple (22 positionals) is built in
+``fwd_cpu/__init__.py``; it carries only runtime-varying values —
+comptime values are baked into the `.so` via `-D`.
 """
 
 from std.os import abort
@@ -28,11 +32,10 @@ def causal_conv1d_fwd_cpu_variant(
 ) raises -> PythonObject:
     """CPU forward, one specialised variant.
 
-    Args tuple (28 positionals — same shape as the old AOT dispatcher
-    for backwards compat; the comptime fields are ignored at runtime):
+    Runtime args (22 positionals; built in `fwd_cpu/__init__.py`):
       0  x_data_ptr (int)
       1  weight_data_ptr (int)
-      2  bias_data_ptr (int) — pass 0 if `HAS_BIAS=false`
+      2  bias_data_ptr (int) — 0 if `HAS_BIAS=false`
       3  output_data_ptr (int)
       4  batch  (int)
       5  dim    (int)
@@ -45,19 +48,13 @@ def causal_conv1d_fwd_cpu_variant(
       12 o_b_stride  (int)
       13 o_c_stride  (int)
       14 o_l_stride  (int)
-      15 has_bias (int)               — comptime, unused
-      16 apply_silu (int)             — comptime, unused
-      17 dtype_code (int)             — comptime, unused
-      18 has_seq_idx (int)            — comptime, unused
-      19 seq_idx_data_ptr (int)
-      20 seq_idx_b_stride (int)
-      21 seq_idx_l_stride (int)
-      22 width (int)                  — comptime, unused
-      23 has_initial_states (int)     — comptime, unused
-      24 initial_states_data_ptr (int)
-      25 initial_states_b_stride (int)
-      26 initial_states_c_stride (int)
-      27 initial_states_l_stride (int)
+      15 seq_idx_data_ptr (int)
+      16 seq_idx_b_stride (int)
+      17 seq_idx_l_stride (int)
+      18 initial_states_data_ptr (int)
+      19 initial_states_b_stride (int)
+      20 initial_states_c_stride (int)
+      21 initial_states_l_stride (int)
     """
     var x_addr: Int = Int(py=args[0])
     var w_addr: Int = Int(py=args[1])
@@ -74,13 +71,13 @@ def causal_conv1d_fwd_cpu_variant(
     var o_b_stride: Int = Int(py=args[12])
     var o_c_stride: Int = Int(py=args[13])
     var o_l_stride: Int = Int(py=args[14])
-    var seq_idx_addr: Int = Int(py=args[19])
-    var seq_idx_b_stride: Int = Int(py=args[20])
-    var seq_idx_l_stride: Int = Int(py=args[21])
-    var initial_states_addr: Int = Int(py=args[24])
-    var initial_states_b_stride: Int = Int(py=args[25])
-    var initial_states_c_stride: Int = Int(py=args[26])
-    var initial_states_l_stride: Int = Int(py=args[27])
+    var seq_idx_addr: Int = Int(py=args[15])
+    var seq_idx_b_stride: Int = Int(py=args[16])
+    var seq_idx_l_stride: Int = Int(py=args[17])
+    var initial_states_addr: Int = Int(py=args[18])
+    var initial_states_b_stride: Int = Int(py=args[19])
+    var initial_states_c_stride: Int = Int(py=args[20])
+    var initial_states_l_stride: Int = Int(py=args[21])
 
     if batch_int == 0 or dim_int == 0 or seqlen_int == 0:
         return PythonObject(None)

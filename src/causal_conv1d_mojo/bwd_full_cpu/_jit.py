@@ -15,20 +15,10 @@ _DTYPE_NAME = {0: "fp16", 1: "bf16", 2: "fp32"}
 _DTYPE_DEFINE = {0: "float16", 1: "bfloat16", 2: "float32"}
 
 
-def call_bwd_full_cpu(args: tuple) -> None:
-    variant_fn = _get_variant_fn(_config_from_args(args))
-    variant_fn(*args)
-
-
-def _config_from_args(args: tuple) -> tuple:
-    return (
-        args[23],  # dtype_code
-        args[24],  # width
-        bool(args[21]),  # has_bias
-        bool(args[25]),  # has_seq_idx
-        bool(args[29]),  # has_initial_states
-        bool(args[22]),  # apply_silu
-    )
+def call_bwd_full_cpu(config: tuple, runtime_args: tuple) -> None:
+    """JIT-compile (if needed) and dispatch a single CPU bwd_full call."""
+    variant_fn = _get_variant_fn(config)
+    variant_fn(*runtime_args)
 
 
 def _mod_name(config: tuple) -> str:

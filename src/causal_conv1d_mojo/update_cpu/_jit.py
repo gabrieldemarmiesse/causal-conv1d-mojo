@@ -15,28 +15,15 @@ _DTYPE_NAME = {0: "fp16", 1: "bf16", 2: "fp32"}
 _DTYPE_DEFINE = {0: "float16", 1: "bfloat16", 2: "float32"}
 
 
-def call_update_cpu(args: tuple) -> None:
-    variant_fn = _get_variant_fn(_config_from_args(args))
-    variant_fn(*args)
-
-
-def _config_from_args(args: tuple) -> tuple:
-    return (
-        args[22],  # dtype_code
-        args[23],  # width
-        bool(args[20]),  # has_bias
-        bool(args[21]),  # apply_silu
-        bool(args[24]),  # has_state_indices
-        bool(args[26]),  # is_circular
-    )
+def call_update_cpu(config: tuple, runtime_args: tuple) -> None:
+    """JIT-compile (if needed) and dispatch a single CPU update call."""
+    variant_fn = _get_variant_fn(config)
+    variant_fn(*runtime_args)
 
 
 def _mod_name(config: tuple) -> str:
     (dt, w, hb, silu, hi, circ) = config
-    return (
-        f"{_DTYPE_NAME[dt]}_w{w}"
-        f"_hb{int(hb)}_silu{int(silu)}_hi{int(hi)}_circ{int(circ)}"
-    )
+    return f"{_DTYPE_NAME[dt]}_w{w}_hb{int(hb)}_silu{int(silu)}_hi{int(hi)}_circ{int(circ)}"
 
 
 def _defines(config: tuple) -> dict[str, str]:
