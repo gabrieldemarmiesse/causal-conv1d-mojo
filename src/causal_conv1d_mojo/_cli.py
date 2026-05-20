@@ -15,7 +15,6 @@ import sys
 import time
 
 import torch
-import torch.nn.functional as F
 
 from causal_conv1d_mojo import (
     causal_conv1d_fn,
@@ -74,12 +73,6 @@ def _time(fn, device: str, iters: int, warmup: int) -> float:
     return (time.perf_counter() - t0) / iters
 
 
-def _pytorch_fwd(x, weight, bias):
-    D, W = weight.shape
-    out = F.conv1d(x, weight.unsqueeze(1), bias, padding=W - 1, groups=D)
-    return F.silu(out[..., : x.shape[-1]])
-
-
 def _bench_forward(device, dtype, shape, iters, warmup):
     B, D, L, W = shape["B"], shape["D"], shape["L"], shape["W"]
     x = torch.randn(B, D, L, device=device, dtype=dtype)
@@ -91,7 +84,12 @@ def _bench_forward(device, dtype, shape, iters, warmup):
         iters,
         warmup,
     )
-    ref = _time(lambda: _pytorch_fwd(x, weight, bias), device, iters, warmup)
+    ref = _time(
+        lambda: causal_conv1d_ref(x, weight, bias, activation="silu"),
+        device,
+        iters,
+        warmup,
+    )
     return mojo, ref
 
 
