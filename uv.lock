@@ -95,7 +95,7 @@ requires-dist = [
     { name = "mojo-compiler-mojo-libs", specifier = "==1.0.0b1" },
     { name = "nvidia-cuda-nvcc-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'nvidia'", specifier = "==12.8.*" },
     { name = "pytorch-triton-rocm", marker = "sys_platform == 'linux' and extra == 'rocm'", index = "https://download.pytorch.org/whl/rocm6.4", conflict = { package = "causal-conv1d-mojo", extra = "rocm" } },
-    { name = "torch" },
+    { name = "torch", specifier = ">=2,<3" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'nvidia'", specifier = "==2.8.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "causal-conv1d-mojo", extra = "nvidia" } },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'rocm'", specifier = "==2.8.0", index = "https://download.pytorch.org/whl/rocm6.4", conflict = { package = "causal-conv1d-mojo", extra = "rocm" } },
 ]
