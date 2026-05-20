@@ -12,6 +12,9 @@ dependencies = [
     "mojo-compiler-mojo-libs==1.0.0b1",
 ]
 
+[project.scripts]
+causal-conv1d-mojo = "causal_conv1d_mojo._cli:main"
+
 [project.optional-dependencies]
 nvidia = [
     "torch==2.8.0 ; sys_platform == 'linux'",
