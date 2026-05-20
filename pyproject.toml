@@ -7,7 +7,7 @@ readme = "README.md"
 # Bump once those land.
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "torch",
+    "torch>=2,<3",
     "mojo-compiler==1.0.0b1",
     "mojo-compiler-mojo-libs==1.0.0b1",
 ]
