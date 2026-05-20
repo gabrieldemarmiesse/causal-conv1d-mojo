@@ -23,26 +23,6 @@ from kernel import bwd_full_kernel
 from common import kNThreads
 
 
-def acquire_ctx_handle() raises -> Int:
-    """Create a DeviceContext, retain its handle, and leak the wrapper.
-
-    On AMD `var ctx = DeviceContext()` per call ends up issuing
-    `hipStreamCreate` + matching `hipStreamDestroy` each launch.
-    Those calls are reported in torch.profiler as CUDA-device events
-    and (per the update-perf agent's measurements) bleed into
-    `self_device_time_total` for the surrounding kernel. The Python
-    side calls this once per variant on first use and threads the
-    returned address through every subsequent launch; we wrap it via
-    the non-owning DeviceContext constructor so no fresh hipStream is
-    created.
-    """
-    var ctx = DeviceContext()
-    # Retain so the handle survives this function's __del__.
-    ctx._retain()
-    var raw_ptr = ctx._handle.value()
-    return Int(raw_ptr)
-
-
 def launch_bwd_full[
     dtype: DType,
     n_elts: Int,

@@ -55,7 +55,10 @@ def compile_and_load_variant(
             `common.mojo` / `launch.mojo` to symlink in.
         shared_files: filenames under `source_dir` to symlink into the
             variant dir so `mojo build` can resolve `from kernel import …`
-            etc.
+            etc. Entries may also be ``Path`` objects, in which case the
+            absolute path is used as the symlink target and ``path.name``
+            as the link name — useful for files shared across subpackages
+            (e.g. the package-root ``_ctx.mojo``).
         mod_name: stable, human-readable name for this variant (used as
             the directory name, the Python module name passed to
             `ExtensionFileLoader`, and the `PyInit_<mod_name>` symbol
@@ -67,9 +70,13 @@ def compile_and_load_variant(
     variant_dir = cache_dir_for(subpkg) / mod_name
     variant_dir.mkdir(parents=True, exist_ok=True)
 
-    for fname in shared_files:
-        link = variant_dir / fname
-        target = source_dir / fname
+    for entry in shared_files:
+        if isinstance(entry, Path):
+            target = entry
+            link = variant_dir / entry.name
+        else:
+            target = source_dir / entry
+            link = variant_dir / entry
         if link.is_symlink():
             try:
                 if Path(os.readlink(link)) == target:
