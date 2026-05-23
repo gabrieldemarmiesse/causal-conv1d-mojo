@@ -50,23 +50,22 @@ def fwd_kernel[
     XLayoutType: TensorLayout,
     WLayoutType: TensorLayout,
     OLayoutType: TensorLayout,
+    SLayoutType: TensorLayout,
+    ILayoutType: TensorLayout,
 ](
     seqlen: Int,
     x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
     weight: TileTensor[dtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
-    initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    seq_idx: TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin],
+    initial_states: TileTensor[dtype, ILayoutType, ImmutAnyOrigin],
     output: TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin],
-    seq_idx_b_stride: Int,
-    seq_idx_l_stride: Int,
-    initial_states_b_stride: Int,
-    initial_states_c_stride: Int,
-    initial_states_l_stride: Int,
 ) where (
     TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
     and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
     and TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin].flat_rank == 3
+    and TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin].flat_rank == 2
+    and TileTensor[dtype, ILayoutType, ImmutAnyOrigin].flat_rank == 3
 ):
     """Causal conv1d forward, GPU. One block per (B, D); walks seqlen.
 
@@ -139,12 +138,6 @@ def fwd_kernel[
         (smem_exchange + (kNThreads - 1) * kNElts).store[alignment=16](
             SIMD[dtype, kNElts](0)
         )
-
-    var seq_idx_base: Int = batch_id * seq_idx_b_stride
-    var initial_states_base: Int = (
-        batch_id * initial_states_b_stride
-        + channel_id * initial_states_c_stride
-    )
 
     # Note: no pre-loop barrier needed for the init write — the loop's
     # first `barrier()` (at the top of each iteration) already serves as
@@ -234,8 +227,8 @@ def fwd_kernel[
             if tidx == 0 and chunk == 0:
 
                 comptime for i in range(kWidth - 1):
-                    x_prev[kNElts - (kWidth - 1) + i] = initial_states_ptr[
-                        initial_states_base + i * initial_states_l_stride
+                    x_prev[kNElts - (kWidth - 1) + i] = initial_states[
+                        batch_id, channel_id, i
                     ]
 
         barrier()  # all halo reads done; tidx==N-1 may now stomp slot N-1
@@ -276,9 +269,7 @@ def fwd_kernel[
             comptime for j in range(kSeqWindow):
                 var t_j = seq_start + j - (kWidth - 1)
                 if 0 <= t_j and t_j < seqlen:
-                    seq_window[j] = seq_idx_ptr[
-                        seq_idx_base + t_j * seq_idx_l_stride
-                    ]
+                    seq_window[j] = seq_idx[batch_id, t_j]
                 else:
                     seq_window[j] = -1
 

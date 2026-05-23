@@ -40,8 +40,8 @@ upstream Tri Dao CUDA", with upstream as the moving target.
     by the three GPU subpackages.
   - `_fn.py`, `_update.py`, `reference.py`: Python facades + pure-PyTorch
     reference implementations.
-- `tests/`: pytest suite. Run with `pixi run -e bench pytest` (the
-  `bench` env brings in upstream causal-conv1d for the reference op).
+- `tests/`: pytest suite. Run with `uv run --extra nvidia pytest` (the
+  `nvidia` extra brings in upstream causal-conv1d for the reference op).
 - `benchmarks/`
   - `bench_gpu_kernel_time.py`: **kernel-only** GPU time via
     `torch.profiler`. Use this when iterating on kernel perf.
@@ -57,14 +57,15 @@ upstream Tri Dao CUDA", with upstream as the moving target.
 
 ## Running the benches
 
-Always use the `bench` pixi env — it has the upstream Tri Dao package.
+Always use `uv run --extra nvidia …` — the `nvidia` extra pulls in the
+upstream Tri Dao causal-conv1d wheel that the benches diff against.
 
 ```bash
 # Kernel-only GPU time per shape (uses torch.profiler CUPTI hooks)
-pixi run -e bench python benchmarks/bench_gpu_kernel_time.py
+uv run --extra nvidia python benchmarks/bench_gpu_kernel_time.py
 
 # Wall-clock + plots into docs/
-pixi run -e bench plot-bench
+uv run --extra nvidia plot-bench
 ```
 
 If you change `.mojo` source between envs, clear the caches (cached `.so`s
@@ -111,7 +112,7 @@ right perf-counter permission.
 
 ```bash
 # Single-shape, single-kernel runs — keep ITERS small (ncu serializes).
-pixi run -e bench ncu --target-processes all --launch-skip 20 \
+uv run --extra nvidia ncu --target-processes all --launch-skip 20 \
     --launch-count 5 \
     --metrics "sm__sass_thread_inst_executed_op_fadd_pred_on.sum,\
 sm__inst_executed.avg.per_cycle_active,\
@@ -144,7 +145,7 @@ launch overhead, missing concurrency, host stalls) rather than an
 intra-kernel problem.
 
 ```bash
-pixi run -e bench nsys profile --stats=true \
+uv run --extra nvidia nsys profile --stats=true \
     -o /tmp/causal_conv1d \
     python benchmarks/bench_gpu_kernel_time.py
 ```
@@ -269,8 +270,27 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
   iterables. Nest loops or call `product` recursively.
 - The `mojo build` caches (CPU AOT `__mojocache__/` and GPU JIT
   `~/.cache/causal_conv1d_mojo/`) bake the *build env's* modular-lib
-  path into each `.so`'s `RUNPATH`. If you switch pixi envs the runtime
+  path into each `.so`'s `RUNPATH`. If you switch uv envs the runtime
   loader can't find `libKGENCompilerRTShared.so`. Clear both caches
   when changing envs (see the "Running the benches" section above).
 - `dump_asm` paths must be `StaticString(...)`-wrapped; bare string
   literals can fail the `Variant[Bool, Path, StaticString, ...]` coerce.
+- `TileTensor` has two non-obvious costs at very small kernel
+  runtimes (a few microseconds total):
+  1. `linear_idx_type` defaults to `DType.int64` for global-memory
+     tensors with any dynamic dim, so `t[b, c, i]` lowers to
+     `mul.lo.s64` (multi-op SASS) instead of `IMAD`. Passing strides
+     as `UInt32` in the Layout doesn't help — Mojo widens them back
+     to i64 before the multiply. Workaround: pass
+     `linear_idx_type=DType.int32` explicitly.
+  2. Each `TileTensor` kernarg becomes a packed `.align 8 .b8 [N]`
+     blob; strides are then offsetted `ld.param.b32` loads (and for
+     1-D nested layouts, register-indirect loads). Raw `.u32` stride
+     kernargs are direct register loads, saving ~5-10 cycles in the
+     prologue.
+
+  For `fwd/` and `bwd_full/` (kernels that run tens to hundreds of
+  μs) both costs are noise. For `update/` (decode kernel, ~2-8μs per
+  call) they're measurable — that's why `update/` deliberately uses
+  raw pointers + Int32 strides. See `update/kernel.mojo`'s header
+  comment for the PTX-level reasoning.
