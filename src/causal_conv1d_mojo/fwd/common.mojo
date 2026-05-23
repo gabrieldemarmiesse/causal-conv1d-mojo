@@ -4,7 +4,6 @@ Mirrors upstream's `causal_conv1d_common.h`. Imported by the
 `fwd`, `bwd`, `cpu`, and `native` (dispatcher) sibling modules.
 """
 
-from std.math import exp, recip
 from std.sys import size_of
 
 
@@ -20,13 +19,3 @@ comptime kNThreads: Int = 128
 @always_inline
 fn kNEltsFwd[dtype: DType]() -> Int:
     return 16 // size_of[dtype]()
-
-
-def _silu_f32(x: Float32) -> Float32:
-    # silu(x) = x / (1 + exp(-x)). Implementing as `x * recip(1+exp(-x))`
-    # so the division lowers to `mul + rcp.approx.ftz.f32` instead of
-    # `div.rn.f32` (the IEEE-compliant rounded division), which on H100
-    # is ~5× slower than `rcp.approx`. The accuracy loss (~1 ulp on the
-    # reciprocal) is well within the dtype's representable range — all
-    # 834 fwd tests pass with the same tolerances after the change.
-    return x * recip(Float32(1) + exp(-x))

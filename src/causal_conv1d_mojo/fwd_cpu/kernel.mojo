@@ -15,7 +15,7 @@ seqlen.
 from std.algorithm import sync_parallelize
 from layout import TileTensor, TensorLayout
 
-from common import _silu_f32
+from _silu import _silu_f32
 
 
 def fwd_kernel_cpu[

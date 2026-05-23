@@ -46,7 +46,7 @@ from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA
 from std.sys import size_of
 from std.utils.index import StaticTuple
 
-from common import _silu_f32
+from _silu import _silu_f32
 
 
 # Threads per block for the update kernel. Smaller than the 128 used by

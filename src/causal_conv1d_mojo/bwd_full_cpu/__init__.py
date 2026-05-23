@@ -1,8 +1,9 @@
-"""CPU fused backward subpackage: kernel + dispatcher + Python wrapper."""
+"""CPU fused backward subpackage: lazy per-variant JIT + Python wrapper."""
 
 from __future__ import annotations
 
 from causal_conv1d_mojo._dtype import _DTYPE_CODE, _ptr
+from causal_conv1d_mojo.bwd_full_cpu._jit import call_bwd_full_cpu
 
 
 def native_bwd_full_cpu(
@@ -18,9 +19,15 @@ def native_bwd_full_cpu(
     dinitial_states,
     apply_silu,
 ):
-    from causal_conv1d_mojo.bwd_full_cpu import dispatch
-
-    dispatch.causal_conv1d_bwd_full_cpu(
+    config = (
+        _DTYPE_CODE[x.dtype],
+        weight.shape[1],  # width
+        bias is not None,  # has_bias
+        seq_idx is not None,  # has_seq_idx
+        initial_states is not None,  # has_initial_states
+        bool(apply_silu),
+    )
+    runtime_args = (
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -42,15 +49,9 @@ def native_bwd_full_cpu(
         dx.stride(0),
         dx.stride(1),
         dx.stride(2),
-        int(bias is not None),
-        int(apply_silu),
-        _DTYPE_CODE[x.dtype],
-        weight.shape[1],
-        int(seq_idx is not None),
         _ptr(seq_idx),
         seq_idx.stride(0) if seq_idx is not None else 0,
         seq_idx.stride(1) if seq_idx is not None else 0,
-        int(initial_states is not None),
         _ptr(initial_states),
         initial_states.stride(0) if initial_states is not None else 0,
         initial_states.stride(1) if initial_states is not None else 0,
@@ -60,3 +61,4 @@ def native_bwd_full_cpu(
         dinitial_states.stride(1) if dinitial_states is not None else 0,
         dinitial_states.stride(2) if dinitial_states is not None else 0,
     )
+    call_bwd_full_cpu(config, runtime_args)

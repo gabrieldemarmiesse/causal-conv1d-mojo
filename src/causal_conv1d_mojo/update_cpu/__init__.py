@@ -1,16 +1,23 @@
-"""CPU single-step update subpackage: kernel + dispatcher + Python wrapper."""
+"""CPU single-step update subpackage: lazy per-variant JIT + Python wrapper."""
 
 from __future__ import annotations
 
 from causal_conv1d_mojo._dtype import _DTYPE_CODE, _ptr
+from causal_conv1d_mojo.update_cpu._jit import call_update_cpu
 
 
 def native_update_cpu(
     x, weight, bias, conv_state, state_indices, cache_seqlens, out, apply_silu
 ):
-    from causal_conv1d_mojo.update_cpu import dispatch
-
-    dispatch.causal_conv1d_update_cpu(
+    config = (
+        _DTYPE_CODE[x.dtype],
+        weight.shape[1],  # width
+        bias is not None,  # has_bias
+        bool(apply_silu),
+        state_indices is not None,  # has_state_indices
+        cache_seqlens is not None,  # is_circular
+    )
+    runtime_args = (
         x.data_ptr(),
         weight.data_ptr(),
         _ptr(bias),
@@ -31,12 +38,7 @@ def native_update_cpu(
         out.stride(0),
         out.stride(1),
         out.stride(2),
-        int(bias is not None),
-        int(apply_silu),
-        _DTYPE_CODE[x.dtype],
-        weight.shape[1],
-        int(state_indices is not None),
         _ptr(state_indices),
-        int(cache_seqlens is not None),
         _ptr(cache_seqlens),
     )
+    call_update_cpu(config, runtime_args)
