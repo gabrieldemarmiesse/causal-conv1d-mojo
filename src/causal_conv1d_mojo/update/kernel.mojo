@@ -33,12 +33,50 @@ Each thread handles one (batch, channel). One block covers
 `kNThreadsUpdate=64` channels for a given batch.
 
 Implementation note: this kernel takes **raw pointers + Int32 strides**
-(not TileTensor). The update path's launch overhead dominates kernel
-runtime at small shapes (the kernel itself is only ~50 instructions on
-amdgcn), so we trim every byte of kernarg and use 32-bit index math
-throughout (matches upstream's `index_t = uint32_t`). 64-bit `Int`
-defaults in Mojo would force `s_mul_hi_u32` pairs and bloat the index
-math.
+(not TileTensor, unlike `fwd/` and `bwd_full/`). The decode shapes we
+care about (B=1..32, D=256..4096, seqlen=1) put the kernel at ~2-8μs
+total wall-clock per call — small enough that *prologue* cost is a
+meaningful fraction of runtime, and that's exactly where TileTensor
+has two unavoidable overheads:
+
+1. **i64 address math by default.** `TileTensor.linear_idx_type` is
+   keyword-overridable but defaults to `DType.int64` for global-memory
+   tensors with any dynamic dim (see `_get_index_type` in
+   `layout/tile_tensor.mojo`). Every `tensor[b, c, i]` then lowers to
+   `mul.lo.s64` for the stride×index multiplies, which on sm_89
+   becomes several SASS instructions per multiply versus a single
+   `IMAD` for the equivalent i32 multiply. Passing strides as
+   `UInt32` in the Layout *doesn't* help — Mojo widens them back to
+   i64 before the multiply because the index argument is `Int`.
+   Forcing `linear_idx_type=DType.int32` does fix the multiply width
+   (we verified via PTX diff), but exposes the second issue:
+
+2. **Layout passed as a packed kernarg struct.** A `TileTensor`
+   parameter lowers to a `.align 8 .b8 [N]` kernarg blob holding the
+   {base ptr, shape, strides} struct. Reading a stride out is an
+   offsetted load: `ld.param.b32 [..._param_6+32]`,
+   `ld.param.b32 [..._param_6+36]`, etc. — and for some nested
+   layouts (1-D tensors in particular) it's a register-indirect
+   `mov.b64 %rd, param_X; ld.param.b64 [%rd]`. The raw-pointer
+   version gets every stride as its own top-level `.u32` param,
+   loaded directly into a register in one cycle. The difference is
+   ~5-10 extra `ld.param.b32` plus 1-2 indirect loads in the
+   prologue. Cheap individually, but serialised on the kernarg bus
+   and not hidden by anything else in a 2μs kernel.
+
+Empirically (RTX 2000 Ada, fp16, w=4, silu, with-bias, decode shapes):
+TileTensor with `linear_idx_type=DType.int32` regressed wall-clock by
++0.15-0.30μs across every shape vs the raw-ptr version. The 16-byte
+`global_load_dwordx2`/v4 vec loads were preserved (those just need
+the `alignment=` promise on the load call), so the regression is
+purely from the prologue, not from worse memory traffic. `fwd/` and
+`bwd_full/` don't see this because their kernels run for tens to
+hundreds of microseconds — the same prologue cost is in the noise.
+
+So this kernel keeps raw pointers + Int32 strides, and indexes by
+hand. Matches upstream Tri Dao's `index_t = uint32_t` approach. If
+TileTensor ever grows a way to pass the layout as scalar kernargs
+(not a packed struct), revisit.
 """
 
 from std.gpu import block_idx, thread_idx

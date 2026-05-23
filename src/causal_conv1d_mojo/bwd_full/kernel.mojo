@@ -236,34 +236,31 @@ def bwd_full_kernel[
     WLayoutType: TensorLayout,
     DoutLayoutType: TensorLayout,
     DxLayoutType: TensorLayout,
+    SLayoutType: TensorLayout,
+    ILayoutType: TensorLayout,
+    DILayoutType: TensorLayout,
 ](
     seqlen: Int,
     x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
     weight: TileTensor[dtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     dout: TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin],
-    seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
-    initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    seq_idx: TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin],
+    initial_states: TileTensor[dtype, ILayoutType, ImmutAnyOrigin],
     dx: TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin],
     dweight_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
     dbias_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
-    dinitial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    seq_idx_b_stride: Int,
-    seq_idx_l_stride: Int,
-    initial_states_batch_stride: Int,
-    initial_states_c_stride: Int,
-    initial_states_l_stride: Int,
-    dinitial_states_batch_stride: Int,
-    dinitial_states_c_stride: Int,
-    dinitial_states_l_stride: Int,
+    dinitial_states: TileTensor[
+        mut=True, dtype, DILayoutType, MutAnyOrigin
+    ],
 ) where (
     TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
     and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
     and TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin].flat_rank == 3
     and TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin].flat_rank == 3
-    and TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank >= 3
-    and TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin].flat_rank >= 3
-    and TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin].flat_rank >= 3
+    and TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin].flat_rank == 2
+    and TileTensor[dtype, ILayoutType, ImmutAnyOrigin].flat_rank == 3
+    and TileTensor[mut=True, dtype, DILayoutType, MutAnyOrigin].flat_rank == 3
 ):
     """Fused backward: dx + dweight + dbias, one block per (B, D).
 
@@ -334,16 +331,6 @@ def bwd_full_kernel[
         kChunkSize, accum_t, address_space=AddressSpace.SHARED
     ]()
 
-    var seq_idx_base: Int = batch_id * seq_idx_b_stride
-    var init_base: Int = (
-        batch_id * initial_states_batch_stride
-        + channel_id * initial_states_c_stride
-    )
-    var dinit_base: Int = (
-        batch_id * dinitial_states_batch_stride
-        + channel_id * dinitial_states_c_stride
-    )
-
     # Per-thread accumulators (persist across chunks).
     var local_dweight = SIMD[accum_t, width](0)
     var local_dbias: Scalar[accum_t] = 0
@@ -383,9 +370,7 @@ def bwd_full_kernel[
             comptime for j in range(kSeqIdxWindow):
                 var t_j = seq_start + j - (width - 1)
                 if 0 <= t_j and t_j < seqlen:
-                    seq_idx_window[j] = seq_idx_ptr[
-                        seq_idx_base + t_j * seq_idx_l_stride
-                    ]
+                    seq_idx_window[j] = seq_idx[batch_id, t_j]
                 else:
                     seq_idx_window[j] = -1
 
@@ -475,8 +460,8 @@ def bwd_full_kernel[
             if tidx == 0 and chunk == 0:
 
                 comptime for i in range(width - 1):
-                    x_prev[kNElts - (width - 1) + i] = initial_states_ptr[
-                        init_base + i * initial_states_l_stride
+                    x_prev[kNElts - (width - 1) + i] = initial_states[
+                        batch_id, channel_id, i
                     ].cast[accum_t]()
 
         # Publish x_curr to smem so the next thread can pick it up as halo.
@@ -763,15 +748,15 @@ def bwd_full_kernel[
 
                         comptime if i - k >= 0:
                             dinit_v += weights[k] * dpre[i - k]
-                    dinitial_states_ptr[
-                        dinit_base + i * dinitial_states_l_stride
-                    ] = dinit_v.cast[dtype]()
+                    dinitial_states[batch_id, channel_id, i] = dinit_v.cast[
+                        dtype
+                    ]()
 
                 comptime for k in range(width):
 
                     comptime for t in range(width - 1 - k):
-                        var is_v = initial_states_ptr[
-                            init_base + (t + k) * initial_states_l_stride
+                        var is_v = initial_states[
+                            batch_id, channel_id, t + k
                         ].cast[accum_t]()
                         local_dweight[k] += dpre[t] * is_v
 

@@ -28,6 +28,8 @@ def fwd_kernel_cpu[
     XLayoutType: TensorLayout,
     WLayoutType: TensorLayout,
     OLayoutType: TensorLayout,
+    SLayoutType: TensorLayout,
+    ILayoutType: TensorLayout,
 ](
     batch: Int,
     dim: Int,
@@ -35,18 +37,15 @@ def fwd_kernel_cpu[
     x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
     weight: TileTensor[dtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    seq_idx_ptr: UnsafePointer[Int32, MutAnyOrigin],
-    initial_states_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
+    seq_idx: TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin],
+    initial_states: TileTensor[dtype, ILayoutType, ImmutAnyOrigin],
     output: TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin],
-    seq_idx_b_stride: Int,
-    seq_idx_l_stride: Int,
-    initial_states_b_stride: Int,
-    initial_states_c_stride: Int,
-    initial_states_l_stride: Int,
 ) where (
     TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
     and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
     and TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin].flat_rank == 3
+    and TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin].flat_rank == 2
+    and TileTensor[dtype, ILayoutType, ImmutAnyOrigin].flat_rank == 3
 ):
     """Causal conv1d forward, CPU path.
 
@@ -76,18 +75,13 @@ def fwd_kernel_cpu[
         comptime for k in range(width):
             weights[k] = weight[d, k].cast[accum_t]()
 
-        var seq_idx_base: Int = b * seq_idx_b_stride
-        var initial_states_base: Int = (
-            b * initial_states_b_stride + d * initial_states_c_stride
-        )
-
         for t in range(seqlen):
             var pre: Scalar[accum_t] = bias_v
 
             var cur_id: Int32 = 0
 
             comptime if has_seq_idx:
-                cur_id = seq_idx_ptr[seq_idx_base + t * seq_idx_l_stride]
+                cur_id = seq_idx[b, t]
 
             comptime for k in range(width):
                 var src_t = t + k - (width - 1)
@@ -95,9 +89,7 @@ def fwd_kernel_cpu[
                     var include: Bool = True
 
                     comptime if has_seq_idx:
-                        var src_id: Int32 = seq_idx_ptr[
-                            seq_idx_base + src_t * seq_idx_l_stride
-                        ]
+                        var src_id: Int32 = seq_idx[b, src_t]
                         include = src_id == cur_id
                     if include:
                         pre += weights[k] * x[b, d, src_t].cast[accum_t]()
@@ -108,10 +100,7 @@ def fwd_kernel_cpu[
                         var is_idx: Int = src_t + (width - 1)
                         pre += (
                             weights[k]
-                            * initial_states_ptr[
-                                initial_states_base
-                                + is_idx * initial_states_l_stride
-                            ].cast[accum_t]()
+                            * initial_states[b, d, is_idx].cast[accum_t]()
                         )
 
             var out_v: Scalar[accum_t]

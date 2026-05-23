@@ -117,13 +117,47 @@ def launch_fwd[
     # stride slot vs runtime), so the TileTensor construction has to
     # live inside the comptime if. The compile+enqueue is identical in
     # both arms — hoisted into `launch` below.
+    # seq_idx (B, L) and initial_states (B, D, W-1) become TileTensors
+    # so the kernel can do `seq_idx[b, t]` / `initial_states[b, c, i]`
+    # instead of doing the address math by hand. All strides are kept
+    # dynamic (no `Idx[const]`) — keeps the variant layout type fixed
+    # across shapes so we don't accidentally explode the JIT cache.
+    # When the corresponding `has_*` comptime flag is False the kernel
+    # never indexes into the tensor, so the address (may be null) and
+    # the strides (may be 0) don't matter — the construction is purely
+    # type-level setup.
+    var seq_idx_tt = TileTensor(
+        seq_idx_ptr,
+        Layout(
+            (Idx(batch_int), Idx(seqlen_int)),
+            (Idx(UInt32(seq_idx_b_stride)), Idx(UInt32(seq_idx_l_stride))),
+        ),
+    )
+    var initial_states_tt = TileTensor(
+        initial_states_ptr,
+        Layout(
+            (Idx(batch_int), Idx(dim_int), Idx[width - 1]()),
+            (
+                Idx(UInt32(initial_states_b_stride)),
+                Idx(UInt32(initial_states_c_stride)),
+                Idx(UInt32(initial_states_l_stride)),
+            ),
+        ),
+    )
+
     @parameter
     def launch[
-        XLT: TensorLayout, WLT: TensorLayout, OLT: TensorLayout
+        XLT: TensorLayout,
+        WLT: TensorLayout,
+        OLT: TensorLayout,
+        SLT: TensorLayout,
+        ILT: TensorLayout,
     ](
         x_tt: TileTensor[dtype, XLT, ImmutAnyOrigin],
         w_tt: TileTensor[dtype, WLT, ImmutAnyOrigin],
         o_tt: TileTensor[mut=True, dtype, OLT, MutAnyOrigin],
+        s_tt: TileTensor[DType.int32, SLT, ImmutAnyOrigin],
+        i_tt: TileTensor[dtype, ILT, ImmutAnyOrigin],
     ) raises:
         var compiled = ctx.compile_function[
             fwd_kernel[
@@ -139,6 +173,8 @@ def launch_fwd[
                 XLT,
                 WLT,
                 OLT,
+                SLT,
+                ILT,
             ],
             fwd_kernel[
                 dtype,
@@ -153,6 +189,8 @@ def launch_fwd[
                 XLT,
                 WLT,
                 OLT,
+                SLT,
+                ILT,
             ],
         ]()
         comptime if use_external_stream:
@@ -163,14 +201,9 @@ def launch_fwd[
                 x_tt,
                 w_tt,
                 b_ptr,
-                seq_idx_ptr,
-                initial_states_ptr,
+                s_tt,
+                i_tt,
                 o_tt,
-                seq_idx_b_stride,
-                seq_idx_l_stride,
-                initial_states_b_stride,
-                initial_states_c_stride,
-                initial_states_l_stride,
                 grid_dim=grid,
                 block_dim=(kNThreads,),
             )
@@ -181,14 +214,9 @@ def launch_fwd[
                 x_tt,
                 w_tt,
                 b_ptr,
-                seq_idx_ptr,
-                initial_states_ptr,
+                s_tt,
+                i_tt,
                 o_tt,
-                seq_idx_b_stride,
-                seq_idx_l_stride,
-                initial_states_b_stride,
-                initial_states_c_stride,
-                initial_states_l_stride,
                 grid_dim=grid,
                 block_dim=(kNThreads,),
             )
@@ -232,7 +260,13 @@ def launch_fwd[
                 ),
             ),
         )
-        launch(x_tt.as_immut(), w_tt.as_immut(), o_tt)
+        launch(
+            x_tt.as_immut(),
+            w_tt.as_immut(),
+            o_tt,
+            seq_idx_tt.as_immut(),
+            initial_states_tt.as_immut(),
+        )
     else:
         var x_tt = TileTensor(
             x_ptr,
@@ -263,4 +297,10 @@ def launch_fwd[
                 ),
             ),
         )
-        launch(x_tt.as_immut(), w_tt.as_immut(), o_tt)
+        launch(
+            x_tt.as_immut(),
+            w_tt.as_immut(),
+            o_tt,
+            seq_idx_tt.as_immut(),
+            initial_states_tt.as_immut(),
+        )

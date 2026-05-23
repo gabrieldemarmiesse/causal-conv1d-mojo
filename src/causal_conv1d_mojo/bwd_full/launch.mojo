@@ -125,17 +125,60 @@ def launch_bwd_full[
         unsafe_from_address=dinitial_states_addr
     )
 
+    # seq_idx (B, L), initial_states (B, D, W-1), dinitial_states
+    # (B, D, W-1) become TileTensors so the kernel can do scalar
+    # `tensor[b, c, i]` indexing instead of base + i * stride by hand.
+    # All strides dynamic — keeps the variant layout type uniform so
+    # the JIT cache doesn't fragment per-shape. When the corresponding
+    # `has_*` comptime flag is False, the kernel never indexes into
+    # the tensor, so a null pointer + zero strides is fine.
+    var seq_idx_tt = TileTensor(
+        seq_idx_ptr,
+        Layout(
+            (Idx(batch_int), Idx(seqlen_int)),
+            (Idx(UInt32(seq_idx_b_stride)), Idx(UInt32(seq_idx_l_stride))),
+        ),
+    )
+    var initial_states_tt = TileTensor(
+        initial_states_ptr,
+        Layout(
+            (Idx(batch_int), Idx(dim_int), Idx[width - 1]()),
+            (
+                Idx(UInt32(initial_states_b_stride)),
+                Idx(UInt32(initial_states_c_stride)),
+                Idx(UInt32(initial_states_l_stride)),
+            ),
+        ),
+    )
+    var dinitial_states_tt = TileTensor(
+        dinitial_states_ptr,
+        Layout(
+            (Idx(batch_int), Idx(dim_int), Idx[width - 1]()),
+            (
+                Idx(UInt32(dinitial_states_b_stride)),
+                Idx(UInt32(dinitial_states_c_stride)),
+                Idx(UInt32(dinitial_states_l_stride)),
+            ),
+        ),
+    )
+
     @parameter
     def launch[
         XLT: TensorLayout,
         WLT: TensorLayout,
         DoutLT: TensorLayout,
         DxLT: TensorLayout,
+        SLT: TensorLayout,
+        ILT: TensorLayout,
+        DILT: TensorLayout,
     ](
         x_tt: TileTensor[dtype, XLT, ImmutAnyOrigin],
         w_tt: TileTensor[dtype, WLT, ImmutAnyOrigin],
         dout_tt: TileTensor[dtype, DoutLT, ImmutAnyOrigin],
         dx_tt: TileTensor[mut=True, dtype, DxLT, MutAnyOrigin],
+        s_tt: TileTensor[DType.int32, SLT, ImmutAnyOrigin],
+        i_tt: TileTensor[dtype, ILT, ImmutAnyOrigin],
+        di_tt: TileTensor[mut=True, dtype, DILT, MutAnyOrigin],
     ) raises:
         var compiled = ctx.compile_function[
             bwd_full_kernel[
@@ -152,6 +195,9 @@ def launch_bwd_full[
                 WLT,
                 DoutLT,
                 DxLT,
+                SLT,
+                ILT,
+                DILT,
             ],
             bwd_full_kernel[
                 dtype,
@@ -167,6 +213,9 @@ def launch_bwd_full[
                 WLT,
                 DoutLT,
                 DxLT,
+                SLT,
+                ILT,
+                DILT,
             ],
         ]()
         comptime if use_external_stream:
@@ -178,20 +227,12 @@ def launch_bwd_full[
                 w_tt,
                 b_ptr,
                 dout_tt,
-                seq_idx_ptr,
-                initial_states_ptr,
+                s_tt,
+                i_tt,
                 dx_tt,
                 dweight_acc_ptr,
                 dbias_acc_ptr,
-                dinitial_states_ptr,
-                seq_idx_b_stride,
-                seq_idx_l_stride,
-                initial_states_b_stride,
-                initial_states_c_stride,
-                initial_states_l_stride,
-                dinitial_states_b_stride,
-                dinitial_states_c_stride,
-                dinitial_states_l_stride,
+                di_tt,
                 grid_dim=grid,
                 block_dim=(kNThreads,),
             )
@@ -203,20 +244,12 @@ def launch_bwd_full[
                 w_tt,
                 b_ptr,
                 dout_tt,
-                seq_idx_ptr,
-                initial_states_ptr,
+                s_tt,
+                i_tt,
                 dx_tt,
                 dweight_acc_ptr,
                 dbias_acc_ptr,
-                dinitial_states_ptr,
-                seq_idx_b_stride,
-                seq_idx_l_stride,
-                initial_states_b_stride,
-                initial_states_c_stride,
-                initial_states_l_stride,
-                dinitial_states_b_stride,
-                dinitial_states_c_stride,
-                dinitial_states_l_stride,
+                di_tt,
                 grid_dim=grid,
                 block_dim=(kNThreads,),
             )
@@ -271,7 +304,15 @@ def launch_bwd_full[
                 ),
             ),
         )
-        launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)
+        launch(
+            x_tt.as_immut(),
+            w_tt.as_immut(),
+            dout_tt.as_immut(),
+            dx_tt,
+            seq_idx_tt.as_immut(),
+            initial_states_tt.as_immut(),
+            dinitial_states_tt,
+        )
     else:
         var x_tt = TileTensor(
             x_ptr,
@@ -313,4 +354,12 @@ def launch_bwd_full[
                 ),
             ),
         )
-        launch(x_tt.as_immut(), w_tt.as_immut(), dout_tt.as_immut(), dx_tt)
+        launch(
+            x_tt.as_immut(),
+            w_tt.as_immut(),
+            dout_tt.as_immut(),
+            dx_tt,
+            seq_idx_tt.as_immut(),
+            initial_states_tt.as_immut(),
+            dinitial_states_tt,
+        )

@@ -8,9 +8,13 @@ Caller responsibilities:
 - Pass the comptime params that select the right kernel specialisation.
 
 Implementation note: launch passes raw pointers + Int32 strides (not
-TileTensor) to keep the kernarg footprint small. At decode shapes
-(seqlen=1, dim=64..4096) the kernel itself is microseconds-fast and
-launch overhead dominates; shaving kernarg bytes matters.
+TileTensor). See the long-form explanation at the top of
+`update/kernel.mojo` for the PTX-level reasoning. Short version: at
+decode shapes the kernel is 2-8μs total per call, and TileTensor's
+prologue (offsetted `ld.param.b32` loads from a packed kernarg layout
+struct, plus i64 address math by default) costs ~0.15-0.30μs that we
+don't pay with direct `.u32` stride kernargs. `fwd/` and `bwd_full/`
+hide the same cost behind much longer kernel runtimes.
 
 On AMD specifically, `var ctx = DeviceContext()` per call ends up
 calling `hipStreamCreate` + matching `hipStreamDestroy` each time
