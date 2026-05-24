@@ -18,7 +18,7 @@ from layout import TileTensor, Idx, TensorLayout
 from layout.tile_layout import Layout
 
 from kernel import fwd_kernel
-from common import kNThreads
+from common import kNThreads, kBlockM
 
 
 def launch_fwd[
@@ -60,9 +60,9 @@ def launch_fwd[
         unsafe_from_address=stream_handle_addr
     )
 
-    # Grid: one block per (q-tile, head, batch). Each block has kNThreads
-    # threads; each thread handles one query position within the tile.
-    var grid = (ceildiv(seqlen_int, kNThreads), nheads_int, batch_int)
+    # Grid: one block per (q-tile, head, batch). Each block handles
+    # kBlockM query positions and has kNThreads threads.
+    var grid = (ceildiv(seqlen_int, kBlockM), nheads_int, batch_int)
 
     var q_ptr = UnsafePointer[Scalar[dtype], MutAnyOrigin](
         unsafe_from_address=q_addr
