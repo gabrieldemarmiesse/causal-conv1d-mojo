@@ -46,6 +46,18 @@ point at the missing piece.
   validation against the Mojo kernels, once implemented).
 - `compat/`: drop-in `import flash_attn` shim package
   (`flash-attn-mojo-compatibility`).
+- `flash-attention/`: vendored Tri Dao CUDA source (read-only
+  reference for kernel patterns). Cloned via
+  `git clone --depth 1 https://github.com/Dao-AILab/flash-attention.git`;
+  gitignored, not part of the repo. The relevant subdirs:
+  - `csrc/flash_attn/src/` — the sm80 (Ampere/Ada) FA2 kernels.
+    `flash_fwd_hdim{32,64,96,128,...}_{fp16,bf16}_{,causal_}sm80.cu`
+    are the per-head-dim instantiations; the algorithm lives in
+    `flash_fwd_kernel.h` and `flash_bwd_kernel.h`.
+  - `hopper/` — the sm90 (Hopper) FA3 kernels (separate codebase
+    that uses TMA + WGMMA).
+  - `flash_attn/` — the Python wrapper (`flash_attn_interface.py`)
+    that mirrors the API surface we expose.
 
 ## Running the benches
 
