@@ -102,9 +102,16 @@ def causal_conv1d_update(
         raise NotImplementedError(
             f"conv_state.dtype ({conv_state.dtype}) must match x.dtype ({x.dtype})"
         )
-    if weight.shape[1] not in (2, 3, 4):
+    # The update kernel has no smem halo dance (single-step write into
+    # the rolling state buffer), so unlike the fwd/bwd path it isn't
+    # constrained by `kNElts`. Allow widths 2..9; > 9 starts to balloon
+    # compile time per variant — open an issue if you need wider.
+    width = weight.shape[1]
+    if width < 2 or width > 9:
         raise NotImplementedError(
-            f"only width in {{2, 3, 4}} is supported (got {weight.shape[1]})"
+            f"width must be in 2..9 (got {width}). Open an issue at "
+            f"https://github.com/gabrieldemarmiesse/causal-conv1d-mojo/issues "
+            f"if you need wider."
         )
 
     # Match upstream's calling convention: x can be 2-D (no seqlen

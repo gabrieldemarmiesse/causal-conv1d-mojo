@@ -421,6 +421,59 @@ def test_zero_sized_forward(device, dtype, shape, activation, bias_present):
     assert out.numel() == 0
 
 
+# ===---------- widths 5..9 (newly supported beyond upstream's 2..4) ----------=== #
+#
+# Upstream causal-conv1d only ships widths 2..4. Since we JIT-compile
+# per (dtype × width × ...) leaf on first use, supporting wider kernels
+# is "free" up to the smem-halo limit kWidth - 1 ≤ kNElts:
+#   * kNElts = 8 for fp16/bf16 → widths up to 9
+#   * kNElts = 4 for fp32 → widths up to 5
+# Backward additionally requires seqlen % 1024 == 0 for widths > 5
+# because the bwd's narrow-tail path drops to kNElts=4. These tests
+# cover the *forward* path at the new widths on fp16/bf16/fp32, plus a
+# width=5 backward on each dtype (5 is the max that works for fp32 +
+# the smallest "new" width).
+
+
+@pytest.mark.parametrize("W", [5, 6, 7, 8, 9])
+def test_fwd_wide_widths_fp16(device, W):
+    """fp16 forward at widths 5..9 — newly supported."""
+    B, D, L = 2, 64, 128
+    dtype = torch.float16
+    x = torch.randn(B, D, L, dtype=dtype, device=device)
+    weight = torch.randn(D, W, dtype=dtype, device=device)
+    out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, activation="silu")
+    ref = causal_conv1d_mojo.causal_conv1d_ref(x, weight, activation="silu")
+    assert _max_diff(out, ref) < _FWD_TOL[dtype]
+
+
+def test_fwd_width5_fp32(device):
+    """fp32 forward at the new width=5 (fp32 max — width 6+ would
+    require a wider halo than kNElts=4 provides)."""
+    B, D, L = 2, 64, 128
+    x = torch.randn(B, D, L, dtype=torch.float32, device=device)
+    weight = torch.randn(D, 5, dtype=torch.float32, device=device)
+    out = causal_conv1d_mojo.causal_conv1d_fn(x, weight, activation="silu")
+    ref = causal_conv1d_mojo.causal_conv1d_ref(x, weight, activation="silu")
+    assert _max_diff(out, ref) < _FWD_TOL[torch.float32]
+
+
+def test_fwd_width6_fp32_rejected():
+    """fp32 + width=6 should error cleanly (kNElts=4 can't hold the halo)."""
+    x = torch.randn(2, 64, 128, dtype=torch.float32)
+    weight = torch.randn(64, 6, dtype=torch.float32)
+    with pytest.raises(NotImplementedError, match="width must be in 2..5"):
+        causal_conv1d_mojo.causal_conv1d_fn(x, weight)
+
+
+def test_fwd_width10_fp16_rejected():
+    """width=10 exceeds even the fp16 limit — should error cleanly."""
+    x = torch.randn(2, 64, 128, dtype=torch.float16)
+    weight = torch.randn(64, 10, dtype=torch.float16)
+    with pytest.raises(NotImplementedError, match="width must be in 2..9"):
+        causal_conv1d_mojo.causal_conv1d_fn(x, weight)
+
+
 # ===---------- torch.compile integration ----------=== #
 #
 # The kernel-dispatch boundary is wrapped in `torch.library.custom_op`
