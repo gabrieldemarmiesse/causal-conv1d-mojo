@@ -1,41 +1,31 @@
-"""GPU forward kernel for flash-attn — MMA-based Q·Kᵀ + scalar softmax/V.
+"""GPU forward kernel for flash-attn — smem-tiled K/V.
 
-Hybrid step on the way to a fully MMA-based implementation:
+Improvement on the naive version: instead of every thread streaming
+K and V from global for every key position, we cooperatively load
+K/V tiles of `kBlockN` rows into shared memory once per outer-loop
+iteration, then all threads in the block compute against the tile.
+That cuts global K/V traffic by `kNThreads`× and is the single biggest
+win between "doesn't tile anything" and "actually flash-attention".
 
-- Q·Kᵀ uses `TensorCore` MMA (`m16n8k16`, fp16 inputs, fp32 accumulator).
-- The (BM=16, kBlockN=16) score matrix is written to smem via
-  `mma_op.store_d`.
-- Per-lane online softmax + scalar P·V follow, reading scores from
-  smem. P·V will move to MMA in the next commit.
+Still simple-ish:
+- One thread per query position (no Q tiling across threads).
+- No tensor-core matmul yet (per-thread dot products in registers).
+- Single dtype (fp16) and single head_dim (64).
+- No causal, dropout, alibi, softcap, window, MQA/GQA.
 
-Block: one warp (kNThreads=32). Of these 32 lanes, only lanes 0..15
-participate in the softmax + P·V step (one query position each); all
-32 lanes cooperate on the MMA and the smem loads.
-
-Grid: `(ceildiv(seqlen_q, kBlockM), nheads, batch)` with kBlockM=16.
-
-Envelope (same as before): fp16, head_dim=64, no causal/dropout/
-alibi/softcap/window, no MQA/GQA. Anything outside raises in the
-Python wrapper.
+Grid: `(ceildiv(seqlen_q, kNThreads), nheads, batch)`.
+Block: `kNThreads` (one warp on NVIDIA).
 """
 
-from std.gpu import block_idx, thread_idx, barrier, lane_id
-from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA, WARP_SIZE
+from std.gpu import block_idx, thread_idx, barrier
+from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA
 from std.gpu.memory import AddressSpace
 from std.math import exp
-from std.utils import Index
+from std.memory import stack_allocation
 from std.utils.index import StaticTuple
-from layout import (
-    Layout,
-    LayoutTensor,
-    TileTensor,
-    TensorLayout,
-    Coord,
-    Idx,
-)
-from layout.tensor_core import TensorCore
+from layout import TileTensor, TensorLayout, Coord, Idx
 
-from common import kNThreads, kBlockM, kBlockN, kMmaM, kMmaN, kMmaK
+from common import kNThreads, kBlockN
 
 
 @__llvm_metadata(
@@ -62,234 +52,151 @@ def fwd_kernel[
     and TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin].flat_rank == 4
 ):
     comptime accum_t = DType.float32
-    # 16-byte vector width: 8 fp16/bf16 lanes, 4 fp32 lanes.
-    comptime kNElts: Int = 16 // 2  # fp16 only for now
-    # Number of MMAs along the head_dim (K) axis to compute one Q·Kᵀ output:
-    # head_dim / kMmaK. For head_dim=64, kMmaK=16 → 4 inner MMAs.
-    comptime kNumKInnerMMAs: Int = head_dim // kMmaK
-    # Number of MMA-N tiles to cover kBlockN keys. kBlockN=16, kMmaN=8 → 2.
-    comptime kNumNOuterMMAs: Int = kBlockN // kMmaN
+    # 16-byte vector width: 8 fp16/bf16 lanes, 4 fp32 lanes. The K/V
+    # cooperative loads use this; the per-thread dot product uses
+    # individual lanes (compiler is free to vectorize).
+    comptime kNElts: Int = 16 // 2  # fp16-only for now
 
-    var tid: Int = thread_idx.x
-    var lane: Int = Int(lane_id())
-
-    # Block coordinates.
-    var q_block_start: Int = block_idx.x * kBlockM
+    # Grid mapping (same as before — one block per (q-tile, head, batch)).
+    var q_pos: Int = block_idx.x * kNThreads + thread_idx.x
     var head: Int = block_idx.y
     var batch: Int = block_idx.z
 
-    # ---- Shared-memory allocations
+    # ---- Shared-memory K/V tiles, contiguous in head_dim.
     #
-    # smem_Q: query tile, loaded once per block, reused for every K/V tile.
-    # smem_K, smem_V: key / value tile, refreshed per outer iter.
-    # smem_scores: (BM, kBlockN) fp32 — destination of mma_op.store_d, then
-    #              source of per-lane softmax + P·V.
-    var smem_Q = LayoutTensor[
-        dtype,
-        Layout.row_major(kBlockM, head_dim),
-        MutAnyOrigin,
-        address_space=AddressSpace.SHARED,
-    ].stack_allocation()
-    var smem_K = LayoutTensor[
-        dtype,
-        Layout.row_major(kBlockN, head_dim),
-        MutAnyOrigin,
-        address_space=AddressSpace.SHARED,
-    ].stack_allocation()
-    var smem_V = LayoutTensor[
-        dtype,
-        Layout.row_major(kBlockN, head_dim),
-        MutAnyOrigin,
-        address_space=AddressSpace.SHARED,
-    ].stack_allocation()
-    var smem_scores = LayoutTensor[
-        accum_t,
-        Layout.row_major(kBlockM, kBlockN),
-        MutAnyOrigin,
-        address_space=AddressSpace.SHARED,
-    ].stack_allocation()
-
-    # ---- Cooperative Q load
-    # 32 lanes loading 16×64 fp16 = 1024 fp16. Per lane = 32 fp16 = 4
-    # fp16-vec-of-8. Distribution: lane t handles row (t // 2), columns
-    # (t % 2) * 32 .. (t % 2) * 32 + 32. Each pass = 1 vec of 8 fp16, so
-    # 4 passes total (covering the 32-element half-row per lane).
-    var q_row: Int = tid // 2
-    var q_col_half: Int = tid % 2  # 0 or 1 → covers cols 0..31 or 32..63
-    var q_pos_load: Int = q_block_start + q_row
-
-    if q_pos_load < seqlen:
-        comptime for vec_off_in_half in range(0, head_dim // 2, kNElts):
-            var col: Int = q_col_half * (head_dim // 2) + vec_off_in_half
-            var q_vec_load = q.load[width=kNElts, alignment=16](
-                Coord(Idx(batch), Idx(q_pos_load), Idx(head), Idx(col))
-            )
-            # Write into smem_Q[q_row, col : col + kNElts]
-            var smem_q_dst = smem_Q.ptr + q_row * head_dim + col
-            smem_q_dst.store[alignment=16](q_vec_load)
-    else:
-        # Zero-pad the tail Q rows so the MMA's scores for out-of-range
-        # queries are well-defined (we mask them after store_d anyway).
-        var zero = SIMD[dtype, kNElts](0)
-
-        comptime for vec_off_in_half in range(0, head_dim // 2, kNElts):
-            var col: Int = q_col_half * (head_dim // 2) + vec_off_in_half
-            var smem_q_dst = smem_Q.ptr + q_row * head_dim + col
-            smem_q_dst.store[alignment=16](zero)
-
-    # ---- MMA op for Q · Kᵀ. transpose_b=True so we can load K in its
-    # natural (key, head_dim) layout and let TensorCore handle the
-    # transpose for the matmul.
-    var mma_op = TensorCore[
-        accum_t, dtype, Index(kMmaM, kMmaN, kMmaK), transpose_b=True
+    # Layout: smem_K[k_local, i] = K at (batch, tile_start + k_local, head, i).
+    # Row-major in (k_local, i); inner stride = 1 (i-major), so consecutive
+    # threads of a warp reading the same `i` slot hit adjacent banks.
+    var smem_K = stack_allocation[
+        kBlockN * head_dim, dtype, address_space=AddressSpace.SHARED
+    ]()
+    var smem_V = stack_allocation[
+        kBlockN * head_dim, dtype, address_space=AddressSpace.SHARED
     ]()
 
-    # Per-lane online softmax state — only valid for lanes 0..kBlockM-1
-    # (which correspond to query rows 0..kBlockM-1). Other lanes' state
-    # is unused but cheap to keep symmetric.
+    # ---- Load this thread's Q row into fp32 registers (only if it
+    # corresponds to a real query position; tail threads still
+    # participate in the smem dance below).
+    var q_vec = SIMD[accum_t, head_dim](0)
+
+    if q_pos < seqlen:
+        comptime for i in range(head_dim):
+            q_vec[i] = q[batch, q_pos, head, i].cast[accum_t]()
+
+    # Initialise running softmax state. -1e38 is "as negative as fp32
+    # gets without hitting -inf"; using -inf would force NaN out of
+    # the first iteration's `exp(running_max - new_max)`.
     var running_max: Scalar[accum_t] = Scalar[accum_t](-1.0e38)
     var running_sum: Scalar[accum_t] = 0
     var weighted_v = SIMD[accum_t, head_dim](0)
 
-    barrier()  # smem_Q populated
-
-    # ---- Outer loop over K/V tiles along the seqlen-of-K dim.
+    # ---- Outer loop over K/V tiles.
     var n_tiles: Int = (seqlen + kBlockN - 1) // kBlockN
 
     for tile_idx in range(n_tiles):
         var tile_start: Int = tile_idx * kBlockN
+        var k_row: Int = tile_start + thread_idx.x  # this thread's row in K/V
 
-        # Cooperative load: K, V tiles into smem. Same row-per-half-lane
-        # distribution as the Q load above.
-        var k_row: Int = tid // 2
-        var k_col_half: Int = tid % 2
-        var k_global_row: Int = tile_start + k_row
+        # ---- Cooperative load: each thread loads one row of K and one
+        # row of V into the smem tiles. With `kBlockN == kNThreads`,
+        # every thread loads exactly one row. The head_dim=64 row is
+        # 8 fp16-vec-of-8 loads of 16 bytes each.
+        if k_row < seqlen:
+            comptime for vec_off in range(0, head_dim, kNElts):
+                var k_vec = k.load[width=kNElts, alignment=16](
+                    Coord(Idx(batch), Idx(k_row), Idx(head), Idx(vec_off))
+                )
+                (smem_K + thread_idx.x * head_dim + vec_off).store[
+                    alignment=16
+                ](k_vec)
 
-        if k_global_row < seqlen:
-            comptime for vec_off_in_half in range(0, head_dim // 2, kNElts):
-                var col: Int = k_col_half * (head_dim // 2) + vec_off_in_half
-                var k_vec_load = k.load[width=kNElts, alignment=16](
-                    Coord(Idx(batch), Idx(k_global_row), Idx(head), Idx(col))
+                var v_vec = v.load[width=kNElts, alignment=16](
+                    Coord(Idx(batch), Idx(k_row), Idx(head), Idx(vec_off))
                 )
-                (smem_K.ptr + k_row * head_dim + col).store[alignment=16](
-                    k_vec_load
-                )
-
-                var v_vec_load = v.load[width=kNElts, alignment=16](
-                    Coord(Idx(batch), Idx(k_global_row), Idx(head), Idx(col))
-                )
-                (smem_V.ptr + k_row * head_dim + col).store[alignment=16](
-                    v_vec_load
-                )
+                (smem_V + thread_idx.x * head_dim + vec_off).store[
+                    alignment=16
+                ](v_vec)
         else:
+            # Out-of-range row: zero the smem so the masked compute
+            # below produces a -inf score (after the +scale, which is
+            # finite) and a 0 weighted-v contribution. The score branch
+            # handles the mask explicitly; the V branch will just
+            # multiply by p ≈ 0 from the masked score.
             var zero = SIMD[dtype, kNElts](0)
 
-            comptime for vec_off_in_half in range(0, head_dim // 2, kNElts):
-                var col: Int = k_col_half * (head_dim // 2) + vec_off_in_half
-                (smem_K.ptr + k_row * head_dim + col).store[alignment=16](
-                    zero
-                )
-                (smem_V.ptr + k_row * head_dim + col).store[alignment=16](
-                    zero
-                )
+            comptime for vec_off in range(0, head_dim, kNElts):
+                (smem_K + thread_idx.x * head_dim + vec_off).store[
+                    alignment=16
+                ](zero)
+                (smem_V + thread_idx.x * head_dim + vec_off).store[
+                    alignment=16
+                ](zero)
 
         barrier()
 
-        # ---- Q · Kᵀ via MMA
-        # Output: scores (kBlockM, kBlockN) = (16, 16). Two MMA-N tiles
-        # of (16, 8) along N, four MMA-K tiles of (16, 16) along K.
-        # c_reg accumulator: one per N-outer tile.
-        #
-        # On the modular `naive_tensor` template, the c_reg is
-        # `LayoutTensor[accum_t, Layout.row_major(1, frag_size)]` where
-        # frag_size = MMA_M * MMA_N / WARP_SIZE. For m16n8 on 32-lane
-        # warp: 16*8/32 = 4 fp32 per lane.
-        comptime frag_size: Int = kMmaM * kMmaN // WARP_SIZE
+        # ---- Per-thread compute: dot Q · K[k_local] for each k_local
+        # in the tile, fold into the online softmax, accumulate
+        # weighted V. Only "valid" threads (q_pos < seqlen) do this;
+        # tail threads sit out the compute but already did their smem
+        # writes above so the other threads see complete tiles.
+        if q_pos < seqlen:
+            for k_local in range(kBlockN):
+                var k_pos: Int = tile_start + k_local
+                # Mask scores for keys past the seqlen tail. Without
+                # this, a partial tile's last few rows have zeros in
+                # smem_K but the score `score = 0` would softmax to a
+                # nonzero contribution — wrong.
+                if k_pos >= seqlen:
+                    continue
 
-        comptime for n_outer in range(kNumNOuterMMAs):
-            var c_reg = (
-                LayoutTensor[
-                    accum_t,
-                    Layout.row_major(1, frag_size),
-                    MutAnyOrigin,
-                    address_space=AddressSpace.LOCAL,
-                ]
-                .stack_allocation()
-                .fill(0)
-            )
+                # Dot product Q · K_smem[k_local], vectorised. Each
+                # comptime step pulls a `kNElts`-wide SIMD chunk out of
+                # smem (one `ld.shared.v4.b32` for fp16/8-lane), casts
+                # to fp32, multiplies by the matching slice of q_vec,
+                # and reduces. Was previously a scalar smem load per
+                # head-dim element — costly even from smem.
+                var score: Scalar[accum_t] = 0
 
-            comptime for k_inner in range(kNumKInnerMMAs):
-                # Q tile: (kMmaM=16, kMmaK=16) at (0, k_inner) of smem_Q
-                # which has shape (kBlockM=16, head_dim=64).
-                var q_warp_tile = smem_Q.tile[kMmaM, kMmaK](0, k_inner)
-                # K tile: (kMmaN=8, kMmaK=16) at (n_outer, k_inner) of smem_K
-                # which has shape (kBlockN=16, head_dim=64). transpose_b
-                # means load_b expects the B matrix in its untransposed
-                # layout — i.e. it sees an (8, 16) slice from K's natural
-                # shape, equivalent to a (16, 8) slice of Kᵀ.
-                var k_warp_tile = smem_K.tile[kMmaN, kMmaK](n_outer, k_inner)
+                comptime for i in range(0, head_dim, kNElts):
+                    var k_chunk = (smem_K + k_local * head_dim + i).load[
+                        width=kNElts, alignment=16
+                    ]()
+                    var k_chunk_f = k_chunk.cast[accum_t]()
+                    var q_chunk = q_vec.slice[kNElts, offset=i]()
+                    score += (q_chunk * k_chunk_f).reduce_add()
+                score = score * softmax_scale
 
-                var a_reg = mma_op.load_a(q_warp_tile)
-                var b_reg = mma_op.load_b(k_warp_tile)
+                # Online softmax update (same math as the naive kernel):
+                #   new_max = max(running_max, score)
+                #   correction = exp(running_max - new_max)
+                #   p = exp(score - new_max)
+                #   weighted_v = correction * weighted_v + p * V_smem[k_local]
+                #   running_sum = correction * running_sum + p
+                var new_max = max(running_max, score)
+                var correction = exp(running_max - new_max)
+                var p = exp(score - new_max)
 
-                var d_reg = mma_op.mma_op(a_reg, b_reg, c_reg)
-                c_reg.copy_from(d_reg)
+                # Fold V_smem[k_local] into weighted_v, vectorised
+                # the same way: wide smem load + SIMD FMA per chunk.
+                comptime for i in range(0, head_dim, kNElts):
+                    var v_chunk = (smem_V + k_local * head_dim + i).load[
+                        width=kNElts, alignment=16
+                    ]()
+                    var v_chunk_f = v_chunk.cast[accum_t]()
+                    var wv_chunk = weighted_v.slice[kNElts, offset=i]()
+                    var new_wv = correction * wv_chunk + p * v_chunk_f
+                    weighted_v = weighted_v.insert[offset=i](new_wv)
 
-            # Store the (16, 8) score tile into smem_scores at [:, n_outer*8:].
-            var scores_dst = smem_scores.tile[kMmaM, kMmaN](0, n_outer)
-            mma_op.store_d(scores_dst, c_reg)
+                running_sum = correction * running_sum + p
+                running_max = new_max
 
+        # Block-wide sync before the next tile's smem writes overwrite
+        # the K/V we just consumed.
         barrier()
 
-        # ---- Per-lane online softmax + scalar P·V
-        # Only lanes 0..kBlockM-1 do meaningful work; they each own one
-        # query row from this block. Lanes kBlockM..kNThreads-1 sit idle
-        # for this section (they still participated in the MMA above).
-        if lane < kBlockM:
-            var q_pos: Int = q_block_start + lane
+    # ---- Normalise and store
+    if q_pos < seqlen:
+        var inv_sum = Scalar[accum_t](1) / running_sum
 
-            if q_pos < seqlen:
-                for k_local in range(kBlockN):
-                    var k_pos: Int = tile_start + k_local
-
-                    if k_pos >= seqlen:
-                        continue
-
-                    # LayoutTensor element-indexing returns a SIMD of
-                    # `element_size`; index [0] to get a scalar.
-                    var score: Scalar[accum_t] = (
-                        smem_scores[lane, k_local][0].cast[accum_t]()
-                    )
-                    score = score * softmax_scale
-
-                    var new_max = max(running_max, score)
-                    var correction = exp(running_max - new_max)
-                    var p = exp(score - new_max)
-
-                    # Fold smem_V[k_local, :] into weighted_v.
-                    comptime for i in range(0, head_dim, kNElts):
-                        var v_chunk = (smem_V.ptr + k_local * head_dim + i).load[
-                            width=kNElts, alignment=16
-                        ]()
-                        var v_chunk_f = v_chunk.cast[accum_t]()
-                        var wv_chunk = weighted_v.slice[kNElts, offset=i]()
-                        var new_wv = correction * wv_chunk + p * v_chunk_f
-                        weighted_v = weighted_v.insert[offset=i](new_wv)
-
-                    running_sum = correction * running_sum + p
-                    running_max = new_max
-
-        barrier()
-
-    # ---- Normalise and store output. Lanes 0..kBlockM-1 each handle one
-    # query row's output.
-    if lane < kBlockM:
-        var q_pos_out: Int = q_block_start + lane
-
-        if q_pos_out < seqlen:
-            var inv_sum = Scalar[accum_t](1) / running_sum
-
-            comptime for i in range(head_dim):
-                o[batch, q_pos_out, head, i] = (
-                    weighted_v[i] * inv_sum
-                ).cast[dtype]()
+        comptime for i in range(head_dim):
+            o[batch, q_pos, head, i] = (weighted_v[i] * inv_sum).cast[dtype]()

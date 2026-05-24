@@ -11,17 +11,16 @@ the sibling `kernel.mojo` / `launch.mojo` / `variant.mojo`.
 comptime kNThreads: Int = 32
 
 
-# Queries per block. Matches MMA_M (= 16) so Q·Kᵀ uses exactly one
-# MMA-M tile and 16 of the warp's 32 lanes are "owner lanes" for the
-# per-lane softmax + P·V step (one lane per query row). The other 16
-# lanes still participate in the MMA (which is warp-collective) and
-# in cooperative smem loads.
-comptime kBlockM: Int = 16
+# Queries per block. Currently == kNThreads for the "1 lane = 1 query
+# position" structure of the smem-tiled kernel. The MMA refactor (WIP)
+# lands this at 16 (= MMA_M).
+comptime kBlockM: Int = 32
 
 
-# K/V tile size along the seqlen-of-K dim. 16 = 2 × MMA_N so Q·Kᵀ
-# produces exactly 2 MMA-N tiles of (16, 8) per outer iteration.
-comptime kBlockN: Int = 16
+# K/V tile size along the seqlen-of-K dim. Cooperatively loaded into
+# smem once per outer iter; reused by every lane's inner compute.
+# Equal to kNThreads so each thread loads exactly one row.
+comptime kBlockN: Int = 32
 
 
 # MMA tile dimensions (NVIDIA Ada/Ampere fp16, fp32 accumulator).
