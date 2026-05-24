@@ -6,7 +6,12 @@ the sibling `kernel.mojo` / `launch.mojo` / `variant.mojo`.
 
 
 # Threads per block. Each thread handles one query position; the block
-# walks the seqlen dimension via the grid. 64 is one warp on NVIDIA;
-# fits comfortably even for D=128 where per-thread register pressure
-# matters most.
+# walks the seqlen dimension via the grid.
 comptime kNThreads: Int = 64
+
+
+# K/V tile size along the seqlen-of-K dim. Chosen equal to `kNThreads`
+# so the cooperative load is "1 row per thread, no leftover". Bumping
+# kBlockN past 64 starts to push smem over 16 KB for head_dim>=128 and
+# costs occupancy.
+comptime kBlockN: Int = 64
