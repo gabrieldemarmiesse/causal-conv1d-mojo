@@ -8,7 +8,15 @@ from causal_conv1d_mojo._dtype import _DTYPE_CODE, _ptr
 from causal_conv1d_mojo._mps import gpu_address, gpu_address_or_zero
 
 
-def native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu):
+def native_fwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    out: torch.Tensor,
+    apply_silu: bool,
+) -> None:
     # The 29-tuple expected by the JIT-generated variant entry point.
     # Each unique runtime config (dtype × width × has_bias × has_seq_idx ×
     # has_initial_states × apply_silu × contig_inner × aligned_seq) lazily
@@ -52,7 +60,15 @@ def native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu):
     )
 
 
-def native_fwd_mps(x, weight, bias, seq_idx, initial_states, out, apply_silu):
+def native_fwd_mps(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    out: torch.Tensor,
+    apply_silu: bool,
+) -> None:
     """Mac/MPS path — identical to `native_fwd` except we (a) flush
     torch's MPS command queue before launch so any pending torch
     writes to these tensors land before our kernel reads them, (b)

@@ -22,14 +22,14 @@ _MPS_UPDATE_FALLBACK_THRESHOLD = 64 * 1024
 
 
 def causal_conv1d_update(
-    x,
-    conv_state,
-    weight,
-    bias=None,
-    activation=None,
-    cache_seqlens=None,
-    conv_state_indices=None,
-):
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    activation: str | None = None,
+    cache_seqlens: torch.Tensor | None = None,
+    conv_state_indices: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Single-step (or short-burst) causal conv1d update for autoregressive
     decoding.
 

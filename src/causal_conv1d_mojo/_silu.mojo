@@ -2,8 +2,7 @@
 
 Lives at the package root so every subpackage (`fwd`, `update`,
 `fwd_cpu`, `update_cpu`) can pull it in via the `_PKG_DIR` entry in
-the `include_dirs=...` passed to `compile_and_load_variant` /
-`compile_and_load_static`.
+the `include_dirs=...` passed to `_jit_common.compile_and_load`.
 """
 
 from std.math import exp, recip

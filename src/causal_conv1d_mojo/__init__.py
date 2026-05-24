@@ -2,19 +2,13 @@
 Python <-> Mojo CPython extensions (no MAX framework).
 
 Layout: each of the six Python entry points lives in its own
-subpackage (`fwd/`, `bwd_full/`, `fwd_cpu/`, `bwd_full_cpu/`,
-`update/`, `update_cpu/`).
-
-GPU subpackages (`fwd`, `bwd_full`, `update`) use JIT-on-first-use:
-each runtime config compiles its own single-variant `.so` via
-`mojo build` at call time and caches the result under
-`$XDG_CACHE_HOME/causal_conv1d_mojo/<subpkg>/`. See
-`<subpkg>/_jit.py`.
-
-CPU subpackages still use the original AOT model: `from
-causal_conv1d_mojo.<subpkg>_cpu import dispatch` triggers a one-time
-`mojo build` of the matching `dispatch.mojo` on first import, via
-`mojo.importer`'s sys.meta_path hook.
+subpackage (`fwd/`, `bwd_full/`, `update/` for GPU; `fwd_cpu/`,
+`bwd_full_cpu/`, `update_cpu/` for the CPU fallback). All six use
+the same JIT-on-first-use model: each runtime config compiles its
+own single-variant `.so` via `mojo build` at call time and caches
+the result under
+`$XDG_CACHE_HOME/causal_conv1d_mojo/<subpkg>/<backend>[/<arch>]/`.
+See `<subpkg>/_jit.py` and `_jit_common.py`.
 """
 
 from __future__ import annotations
@@ -35,8 +29,11 @@ if "MODULAR_NVPTX_COMPILER_PATH" not in os.environ:
     except ImportError:
         pass
 
-# Registers the import hook used by the CPU subpackages'
-# `from <subpkg>_cpu import dispatch` lazy import.
+# Registers `mojo.importer`'s sys.meta_path hook. We no longer rely
+# on it for the CPU subpackages (they go through the same JIT path
+# as the GPU subpackages now), but other mojo-package internals
+# import this lazily — keep it imported here so the first call
+# doesn't pay the hook-registration cost.
 import mojo.importer  # noqa: F401, E402
 
 from causal_conv1d_mojo._fn import causal_conv1d_fn

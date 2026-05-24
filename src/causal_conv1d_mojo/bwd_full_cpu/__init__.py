@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
+import torch  # noqa: F401  — needed for beartype to resolve `torch.Tensor` annotations
+
 from causal_conv1d_mojo._dtype import _DTYPE_CODE, _ptr
 from causal_conv1d_mojo.bwd_full_cpu._jit import call_bwd_full_cpu
 
 
 def native_bwd_full_cpu(
-    x,
-    weight,
-    bias,
-    dout,
-    seq_idx,
-    initial_states,
-    dx,
-    dweight_acc,
-    dbias_acc,
-    dinitial_states,
-    apply_silu,
-):
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    dout: torch.Tensor,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    dx: torch.Tensor,
+    dweight_acc: torch.Tensor,
+    dbias_acc: torch.Tensor | None,
+    dinitial_states: torch.Tensor | None,
+    apply_silu: bool,
+) -> None:
     config = (
         _DTYPE_CODE[x.dtype],
         weight.shape[1],  # width

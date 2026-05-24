@@ -28,7 +28,9 @@ from causal_conv1d_mojo.reference import causal_conv1d_ref
 _MPS_FWD_FALLBACK_THRESHOLD = 4 * 1024 * 1024
 
 
-def _write_final_states(x, final_states_out, width):
+def _write_final_states(
+    x: torch.Tensor, final_states_out: torch.Tensor, width: int
+) -> None:
     """`final_states_out[b, c, i]` is the value of `x[b, c, t]` at the
     `width-1` most-recent positions, left zero-padded if `seqlen <
     width-1`. Used by the chunked / stateful execution path: feed
@@ -64,8 +66,15 @@ class _CausalConv1dFn(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, x, weight, bias, seq_idx, initial_states, apply_silu, final_states_out
-    ):
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        seq_idx: torch.Tensor | None,
+        initial_states: torch.Tensor | None,
+        apply_silu: bool,
+        final_states_out: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         out = torch.empty_like(x)
         if x.is_cuda:
             native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu)
@@ -88,7 +97,10 @@ class _CausalConv1dFn(torch.autograd.Function):
         return out
 
     @staticmethod
-    def backward(ctx, *grad_outputs):
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        *grad_outputs: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, ...]:
         # `grad_outputs` is `(dout,)` or `(dout, dfinal_states)` depending
         # on whether forward returned a tuple. dfinal_states is None when
         # the user never read .grad on final_states (no consumer).
@@ -191,15 +203,15 @@ class _CausalConv1dFn(torch.autograd.Function):
 
 
 def causal_conv1d_fn(
-    x,
-    weight,
-    bias=None,
-    seq_idx=None,
-    initial_states=None,
-    return_final_states=False,
-    final_states_out=None,
-    activation=None,
-):
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    seq_idx: torch.Tensor | None = None,
+    initial_states: torch.Tensor | None = None,
+    return_final_states: bool = False,
+    final_states_out: torch.Tensor | None = None,
+    activation: str | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     x: (batch, dim, seqlen)
     weight: (dim, width)

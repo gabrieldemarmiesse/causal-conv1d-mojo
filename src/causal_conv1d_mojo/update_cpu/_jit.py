@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def _defines(config: tuple) -> dict[str, str]:
 
 
 @lru_cache(maxsize=None)
-def _get_variant_fn(config: tuple):
+def _get_variant_fn(config: tuple) -> Callable:
     module = compile_and_load(
         subpkg="update_cpu",
         source_file=_VARIANT_MOJO,

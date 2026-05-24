@@ -19,14 +19,14 @@ import torch.nn.functional as F
 
 
 def causal_conv1d_ref(
-    x,
-    weight,
-    bias=None,
-    initial_states=None,
-    return_final_states=False,
-    final_states_out=None,
-    activation=None,
-):
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    initial_states: torch.Tensor | None = None,
+    return_final_states: bool = False,
+    final_states_out: torch.Tensor | None = None,
+    activation: str | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     x: (batch, dim, seqlen)
     weight: (dim, width)
@@ -60,8 +60,13 @@ def causal_conv1d_ref(
 
 
 def causal_conv1d_update_ref(
-    x, conv_state, weight, bias=None, activation=None, cache_seqlens=None
-):
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    activation: str | None = None,
+    cache_seqlens: torch.Tensor | None = None,
+) -> torch.Tensor:
     """
     x: (batch, dim) or (batch, dim, seqlen)
     conv_state: (batch, dim, state_len), where state_len >= width - 1
