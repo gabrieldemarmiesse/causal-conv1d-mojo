@@ -1,0 +1,20 @@
+[project]
+name = "causal-conv1d-mojo-compatibility"
+version = "0.0.4"
+description = "Drop-in `import causal_conv1d` shim for causal-conv1d-mojo."
+readme = "README.md"
+# Pinned to 3.13 to match the main package — they release in lockstep.
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    # Lockstep version pin: an API change in the main package shouldn't
+    # silently break the shim, so we require the *exact* same version.
+    # Bump both versions together when releasing.
+    "causal-conv1d-mojo==0.0.4",
+]
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
