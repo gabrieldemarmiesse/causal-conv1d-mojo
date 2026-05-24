@@ -50,6 +50,157 @@ def _write_final_states(
         final_states_out.copy_(x[..., -(width - 1) :])
 
 
+# --------------------------------------------------------------------------
+# torch.compile integration: wrap the kernel-dispatch calls in
+# `torch.library.custom_op` so dynamo treats them as atomic graph nodes.
+# Without this, `torch.compile` traces the Python wrapper and crashes
+# on the first JIT-compile call (`mojo build` does filesystem I/O,
+# which dynamo can't represent in an FX graph).
+#
+# Mutates-args design: output tensors are allocated in Python (dynamo
+# sees `torch.empty_like` / `torch.zeros` and infers shapes), then the
+# custom op writes into them. That keeps the registered op signatures
+# simple — no variable return shape, no overloads. The autograd
+# Function below just calls these ops; everything else (allocation,
+# final-states copy, gradient assembly) stays in Python where dynamo
+# can trace it normally.
+#
+# Why the impl-function-then-wrap pattern (instead of the natural
+# `@torch.library.custom_op(...)` decorator): beartype's claw — which
+# our tests install via `tests/conftest.py` — rewrites every function
+# definition to `@beartype \n @other_decorators \n def f(): ...`, with
+# `@beartype` placed *outermost*. That wraps the `CustomOpDef` returned
+# by `torch.library.custom_op` back into a plain function, after which
+# `_fwd_inplace.register_fake` no longer exists. Calling `custom_op`
+# programmatically with the impl as a positional argument sidesteps
+# the AST rewrite — beartype decorates `_fwd_inplace_impl` (harmless;
+# it's just a function), and the module-level assignment to
+# `_fwd_inplace` produces an untouched `CustomOpDef`.
+# --------------------------------------------------------------------------
+
+
+def _fwd_inplace_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    out: torch.Tensor,
+    apply_silu: bool,
+    final_states_out: torch.Tensor | None,
+) -> None:
+    if x.is_cuda:
+        native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu)
+    elif x.device.type == "mps":
+        native_fwd_mps(x, weight, bias, seq_idx, initial_states, out, apply_silu)
+    else:
+        native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu)
+    if final_states_out is not None:
+        _write_final_states(x, final_states_out, weight.shape[1])
+
+
+def _fwd_inplace_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    out: torch.Tensor,
+    apply_silu: bool,
+    final_states_out: torch.Tensor | None,
+) -> None:
+    # No return — `out` and `final_states_out` are mutated in place; the
+    # caller already holds them as fake tensors with the right shape.
+    return None
+
+
+_fwd_inplace = torch.library.custom_op(
+    "causal_conv1d_mojo::_fwd_inplace",
+    mutates_args=("out", "final_states_out"),
+)(_fwd_inplace_impl)
+_fwd_inplace.register_fake(_fwd_inplace_fake)
+
+
+def _bwd_full_inplace_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    dout: torch.Tensor,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    dx: torch.Tensor,
+    dweight_acc: torch.Tensor,
+    dbias_acc: torch.Tensor | None,
+    dinitial_states: torch.Tensor | None,
+    apply_silu: bool,
+) -> None:
+    if x.is_cuda:
+        native_bwd_full(
+            x,
+            weight,
+            bias,
+            dout,
+            seq_idx,
+            initial_states,
+            dx,
+            dweight_acc,
+            dbias_acc,
+            dinitial_states,
+            apply_silu,
+        )
+    elif x.device.type == "mps":
+        native_bwd_full_mps(
+            x,
+            weight,
+            bias,
+            dout,
+            seq_idx,
+            initial_states,
+            dx,
+            dweight_acc,
+            dbias_acc,
+            dinitial_states,
+            apply_silu,
+        )
+    else:
+        native_bwd_full_cpu(
+            x,
+            weight,
+            bias,
+            dout,
+            seq_idx,
+            initial_states,
+            dx,
+            dweight_acc,
+            dbias_acc,
+            dinitial_states,
+            apply_silu,
+        )
+
+
+def _bwd_full_inplace_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    dout: torch.Tensor,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    dx: torch.Tensor,
+    dweight_acc: torch.Tensor,
+    dbias_acc: torch.Tensor | None,
+    dinitial_states: torch.Tensor | None,
+    apply_silu: bool,
+) -> None:
+    return None
+
+
+_bwd_full_inplace = torch.library.custom_op(
+    "causal_conv1d_mojo::_bwd_full_inplace",
+    mutates_args=("dx", "dweight_acc", "dbias_acc", "dinitial_states"),
+)(_bwd_full_inplace_impl)
+_bwd_full_inplace.register_fake(_bwd_full_inplace_fake)
+
+
 class _CausalConv1dFn(torch.autograd.Function):
     """fp16/bf16/fp32 autograd op (CUDA + CPU).
 
@@ -79,14 +230,19 @@ class _CausalConv1dFn(torch.autograd.Function):
         final_states_out: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         out = torch.empty_like(x)
-        if x.is_cuda:
-            native_fwd(x, weight, bias, seq_idx, initial_states, out, apply_silu)
-        elif x.device.type == "mps":
-            native_fwd_mps(x, weight, bias, seq_idx, initial_states, out, apply_silu)
-        else:
-            native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu)
-        if final_states_out is not None:
-            _write_final_states(x, final_states_out, weight.shape[1])
+        # Single custom-op call → dynamo sees one atomic node in the
+        # FX graph. The op itself dispatches by device internally and
+        # also writes `final_states_out` if requested.
+        torch.ops.causal_conv1d_mojo._fwd_inplace(
+            x,
+            weight,
+            bias,
+            seq_idx,
+            initial_states,
+            out,
+            apply_silu,
+            final_states_out,
+        )
         # `save_for_backward` accepts None — the slot just won't have a
         # tensor on retrieval. seq_idx and initial_states are
         # non-differentiable inputs (well, initial_states *can* be
@@ -135,48 +291,19 @@ class _CausalConv1dFn(torch.autograd.Function):
             torch.empty_like(initial_states) if initial_states is not None else None
         )
 
-        if x.is_cuda:
-            native_bwd_full(
-                x,
-                weight,
-                bias,
-                dout,
-                seq_idx,
-                initial_states,
-                dx,
-                dweight_acc,
-                dbias_acc,
-                dinitial_states,
-                apply_silu,
-            )
-        elif x.device.type == "mps":
-            native_bwd_full_mps(
-                x,
-                weight,
-                bias,
-                dout,
-                seq_idx,
-                initial_states,
-                dx,
-                dweight_acc,
-                dbias_acc,
-                dinitial_states,
-                apply_silu,
-            )
-        else:
-            native_bwd_full_cpu(
-                x,
-                weight,
-                bias,
-                dout,
-                seq_idx,
-                initial_states,
-                dx,
-                dweight_acc,
-                dbias_acc,
-                dinitial_states,
-                apply_silu,
-            )
+        torch.ops.causal_conv1d_mojo._bwd_full_inplace(
+            x,
+            weight,
+            bias,
+            dout,
+            seq_idx,
+            initial_states,
+            dx,
+            dweight_acc,
+            dbias_acc,
+            dinitial_states,
+            apply_silu,
+        )
 
         if dfinal_states is not None:
             # final_states[b, c, i] = x[b, c, seqlen - (W-1) + i] for
