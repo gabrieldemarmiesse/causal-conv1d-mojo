@@ -1,0 +1,18 @@
+[project]
+name = "flash-attn-mojo-compatibility"
+version = "0.0.1"
+description = "Drop-in `import flash_attn` shim for flash-attn-mojo."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    # Lockstep version pin: an API change in the main package shouldn't
+    # silently break the shim. Bump both versions together when releasing.
+    "flash-attn-mojo==0.0.1",
+]
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

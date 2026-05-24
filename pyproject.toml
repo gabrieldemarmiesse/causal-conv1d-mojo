@@ -1,0 +1,112 @@
+[project]
+name = "flash-attn-mojo"
+version = "0.0.1"
+description = "A wheel for flash-attn that works everywhere."
+readme = "README.md"
+# Pinned to 3.13: torch 2.8.0 ships prebuilt cp313 wheels but not cp314.
+# Bump once those land.
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "torch>=2,<3",
+    "mojo-compiler==1.0.0b1",
+    "mojo-compiler-mojo-libs==1.0.0b1",
+]
+
+[project.scripts]
+flash-attn-mojo = "flash_attn_mojo._cli:main"
+
+[project.optional-dependencies]
+nvidia = [
+    "torch==2.8.0 ; sys_platform == 'linux'",
+    "nvidia-cuda-nvcc-cu12==12.8.* ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # Upstream flash-attn for cross-validation. Pin a recent v2 release.
+    "flash-attn>=2.7,<3 ; sys_platform == 'linux'",
+]
+rocm = [
+    "torch==2.8.0 ; sys_platform == 'linux'",
+    "pytorch-triton-rocm ; sys_platform == 'linux'",
+    "flash-attn ; sys_platform == 'linux'",
+]
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.10.9",
+    "pytest>=9.0.3",
+    "ruff",
+    "pre-commit",
+    "wheel",
+    "packaging",
+    "setuptools>=70",
+    "numpy>=2.0.0",
+    "tomli-w",
+    "beartype>=0.22",
+    "pytest-xdist>=3.8.0",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+# nvidia and rocm both want to source torch from a different PyTorch
+# index, so they cannot be resolved together — declare them as a
+# conflicting extras pair.
+conflicts = [
+    [
+        { extra = "nvidia" },
+        { extra = "rocm" },
+    ],
+]
+# flash-attn's setup.py imports torch at build time to detect CUDA vs
+# HIP, so it needs the env's torch — not a fresh PEP-517 build env.
+no-build-isolation-package = ["flash-attn"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", extra = "nvidia" },
+    { index = "pytorch-rocm", extra = "rocm" },
+]
+pytorch-triton-rocm = [
+    { index = "pytorch-rocm", extra = "rocm" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.4"
+explicit = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"flash_attn_mojo" = ["**/*.mojo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # Surface any warning as a test failure. Beartype's PEP-585
+    # deprecation warnings are the most common cause when something
+    # regresses (e.g. importing `typing.Mapping` instead of
+    # `collections.abc.Mapping`), but we want any unexpected warning
+    # to fail the suite, not silently scroll past.
+    "error",
+    # torch.compile/dynamo internally instantiates autograd.Function
+    # subclasses while tracing, which raises a self-deprecation
+    # warning from torch itself. Not under our control; ignore.
+    "ignore:.*should not be instantiated.*:DeprecationWarning",
+]
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+# E741: "ambiguous variable name `l`" — `l` is conventional for seqlen
+# in ML code. Same for `B`, `D`, etc.
+ignore = ["E741"]
