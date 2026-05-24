@@ -93,6 +93,19 @@ The cache is content-addressed (`<mod_name>.hash-<h>.so`), so editing
 `kernel.mojo`/`launch.mojo`/`common.mojo` also busts the cache for
 every variant that depends on them on next compile.
 
+### Production: pre-warmed cache + `CAUSAL_CONV1D_USE_CACHE_ONLY`
+
+For containerised deploys you can pre-warm the cache on a staging
+host that matches production (same Python, mojo, CPU, GPU, ptxas) by
+running representative workloads, then bundle
+`~/.cache/causal_conv1d_mojo/` into the production image.
+
+In production, set `CAUSAL_CONV1D_USE_CACHE_ONLY=1`. Any cache miss
+at runtime then raises `RuntimeError` instead of silently triggering
+a ~1.2 s JIT compile in the request hot path. The error includes the
+full env signature for the missing variant so you can see exactly
+which signal diverged (CPU model, mojo version, modular path, etc.).
+
 ### Cache-key contents
 
 `<h>` in the cached `.so` filename is sha256(…)[:16] over:
