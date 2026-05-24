@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections.abc import Callable
 
 import torch
 
@@ -60,7 +61,7 @@ def _sync(device: str) -> None:
         torch.mps.synchronize()
 
 
-def _time(fn, device: str, iters: int, warmup: int) -> float:
+def _time(fn: Callable[[], object], device: str, iters: int, warmup: int) -> float:
     """Return mean wall-clock seconds per call after warmup, syncing
     around the timed region."""
     for _ in range(warmup):
@@ -73,7 +74,13 @@ def _time(fn, device: str, iters: int, warmup: int) -> float:
     return (time.perf_counter() - t0) / iters
 
 
-def _bench_forward(device, dtype, shape, iters, warmup):
+def _bench_forward(
+    device: str,
+    dtype: torch.dtype,
+    shape: dict[str, int],
+    iters: int,
+    warmup: int,
+) -> tuple[float, float]:
     B, D, L, W = shape["B"], shape["D"], shape["L"], shape["W"]
     x = torch.randn(B, D, L, device=device, dtype=dtype)
     weight = torch.randn(D, W, device=device, dtype=dtype)
@@ -93,20 +100,26 @@ def _bench_forward(device, dtype, shape, iters, warmup):
     return mojo, ref
 
 
-def _bench_backward(device, dtype, shape, iters, warmup):
+def _bench_backward(
+    device: str,
+    dtype: torch.dtype,
+    shape: dict[str, int],
+    iters: int,
+    warmup: int,
+) -> tuple[float, float]:
     B, D, L, W = shape["B"], shape["D"], shape["L"], shape["W"]
     x = torch.randn(B, D, L, device=device, dtype=dtype, requires_grad=True)
     weight = torch.randn(D, W, device=device, dtype=dtype, requires_grad=True)
     bias = torch.randn(D, device=device, dtype=dtype, requires_grad=True)
     dout = torch.randn(B, D, L, device=device, dtype=dtype)
 
-    def mojo_step():
+    def mojo_step() -> None:
         for t in (x, weight, bias):
             t.grad = None
         out = causal_conv1d_fn(x, weight, bias, activation="silu")
         out.backward(dout)
 
-    def ref_step():
+    def ref_step() -> None:
         for t in (x, weight, bias):
             t.grad = None
         out = causal_conv1d_ref(x, weight, bias, activation="silu")
@@ -117,7 +130,13 @@ def _bench_backward(device, dtype, shape, iters, warmup):
     return mojo, ref
 
 
-def _bench_update(device, dtype, shape, iters, warmup):
+def _bench_update(
+    device: str,
+    dtype: torch.dtype,
+    shape: dict[str, int],
+    iters: int,
+    warmup: int,
+) -> tuple[float, float]:
     B, D, W = shape["B"], shape["D"], shape["W"]
     x = torch.randn(B, D, device=device, dtype=dtype)
     state_mojo = torch.randn(B, D, W - 1, device=device, dtype=dtype)

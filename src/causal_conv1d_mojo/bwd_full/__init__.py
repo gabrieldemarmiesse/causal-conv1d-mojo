@@ -9,18 +9,18 @@ from causal_conv1d_mojo._mps import gpu_address, gpu_address_or_zero
 
 
 def native_bwd_full(
-    x,
-    weight,
-    bias,
-    dout,
-    seq_idx,
-    initial_states,
-    dx,
-    dweight_acc,
-    dbias_acc,
-    dinitial_states,
-    apply_silu,
-):
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    dout: torch.Tensor,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    dx: torch.Tensor,
+    dweight_acc: torch.Tensor,
+    dbias_acc: torch.Tensor | None,
+    dinitial_states: torch.Tensor | None,
+    apply_silu: bool,
+) -> None:
     # 39-tuple expected by the JIT-generated variant entry point.
     # Each unique runtime config lazily compiles its own single-variant
     # `.so` on first use, then caches it under
@@ -74,18 +74,18 @@ def native_bwd_full(
 
 
 def native_bwd_full_mps(
-    x,
-    weight,
-    bias,
-    dout,
-    seq_idx,
-    initial_states,
-    dx,
-    dweight_acc,
-    dbias_acc,
-    dinitial_states,
-    apply_silu,
-):
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    dout: torch.Tensor,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    dx: torch.Tensor,
+    dweight_acc: torch.Tensor,
+    dbias_acc: torch.Tensor | None,
+    dinitial_states: torch.Tensor | None,
+    apply_silu: bool,
+) -> None:
     """Mac/MPS path — see `fwd/__init__.py::native_fwd_mps` for the
     rationale (torch MPS data_ptr is an Obj-C MTLBuffer pointer; we
     extract Metal `gpuAddress` instead, and pass `stream_handle=0`).

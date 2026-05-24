@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import torch  # noqa: F401  — needed for beartype to resolve `torch.Tensor` annotations
+
 from causal_conv1d_mojo._dtype import _DTYPE_CODE, _ptr
 from causal_conv1d_mojo.fwd_cpu._jit import call_fwd_cpu
 
 
-def native_fwd_cpu(x, weight, bias, seq_idx, initial_states, out, apply_silu):
+def native_fwd_cpu(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    out: torch.Tensor,
+    apply_silu: bool,
+) -> None:
     config = (
         _DTYPE_CODE[x.dtype],
         weight.shape[1],  # width

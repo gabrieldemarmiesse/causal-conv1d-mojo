@@ -9,8 +9,15 @@ from causal_conv1d_mojo._mps import gpu_address, gpu_address_or_zero
 
 
 def native_update(
-    x, weight, bias, conv_state, state_indices, cache_seqlens, out, apply_silu
-):
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_state: torch.Tensor,
+    state_indices: torch.Tensor | None,
+    cache_seqlens: torch.Tensor | None,
+    out: torch.Tensor,
+    apply_silu: bool,
+) -> None:
     # 29-tuple expected by the JIT-generated variant entry point.
     # Each unique runtime config lazily compiles its own single-variant
     # `.so` on first use, then caches it under
@@ -54,8 +61,15 @@ def native_update(
 
 
 def native_update_mps(
-    x, weight, bias, conv_state, state_indices, cache_seqlens, out, apply_silu
-):
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_state: torch.Tensor,
+    state_indices: torch.Tensor | None,
+    cache_seqlens: torch.Tensor | None,
+    out: torch.Tensor,
+    apply_silu: bool,
+) -> None:
     """Mac/MPS path — see `fwd/__init__.py::native_fwd_mps` for the
     rationale (torch MPS data_ptr is an Obj-C MTLBuffer pointer; we
     extract Metal `gpuAddress` instead, and pass `stream_handle=0`).

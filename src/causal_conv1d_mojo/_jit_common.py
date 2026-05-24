@@ -39,7 +39,8 @@ import sys
 import sysconfig
 import time
 from pathlib import Path
-from typing import Iterable, Mapping
+from types import ModuleType
+from collections.abc import Iterable, Mapping
 
 from mojo.run import subprocess_run_mojo
 
@@ -69,7 +70,7 @@ def compile_and_load(
     mod_name: str,
     backend: str,
     backend_arch: str = "",
-):
+) -> ModuleType:
     """Compile a static `variant.mojo` with `-D` + `-I` and return the loaded module.
 
     `mojo build` resolves `from kernel import …` etc. via the ``-I``
@@ -310,7 +311,7 @@ def _ptxas_signature() -> str:
     return f"external:{env_path}:{out.stdout.strip()}"
 
 
-def _decode(buf) -> str:
+def _decode(buf: bytes | str | None) -> str:
     """`bytes | str | None` → `str`. subprocess returns either depending
     on whether `text=True` was passed; we always pass `capture_output=True`
     without `text=True`, so we typically get bytes."""

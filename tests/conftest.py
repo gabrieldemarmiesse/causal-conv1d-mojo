@@ -1,8 +1,20 @@
-import pytest
-import torch
+# Runtime type checking under test. `beartype_this_package` would only
+# cover *this* conftest module, so we explicitly target the package
+# under test with `beartype_package`. This must happen *before*
+# `causal_conv1d_mojo` (or any of its submodules) is imported — the
+# claw installs a sys.meta_path hook that rewrites every function in
+# the package at import time. Once the modules below are loaded, the
+# rewrites are baked in and every annotated parameter / return value
+# is checked on every call.
+from beartype.claw import beartype_package  # noqa: I001
 
-import causal_conv1d_mojo._fn as _fn_mod
-import causal_conv1d_mojo._update as _update_mod
+beartype_package("causal_conv1d_mojo")
+
+import pytest  # noqa: E402
+import torch  # noqa: E402
+
+import causal_conv1d_mojo._fn as _fn_mod  # noqa: E402
+import causal_conv1d_mojo._update as _update_mod  # noqa: E402
 
 
 # Disable the MPS small-shape fallback for tests so we actually exercise

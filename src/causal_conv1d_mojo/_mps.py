@@ -37,7 +37,7 @@ import torch
 
 
 @lru_cache(maxsize=1)
-def _objc():
+def _objc() -> ctypes.CDLL:
     """Lazy-load libobjc and pre-bind the C ABI types for the few
     selectors we use. `objc_msgSend.argtypes` MUST be set on Apple
     Silicon — without it the ABI defaults are wrong for variadic
@@ -52,7 +52,7 @@ def _objc():
 
 
 @lru_cache(maxsize=1)
-def _sel_gpu_address():
+def _sel_gpu_address() -> int:
     libobjc = _objc()
     return libobjc.sel_registerName(b"gpuAddress")
 
@@ -76,7 +76,7 @@ def gpu_address(t: torch.Tensor) -> int:
     return base_gpu + offset_bytes
 
 
-def gpu_address_or_zero(t):
+def gpu_address_or_zero(t: torch.Tensor | None) -> int:
     """Same as `gpu_address` but returns 0 for `None` — matches the
     `_ptr()` helper in `_dtype.py` used by the kernel argument-builders.
     """

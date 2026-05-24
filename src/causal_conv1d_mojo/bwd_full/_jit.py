@@ -21,6 +21,7 @@ constructor — no new hipStream per call.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
@@ -123,7 +124,7 @@ def _defines(config: tuple) -> dict[str, str]:
 
 
 @lru_cache(maxsize=None)
-def _get_variant_fn(config: tuple):
+def _get_variant_fn(config: tuple) -> tuple[Callable, int]:
     mod_name = _mod_name(config)
     backend, backend_arch = detect_gpu_backend()
     module = compile_and_load(

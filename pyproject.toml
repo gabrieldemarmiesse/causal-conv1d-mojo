@@ -42,6 +42,8 @@ dev = [
     "setuptools>=70",
     "numpy>=2.0.0",
     "tomli-w",
+    "beartype>=0.22",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.uv]
@@ -88,6 +90,14 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # Surface any warning as a test failure. Beartype's PEP-585
+    # deprecation warnings are the most common cause when something
+    # regresses (e.g. importing `typing.Mapping` instead of
+    # `collections.abc.Mapping`), but we want any unexpected warning
+    # to fail the suite, not silently scroll past.
+    "error",
+]
 
 [tool.ruff]
 target-version = "py313"
