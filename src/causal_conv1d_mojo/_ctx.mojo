@@ -1,7 +1,8 @@
 """Shared GPU DeviceContext helper for the JIT subpackages.
 
-Symlinked into each variant's build dir via the `shared_files` list
-in `_jit_common.compile_and_load_variant`. Lives at the package root
+Picked up by each variant via the package-root entry in the
+`include_dirs=...` tuple passed to `_jit_common.compile_and_load`
+(see each GPU subpackage's `_jit.py`). Lives at the package root
 rather than inside any one subpackage so the three GPU launchers
 (`fwd`, `bwd_full`, `update`) can share a single definition.
 

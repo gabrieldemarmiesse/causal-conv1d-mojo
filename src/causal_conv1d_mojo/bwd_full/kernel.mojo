@@ -1,8 +1,8 @@
 """GPU fused backward kernel for causal_conv1d.
 
 Mirrors upstream's `causal_conv1d_bwd.cu`. The launcher lives in
-`causal_conv1d_native.mojo`; this file holds the kernel + the warp /
-block reduction helpers it depends on.
+`launch.mojo`; this file holds the kernel + the warp / block
+reduction helpers it depends on.
 """
 
 from std.gpu import block_idx, thread_idx, barrier

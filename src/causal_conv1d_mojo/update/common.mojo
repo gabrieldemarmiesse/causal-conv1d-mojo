@@ -1,8 +1,8 @@
-"""Shared constants + leaf helpers for the causal_conv1d kernels.
+"""Shared constants + leaf helpers for the update subpackage.
 
 Mirrors upstream's `causal_conv1d_common.h`. Imported by the
-`fwd`, `bwd`, `cpu`, and `native` (dispatcher) sibling modules.
-"""
+sibling `kernel.mojo` / `launch.mojo` / `variant.mojo` within
+this subpackage."""
 
 
 # Shared by the GPU forward kernel + the GPU launcher (grid math).

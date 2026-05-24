@@ -1,7 +1,7 @@
 """GPU forward kernel for causal_conv1d.
 
 Mirrors upstream's `causal_conv1d_fwd.cu`. The launcher lives in
-`dispatch.mojo`; this file holds only the kernel itself.
+`launch.mojo`; this file holds only the kernel itself.
 
 Design (matches upstream's tri-dao kernel):
 - Grid: `(dim, batch)` — one block per (B, D). Each block walks the
