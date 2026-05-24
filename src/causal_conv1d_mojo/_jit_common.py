@@ -38,7 +38,6 @@ import subprocess
 import sys
 import sysconfig
 import time
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -138,7 +137,26 @@ def compile_and_load(
             subprocess_run_mojo(cmd, capture_output=True, check=True)
             t2 = time.perf_counter()
             print(f" done in {(t2 - t1) * 1000:8.1f} ms", file=sys.stderr)
+        except subprocess.CalledProcessError as e:
+            # `capture_output=True` swallows the compiler diagnostics; surface
+            # them so the user sees *which* line of which `.mojo` failed
+            # instead of a bare "exit status 1".
+            print(" FAILED", file=sys.stderr)
+            stdout = _decode(e.stdout)
+            stderr = _decode(e.stderr)
+            details = []
+            if stdout.strip():
+                details.append(f"--- mojo stdout ---\n{stdout.rstrip()}")
+            if stderr.strip():
+                details.append(f"--- mojo stderr ---\n{stderr.rstrip()}")
+            details_str = ("\n\n" + "\n\n".join(details)) if details else ""
+            raise RuntimeError(
+                f"Compilation of {subpkg} variant {mod_name} failed "
+                f"(exit {e.returncode}). Command: {' '.join(cmd)}"
+                f"{details_str}"
+            ) from e
         except Exception as e:
+            print(" FAILED", file=sys.stderr)
             raise RuntimeError(
                 f"Compilation of {subpkg} variant {mod_name} failed: {e}"
             ) from e
@@ -236,31 +254,20 @@ def _env_signature(backend: str) -> dict[str, str]:
 
 @functools.cache
 def _mojo_version() -> str:
-    """Mojo compiler --version output (includes git hash)."""
-    try:
-        r = subprocess_run_mojo(["--version"], capture_output=True, check=True)
-        out = r.stdout
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", errors="replace")
-        return out.strip()
-    except Exception:
-        # Fall back to the pip package version; coarser but always available.
-        try:
-            return f"pkg:{version('mojo-compiler')}"
-        except PackageNotFoundError:
-            return "unknown"
+    r = subprocess_run_mojo(["--version"], capture_output=True, check=True)
+    out = r.stdout
+    if isinstance(out, bytes):
+        out = out.decode("utf-8", errors="replace")
+    return out.strip()
 
 
 @functools.cache
 def _modular_root() -> str:
     """Path to the modular SDK install — baked into the `.so` RUNPATH."""
-    try:
-        from mojo._package_root import get_package_root  # noqa: PLC0415
+    from mojo._package_root import get_package_root  # noqa: PLC0415
 
-        root = get_package_root()
-        return str(root) if root is not None else ""
-    except Exception:
-        return ""
+    root = get_package_root()
+    return str(root)
 
 
 @functools.cache
@@ -294,24 +301,24 @@ def _ptxas_signature() -> str:
     env_path = os.environ.get("MODULAR_NVPTX_COMPILER_PATH", "")
     if not env_path:
         return "bundled"
-    # Sentinel: the vendored cu12 ptxas always lives at
-    # `<site-packages>/nvidia/cuda_nvcc/bin/ptxas`. Match by suffix
-    # because the absolute prefix varies per venv.
-    if env_path.endswith(os.path.join("nvidia", "cuda_nvcc", "bin", "ptxas")):
-        try:
-            return f"cu12:{version('nvidia-cuda-nvcc-cu12')}"
-        except PackageNotFoundError:
-            pass  # fall through to external probe
-    try:
-        out = subprocess.run(
-            [env_path, "--version"],
-            capture_output=True,
-            check=True,
-            text=True,
-        )
-        return f"external:{env_path}:{out.stdout.strip()}"
-    except Exception:
-        return f"external:{env_path}:?"
+    out = subprocess.run(
+        [env_path, "--version"],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return f"external:{env_path}:{out.stdout.strip()}"
+
+
+def _decode(buf) -> str:
+    """`bytes | str | None` → `str`. subprocess returns either depending
+    on whether `text=True` was passed; we always pass `capture_output=True`
+    without `text=True`, so we typically get bytes."""
+    if buf is None:
+        return ""
+    if isinstance(buf, bytes):
+        return buf.decode("utf-8", errors="replace")
+    return buf
 
 
 def _hash_sources(
