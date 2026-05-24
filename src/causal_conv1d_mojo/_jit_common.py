@@ -48,17 +48,28 @@ _CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.ca
 
 
 def cache_dir_for(subpkg: str, backend: str, backend_arch: str = "") -> Path:
-    """Per-subpackage per-backend variant cache root.
+    """Per-subpackage per-backend per-CPU variant cache root.
 
-    CPU: `~/.cache/causal_conv1d_mojo/<subpkg>/cpu/`.
-    GPU: `~/.cache/causal_conv1d_mojo/<subpkg>/<backend>/<arch>/`.
+    CPU subpkg: `<root>/<subpkg>/cpu/<cpu_tag>/`.
+    GPU subpkg: `<root>/<subpkg>/<backend>/<arch>/<cpu_tag>/`.
 
-    Separating by backend keeps the cache human-inspectable and lets
-    one machine hold artefacts for multiple GPUs side by side.
+    The trailing `<cpu_tag>` segment isolates artefacts built on
+    different host CPUs. Mojo's CPU codegen defaults to `-march=native`
+    (verified by inspecting the generated `.so`: AVX2 instructions on a
+    Haswell-era box, AVX-512 on Sapphire Rapids), so a `.so` built on
+    one CPU will SIGILL on a host with fewer ISA extensions. This
+    matters in shared-cache scenarios — HPC clusters with one
+    `~/.cache` mounted across heterogeneous compute nodes are the
+    classic footgun. Even GPU-subpackage `.so`s contain host-side
+    glue code, so the per-CPU split applies to *every* backend, not
+    just CPU.
     """
+    cpu_tag = _cpu_microarch_tag()
     if backend == "cpu":
-        return _CACHE_HOME / "causal_conv1d_mojo" / subpkg / "cpu"
-    return _CACHE_HOME / "causal_conv1d_mojo" / subpkg / backend / backend_arch
+        return _CACHE_HOME / "causal_conv1d_mojo" / subpkg / "cpu" / cpu_tag
+    return (
+        _CACHE_HOME / "causal_conv1d_mojo" / subpkg / backend / backend_arch / cpu_tag
+    )
 
 
 def compile_and_load(
@@ -196,14 +207,34 @@ def detect_gpu_backend() -> tuple[str, str]:
 
     if torch.cuda.is_available():
         if getattr(torch.version, "hip", None) is not None:
-            arch = torch.cuda.get_device_properties(0).gcnArchName
-            arch = arch.split(":")[0]  # drop sramecc/xnack mode suffix
+            raw = torch.cuda.get_device_properties(0).gcnArchName
+            arch = raw.split(":")[0]  # drop sramecc/xnack mode suffix
+            if not arch.startswith("gfx") or arch == "gfx":
+                # Empty or malformed gfxNNN → silently keying on "gfx"
+                # would risk sharing a cache slot across truly-different
+                # ROCm targets. Fail loudly.
+                raise RuntimeError(
+                    f"ROCm device reports an unrecognised gcnArchName "
+                    f"({raw!r}); refusing to share a cache slot across "
+                    f"unknown AMD GPU targets. Open an issue with the "
+                    f"output of `rocminfo | head -50`."
+                )
             return ("rocm", arch)
         major, minor = torch.cuda.get_device_capability(0)
         return ("cuda", f"sm{major}{minor}")
     mps = getattr(torch.backends, "mps", None)
     if mps is not None and mps.is_available():
-        macos_major = (platform.mac_ver()[0] or "0").split(".")[0]
+        macos_major = (platform.mac_ver()[0] or "").split(".")[0]
+        if not macos_major:
+            # `platform.mac_ver()` empty on a Mac is exotic enough that
+            # silently bucketing every such host together is wrong. Fail.
+            raise RuntimeError(
+                "Could not detect macOS major version via "
+                "`platform.mac_ver()`. The JIT cache keys on this to "
+                "avoid sharing Metal AIR across OS upgrades that have "
+                "historically invalidated it. Open an issue with the "
+                "output of `sw_vers`."
+            )
         return ("metal", f"macos{macos_major}")
     raise RuntimeError(
         "no GPU backend available — install torch with cuda / rocm / mps support"
@@ -231,6 +262,16 @@ def _env_signature(backend: str) -> dict[str, str]:
           find ``libKGENCompilerRTShared.so`` — if the path moves
           (different venv, reinstalled wheel) the cached `.so` is
           un-loadable.
+        * **cpu_brand**: full host-CPU brand string (e.g.
+          ``Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz``). Mojo's
+          ``-march=native`` codegen bakes host-CPU SIMD instructions
+          into the `.so` (AVX2/AVX-512 on x86, NEON/SVE on ARM, etc.).
+          Running a `.so` built on one CPU on a host with fewer ISA
+          extensions SIGILLs. The cache directory path also embeds a
+          short tag derived from this string, so identical-CPU hits
+          stay clustered; the full brand string going into the hash
+          guards against the tag colliding across truly-different
+          CPUs.
         * **jit_common_hash**: this file's own contents. Defensive
           against future changes to the `mojo build` invocation
           (extra flags etc.) that wouldn't otherwise show up in the
@@ -246,11 +287,98 @@ def _env_signature(backend: str) -> dict[str, str]:
         "soabi": sysconfig.get_config_var("SOABI") or "",
         "mojo_version": _mojo_version(),
         "modular_root": _modular_root(),
+        "cpu_brand": _cpu_brand(),
         "jit_common_hash": _self_hash(),
     }
     if backend == "cuda":
         sig["ptxas"] = _ptxas_signature()
     return sig
+
+
+@functools.cache
+def _cpu_brand() -> str:
+    """Full host-CPU brand string — distinguishes ISA generations.
+
+    Mojo's CPU codegen defaults to `-march=native`, so the produced
+    `.so` contains instructions specific to the build host's CPU
+    (AVX2 on Haswell, AVX-512 on Sapphire Rapids, NEON+SVE on ARM
+    server parts). The brand string identifies the CPU generation
+    closely enough that two hosts sharing it can safely share a
+    cached `.so`.
+
+    Sources, in order of preference:
+        Linux  — ``/proc/cpuinfo`` "model name" line (or "Hardware" /
+                 "Processor" on ARM, where some kernels omit model name).
+        macOS  — ``sysctl -n machdep.cpu.brand_string``.
+        Other  — ``platform.processor()``.
+
+    Raises ``RuntimeError`` if no source produces a non-empty brand —
+    silently sharing the cache across unknown CPUs would let one user's
+    AVX-512 binary SIGILL on another user's AVX2-only host. Better to
+    fail loudly so the user can either fix the detection or open an
+    issue for their platform.
+    """
+    sysname = platform.system()
+    if sysname == "Linux":
+        try:
+            text = Path("/proc/cpuinfo").read_text()
+        except OSError:
+            text = ""
+        for key in ("model name", "Hardware", "Processor"):
+            for line in text.splitlines():
+                if line.startswith(key) and ":" in line:
+                    brand = line.split(":", 1)[1].strip()
+                    if brand:
+                        return brand
+    elif sysname == "Darwin":
+        try:
+            r = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+            brand = r.stdout.strip()
+            if brand:
+                return brand
+        except Exception:
+            pass
+    fallback = platform.processor().strip()
+    if fallback:
+        return fallback
+    raise RuntimeError(
+        "Could not detect a host-CPU brand string. The JIT cache keys "
+        "on the CPU model because mojo's `-march=native` codegen bakes "
+        "host SIMD into each .so; silently sharing the cache across "
+        "unknown CPUs risks SIGILL on hosts with fewer ISA extensions. "
+        "Open an issue at "
+        "https://github.com/gabrieldemarmiesse/causal-conv1d-mojo/issues "
+        "with `uname -a` and (Linux) `cat /proc/cpuinfo | head -30` so "
+        "we can teach the detector your platform."
+    )
+
+
+@functools.cache
+def _cpu_microarch_tag() -> str:
+    """Short filesystem-safe identifier derived from `_cpu_brand()`.
+
+    Used as a directory segment in the cache path. We want it short
+    (path components shouldn't bloat) and stable, but readable enough
+    that ``ls ~/.cache/causal_conv1d_mojo/<sub>/cpu/`` is informative.
+    Format: ``<sanitized-prefix>__<8-hex-of-full-brand>``. The hex
+    suffix guarantees no collisions across truly-different CPUs even
+    when the prefix happens to match (e.g. two Xeon Golds with the
+    same first 24 characters).
+    """
+    brand = _cpu_brand()  # raises on undetectable CPUs
+    # Sanitize: keep alphanumerics, replace everything else with `_`.
+    # Then collapse runs of `_`, strip leading/trailing `_`, truncate.
+    prefix = "".join(c if c.isalnum() else "_" for c in brand.lower())
+    while "__" in prefix:
+        prefix = prefix.replace("__", "_")
+    prefix = prefix.strip("_")[:24]
+    digest = hashlib.sha256(brand.encode("utf-8", errors="replace")).hexdigest()[:8]
+    return f"{prefix}__{digest}"
 
 
 @functools.cache
