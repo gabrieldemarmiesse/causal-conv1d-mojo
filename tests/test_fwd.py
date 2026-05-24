@@ -419,3 +419,51 @@ def test_zero_sized_forward(device, dtype, shape, activation, bias_present):
     assert out.shape == x.shape
     assert out.dtype == x.dtype
     assert out.numel() == 0
+
+
+# ===---------- torch.compile integration ----------=== #
+#
+# The kernel-dispatch boundary is wrapped in `torch.library.custom_op`
+# so dynamo can capture the call as an atomic FX node. Without that
+# wrapping, `torch.compile(fullgraph=True)` would crash trying to
+# trace into the JIT-compile path (which does filesystem I/O).
+
+
+def test_torch_compile_fullgraph_cuda():
+    """torch.compile(fullgraph=True) must trace cleanly, no graph break."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs cuda")
+    B, D, L = 2, 64, 128
+    x = torch.randn(B, D, L, dtype=torch.float16, device="cuda")
+    w = torch.randn(D, 4, dtype=torch.float16, device="cuda")
+    b = torch.randn(D, dtype=torch.float16, device="cuda")
+
+    @torch.compile(fullgraph=True)
+    def f(x, w, b):
+        return causal_conv1d_mojo.causal_conv1d_fn(x, w, b, activation="silu")
+
+    out_compiled = f(x, w, b)
+    out_eager = causal_conv1d_mojo.causal_conv1d_fn(x, w, b, activation="silu")
+    # Custom op call is bit-identical to the eager path (same kernel,
+    # same allocations) — exact equality, not just close.
+    assert torch.equal(out_compiled, out_eager)
+
+
+def test_torch_compile_autograd_cuda():
+    """Backward through a compiled forward must work."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs cuda")
+    B, D, L = 2, 64, 128
+    x = torch.randn(B, D, L, dtype=torch.float16, device="cuda", requires_grad=True)
+    w = torch.randn(D, 4, dtype=torch.float16, device="cuda", requires_grad=True)
+    b = torch.randn(D, dtype=torch.float16, device="cuda", requires_grad=True)
+
+    @torch.compile()
+    def f(x, w, b):
+        return causal_conv1d_mojo.causal_conv1d_fn(x, w, b, activation="silu").sum()
+
+    loss = f(x, w, b)
+    loss.backward()
+    assert x.grad is not None and x.grad.shape == x.shape
+    assert w.grad is not None and w.grad.shape == w.shape
+    assert b.grad is not None and b.grad.shape == b.shape

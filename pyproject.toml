@@ -97,6 +97,10 @@ filterwarnings = [
     # `collections.abc.Mapping`), but we want any unexpected warning
     # to fail the suite, not silently scroll past.
     "error",
+    # torch.compile/dynamo internally instantiates autograd.Function
+    # subclasses while tracing, which raises a self-deprecation
+    # warning from torch itself. Not under our control; ignore.
+    "ignore:.*should not be instantiated.*:DeprecationWarning",
 ]
 
 [tool.ruff]
