@@ -130,6 +130,32 @@ def compile_and_load(
     so_path = cache_dir / f"{mod_name}.hash-{src_hash}.so"
 
     if not so_path.is_file():
+        # Production safety net: when `CAUSAL_CONV1D_USE_CACHE_ONLY` is
+        # set in the environment, refuse to JIT-compile and fail loudly
+        # instead. Use case: shipping a container that includes a
+        # pre-warmed cache directory. Any cache miss in production —
+        # e.g. an unexpected input shape that maps to a variant the
+        # warmup run didn't exercise — would otherwise silently incur
+        # ~1.2 s of JIT compile in the request hot path; this flag
+        # converts that into a noisy error so the deployment process
+        # can be fixed (extend the warmup, or remove the flag).
+        if os.environ.get("CAUSAL_CONV1D_USE_CACHE_ONLY"):
+            env_sig_lines = "\n".join(f"    {k} = {v!r}" for k, v in env_sig.items())
+            raise RuntimeError(
+                f"causal_conv1d_mojo: cache miss for {subpkg} variant "
+                f"{mod_name!r}, but CAUSAL_CONV1D_USE_CACHE_ONLY is set. "
+                f"Expected `.so` at {so_path!s}.\n"
+                f"\n"
+                f"This usually means the production host's env signature "
+                f"differs from the one the cache was warmed on, or the "
+                f"input shape maps to a variant the warmup didn't "
+                f"exercise. Current env signature:\n"
+                f"{env_sig_lines}\n"
+                f"\n"
+                f"To fix: rerun the warmup on a host matching the above "
+                f"signals exactly, or unset CAUSAL_CONV1D_USE_CACHE_ONLY "
+                f"to allow on-demand JIT compilation."
+            )
         for old in cache_dir.glob(f"{mod_name}.hash-*.so"):
             old.unlink()
         print(
