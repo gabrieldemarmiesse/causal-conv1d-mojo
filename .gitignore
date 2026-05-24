@@ -13,3 +13,8 @@ dist/
 # Vendored upstream — used as a read-only reference for kernel patterns
 # and for cross-validation in benchmarks. Don't track its files.
 flash-attention/
+causal-conv1d-mojo-ref/
+causal-conv1d/
+modular/
+ptx/
+uv.lock

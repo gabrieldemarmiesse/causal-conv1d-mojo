@@ -36,17 +36,53 @@ def _fwd_dispatch(
     alibi_slopes: torch.Tensor | None,
     deterministic: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Forward dispatch. Returns (out, lse) where `lse` is the
-    log-sum-exp of softmax denominators per query position (needed by
-    the backward; also exposed if `return_attn_probs=True`).
+    """Forward dispatch. Returns (out, lse).
 
-    TODO: replace with the Mojo kernel once `fwd/` is implemented.
+    Current kernel limitations (the simplest viable initial impl):
+    only fp16, only head_dim=64, no causal, no dropout, no alibi,
+    no softcap, no window, no MQA/GQA. Anything outside that envelope
+    raises NotImplementedError so callers see a clear error rather
+    than silently-wrong results.
     """
-    raise NotImplementedError(
-        "flash_attn_mojo: GPU forward kernel not yet implemented. "
-        "The Python infrastructure (autograd, custom_op, cache) is "
-        "scaffolded; the kernel work is the next step."
+    from flash_attn_mojo.fwd import native_fwd
+
+    if q.dtype != torch.float16:
+        raise NotImplementedError(
+            f"flash_attn_mojo current kernel supports fp16 only (got {q.dtype})."
+        )
+    if q.shape[-1] != 64:
+        raise NotImplementedError(
+            f"flash_attn_mojo current kernel supports head_dim=64 only "
+            f"(got {q.shape[-1]})."
+        )
+    if causal:
+        raise NotImplementedError("flash_attn_mojo: causal not yet implemented.")
+    if dropout_p != 0.0:
+        raise NotImplementedError("flash_attn_mojo: dropout not yet implemented.")
+    if softcap != 0.0:
+        raise NotImplementedError("flash_attn_mojo: softcap not yet implemented.")
+    if window_size != _NO_WINDOW:
+        raise NotImplementedError("flash_attn_mojo: window_size not yet implemented.")
+    if alibi_slopes is not None:
+        raise NotImplementedError("flash_attn_mojo: alibi_slopes not yet implemented.")
+    if q.shape[2] != k.shape[2]:
+        raise NotImplementedError(
+            "flash_attn_mojo: MQA/GQA (nheads_q != nheads_kv) not yet implemented."
+        )
+
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** -0.5
+
+    out = torch.empty_like(q)
+    # Empty lse for now — backward isn't wired up, this is just a
+    # placeholder so the autograd Function's `save_for_backward`
+    # signature stays stable.
+    lse = torch.empty(
+        q.shape[0], q.shape[2], q.shape[1], dtype=torch.float32, device=q.device
     )
+
+    native_fwd(q, k, v, out, softmax_scale)
+    return out, lse
 
 
 def _bwd_dispatch(

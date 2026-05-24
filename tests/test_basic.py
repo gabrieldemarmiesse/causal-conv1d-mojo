@@ -68,13 +68,30 @@ def test_cpu_routes_through_ref():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs cuda")
-def test_cuda_gives_clear_not_implemented():
-    """CUDA path should error with a clear NotImplementedError
-    pointing at the missing kernel — not silently succeed via a
-    fallback, not crash with a cryptic error."""
-    B, L, H, D = 1, 4, 2, 8
+def test_cuda_kernel_matches_reference():
+    """Smallest-envelope CUDA call (fp16, head_dim=64, non-causal,
+    no dropout) must produce results within fp16 tolerance of the
+    pure-PyTorch reference."""
+    B, L, H, D = 1, 32, 2, 64
     q = torch.randn(B, L, H, D, dtype=torch.float16, device="cuda")
     k = torch.randn(B, L, H, D, dtype=torch.float16, device="cuda")
     v = torch.randn(B, L, H, D, dtype=torch.float16, device="cuda")
-    with pytest.raises(NotImplementedError, match="kernel not yet implemented"):
+
+    out = flash_attn_mojo.flash_attn_func(q, k, v)
+    ref = flash_attn_mojo.flash_attn_ref(q, k, v)
+    assert out.shape == ref.shape
+    assert out.dtype == ref.dtype
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < 5e-3, f"max |diff| {diff:.3e} exceeds tolerance"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs cuda")
+def test_cuda_outside_envelope_rejects_clearly():
+    """Anything outside the current minimal envelope (causal, dropout,
+    head_dim != 64, etc.) must error cleanly with NotImplementedError."""
+    B, L, H, D = 1, 4, 2, 64
+    q = torch.randn(B, L, H, D, dtype=torch.float16, device="cuda")
+    k = torch.randn(B, L, H, D, dtype=torch.float16, device="cuda")
+    v = torch.randn(B, L, H, D, dtype=torch.float16, device="cuda")
+    with pytest.raises(NotImplementedError, match="causal"):
         flash_attn_mojo.flash_attn_func(q, k, v, causal=True)
