@@ -17,15 +17,19 @@ upstream Tri Dao CUDA", with upstream as the moving target.
       `DeviceContext`, builds the `TileTensor` layouts, calls
       `compile_function` + `enqueue_function`, parameterised by the
       full comptime tuple).
+    - `variant.mojo` (the static per-subpackage entry point. Reads
+      its comptime params via `std.sys.get_defined_*` so a single
+      source file covers every config — no per-variant codegen on
+      disk. Exports `PyInit_variant` so the compiled `.so` is a
+      loadable CPython extension).
     - `_jit.py` (Python: extracts the config tuple from the call's
-      runtime args, formats a readable mod name, templates a small
-      single-variant `.mojo` source that calls `launch_<sub>` with the
-      params hard-coded, and delegates to the shared cache+compile+load
-      helper).
+      runtime args, formats a readable mod name, materialises the
+      config as `-D KEY=VALUE` pairs, and delegates to the shared
+      cache+compile+load helper).
     - `__init__.py` (Python wrapper that builds the args tuple and
       calls `_jit.call_<sub>(args)`).
-    The shared codegen → `mojo build` → `dlopen` plumbing lives in
-    `_jit_common.py` at the package root (`compile_and_load_variant`).
+    The shared `mojo build` → `dlopen` plumbing lives in
+    `_jit_common.py` at the package root (`compile_and_load`).
     Per-variant artefacts cache under
     `$XDG_CACHE_HOME/causal_conv1d_mojo/<sub>/<backend>/<arch>/<mod_name>.hash-<h>.so`,
     where `<backend>` is `cuda` / `rocm` / `metal`, `<arch>` is the
@@ -257,10 +261,12 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
 5. **One cubin per (dtype × width × has_bias × has_seq_idx ×
    has_initial_states × apply_silu × contig_inner × aligned_seq) leaf,
    compiled JIT on first use.** Each leaf compiles to its own
-   single-variant `.so` via `_jit_common.compile_and_load_variant`,
-   cached at `~/.cache/causal_conv1d_mojo/<sub>/<mod_name>/`. The
-   Python-side `_jit.py` decides the config from runtime args; the
-   generated `variant.mojo` is ~30 lines and just calls
+   single-variant `.so` via `_jit_common.compile_and_load`, cached at
+   `~/.cache/causal_conv1d_mojo/<sub>/<backend>/<arch>/<mod_name>.hash-<h>.so`
+   (see "Cache-key contents" above). The Python-side `_jit.py`
+   decides the config from runtime args and passes it as `-D
+   KEY=VALUE` pairs to `mojo build`; the static `variant.mojo` reads
+   the defines via `std.sys.get_defined_*` and calls
    `launch_<sub>[concrete params](...)` from `launch.mojo`. First call
    per (config, machine) pays ~1-3 s for `mojo build`; every later call
    in this or any future process hits the on-disk cache. There is no
