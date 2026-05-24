@@ -31,18 +31,21 @@ upstream Tri Dao CUDA", with upstream as the moving target.
     The shared `mojo build` → `dlopen` plumbing lives in
     `_jit_common.py` at the package root (`compile_and_load`).
     Per-variant artefacts cache under
-    `$XDG_CACHE_HOME/causal_conv1d_mojo/<sub>/<backend>/<arch>/<mod_name>.hash-<h>.so`,
+    `$XDG_CACHE_HOME/causal_conv1d_mojo/<sub>/<backend>/<arch>/<cpu_tag>/<mod_name>.hash-<h>.so`,
     where `<backend>` is `cuda` / `rocm` / `metal`, `<arch>` is the
-    target identifier (`sm89`, `gfx942`, `macos15`), and `<mod_name>`
-    is a readable config string like
-    `fp16_w4_hb0_hs0_hi0_silu0_contig1_aligned1`. See "Cache-key
-    contents" below for what `<h>` covers.
+    GPU target (`sm89`, `gfx942`, `macos15`), `<cpu_tag>` is a short
+    derivation of the host CPU brand (mojo's `-march=native` codegen
+    bakes host SIMD into the `.so`'s host-side glue, so different CPUs
+    must not share cache entries), and `<mod_name>` is a readable
+    config string like `fp16_w4_hb0_hs0_hi0_silu0_contig1_aligned1`.
+    See "Cache-key contents" below for what `<h>` covers.
   - `fwd_cpu/`, `bwd_full_cpu/`, `update_cpu/`: CPU fallbacks. Same
     JIT-on-first-use plumbing as the GPU subpackages — each (subpkg,
     config) compiles its own `.so` via `mojo build` and caches under
-    `$XDG_CACHE_HOME/causal_conv1d_mojo/<sub>_cpu/cpu/<mod_name>.hash-<h>.so`.
-    No `arch` subdir for CPU because the host arch + OS are already
-    captured in the cache hash via the Python SOABI signal.
+    `$XDG_CACHE_HOME/causal_conv1d_mojo/<sub>_cpu/cpu/<cpu_tag>/<mod_name>.hash-<h>.so`.
+    No GPU `arch` subdir for CPU (obviously), but the same
+    `<cpu_tag>` segment applies — host-CPU SIMD baked into the `.so`
+    is the dominant factor here.
   - `_jit_common.py`: shared variant cache + compile + load helper used
     by every subpackage. Also owns the env-signature → cache-hash
     logic (see below).
@@ -104,6 +107,14 @@ every variant that depends on them on next compile.
    - **`mojo_version`**: `mojo --version` output, includes git hash.
    - **`modular_root`**: path to the modular SDK install — baked
      into the `.so` RUNPATH.
+   - **`cpu_brand`**: full host-CPU brand string (e.g.
+     `Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz`, `Apple M2 Pro`).
+     Mojo's CPU codegen defaults to `-march=native`, so the produced
+     `.so` contains host-specific SIMD (AVX2/AVX-512 on x86,
+     NEON/SVE on ARM). Mixing CPUs in a shared cache without keying
+     on this SIGILLs at first instruction. The full brand goes into
+     the hash; a short tag derived from it goes into the cache
+     directory path so identical-CPU hits stay clustered.
    - **`jit_common_hash`**: hash of `_jit_common.py` itself, so
      future changes to the `mojo build` invocation bust the cache.
    - **`ptxas`** (CUDA only): identifies the ptxas mojo will hand
@@ -113,9 +124,10 @@ every variant that depends on them on next compile.
      what `__init__.py` sets by default), or
      `external:<path>:<--version output>` (user-overridden).
 
-The GPU compute capability (`sm89`, `gfx942`, …) is the *directory*,
-not part of `<h>`, so one machine can hold artefacts for multiple
-GPUs without collision.
+The GPU compute capability (`sm89`, `gfx942`, …) and the host-CPU
+tag are *directory* segments rather than parts of `<h>`, so one
+shared cache can hold artefacts for multiple GPUs and CPUs side by
+side without collision and `ls`ing the cache stays informative.
 
 ## Measuring kernel performance properly
 
