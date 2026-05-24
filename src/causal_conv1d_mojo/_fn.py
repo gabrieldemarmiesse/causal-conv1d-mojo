@@ -51,7 +51,10 @@ def _write_final_states(
 
 
 class _CausalConv1dFn(torch.autograd.Function):
-    """fp16/bf16/fp32, width in {2, 3, 4} autograd op (CUDA + CPU).
+    """fp16/bf16/fp32 autograd op (CUDA + CPU).
+
+    Widths: 2..9 for fp16/bf16, 2..5 for fp32; backward additionally
+    requires seqlen aligned to 1024 when width > 5.
 
     Dispatches to the GPU launcher when `x.is_cuda`, otherwise to the
     pure-mojo CPU launcher (parallelized over (B, D) via
@@ -261,10 +264,36 @@ def causal_conv1d_fn(
         raise NotImplementedError(
             f"bias.dtype ({bias.dtype}) must match x.dtype ({x.dtype})"
         )
-    if weight.shape[1] not in (2, 3, 4):
+    # Width support is dtype- and seqlen-dependent because the kernels
+    # share boundary x values across threads via a smem ring buffer
+    # holding `kNElts` slots — the (W-1) halo must fit into one slot.
+    # kNElts is 8 for fp16/bf16 and 4 for fp32 (16 bytes / dtype). The
+    # bwd kernel additionally drops to kNElts=4 on the unaligned tail
+    # path (seqlen % 1024 != 0), so width >5 on the unaligned path
+    # would corrupt the dx halo accumulation. Conservative limit:
+    # widths 2..9 for fp16/bf16, 2..5 for fp32, and require seqlen
+    # aligned to 1024 elements when width > 5. Wider widths on fp32 or
+    # the bwd's unaligned path need a redesigned halo dance — open an
+    # issue if you need them.
+    width = weight.shape[1]
+    max_width = 5 if x.dtype == torch.float32 else 9
+    if width < 2 or width > max_width:
+        dtype_clause = "" if x.dtype == torch.float32 else " for fp32"
         raise NotImplementedError(
-            f"only width in {{2, 3, 4}} is supported (got {weight.shape[1]})"
+            f"width must be in 2..{max_width}{dtype_clause} (got {width}). "
+            f"Open an issue at "
+            f"https://github.com/gabrieldemarmiesse/causal-conv1d-mojo/issues "
+            f"if you need wider."
         )
+    if width > 5 and x.requires_grad:
+        if x.shape[-1] % 1024 != 0:
+            raise NotImplementedError(
+                f"width > 5 with autograd requires seqlen aligned to 1024 "
+                f"(got seqlen={x.shape[-1]}, width={width}). The bwd halo "
+                f"falls back to a 4-slot ring on unaligned seqlens; widths "
+                f"6..9 read past its boundary. Open an issue if you need "
+                f"this combination."
+            )
     if x.device != weight.device or (bias is not None and x.device != bias.device):
         raise NotImplementedError(
             f"x, weight, bias must all be on the same device "
