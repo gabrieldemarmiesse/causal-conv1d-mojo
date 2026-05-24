@@ -117,10 +117,20 @@ def fwd_kernel[
             var col: Int = q_load_half * (head_dim // 2) + vec_off
             (smem_Q + q_load_row * head_dim + col).store[alignment=16](zero)
 
-    # Per-lane online softmax state (only lanes < kBlockM are "owners").
+    # Per-lane online softmax state. Lane t owns query (t // 2) and the
+    # head_dim "half" (t % 2): lanes 0,1 share query 0 (lane 0 handles
+    # head_dim cols [0, 32), lane 1 handles [32, 64)). Both lanes
+    # independently track running_max / running_sum (cheap; the per-
+    # iter score is broadcast through smem_scores, so the two lanes
+    # see identical input). weighted_v is half-sized: 32 fp32 instead
+    # of 64.
+    comptime kHeadDimHalf: Int = head_dim // 2
+    var sm_query: Int = lane // 2
+    var sm_half: Int = lane % 2  # 0 → low half cols, 1 → high half
+    var sm_col_start: Int = sm_half * kHeadDimHalf
     var running_max: Scalar[accum_t] = Scalar[accum_t](-1.0e38)
     var running_sum: Scalar[accum_t] = 0
-    var weighted_v = SIMD[accum_t, head_dim](0)
+    var weighted_v = SIMD[accum_t, kHeadDimHalf](0)
 
     barrier()  # smem_Q ready
 
@@ -231,49 +241,52 @@ def fwd_kernel[
 
         barrier()
 
-        # ---- Per-lane online softmax + scalar P·V
-        if lane < kBlockM:
-            var q_pos: Int = q_block_start + lane
+        # ---- Online softmax + scalar P·V, paired-lane.
+        # Lane t handles query (t // 2) and head_dim half (t % 2). Both
+        # lanes in a pair read the same smem_scores row and run the
+        # identical softmax recurrence in registers; cheap vs the cost
+        # of a shuffle. Each lane multiplies V's half-row.
+        var q_pos: Int = q_block_start + sm_query
 
-            if q_pos < seqlen:
-                for k_local in range(kBlockN):
-                    var k_pos: Int = tile_start + k_local
+        if q_pos < seqlen:
+            for k_local in range(kBlockN):
+                var k_pos: Int = tile_start + k_local
 
-                    if k_pos >= seqlen:
-                        continue
+                if k_pos >= seqlen:
+                    continue
 
-                    var score: Scalar[accum_t] = (
-                        smem_scores + lane * kBlockN + k_local
-                    )[0]
-                    score = score * softmax_scale
+                var score: Scalar[accum_t] = (
+                    smem_scores + sm_query * kBlockN + k_local
+                )[0]
+                score = score * softmax_scale
 
-                    var new_max = max(running_max, score)
-                    var correction = exp(running_max - new_max)
-                    var p = exp(score - new_max)
+                var new_max = max(running_max, score)
+                var correction = exp(running_max - new_max)
+                var p = exp(score - new_max)
 
-                    # Accumulate weighted V — vectorised smem reads.
-                    comptime for i in range(0, head_dim, kNElts):
-                        var v_chunk = (smem_V + k_local * head_dim + i).load[
-                            width=kNElts, alignment=16
-                        ]()
-                        var v_chunk_f = v_chunk.cast[accum_t]()
-                        var wv_chunk = weighted_v.slice[kNElts, offset=i]()
-                        var new_wv = correction * wv_chunk + p * v_chunk_f
-                        weighted_v = weighted_v.insert[offset=i](new_wv)
+                # Accumulate weighted V — only this lane's half of head_dim.
+                comptime for i in range(0, kHeadDimHalf, kNElts):
+                    var v_chunk = (
+                        smem_V + k_local * head_dim + sm_col_start + i
+                    ).load[width=kNElts, alignment=16]()
+                    var v_chunk_f = v_chunk.cast[accum_t]()
+                    var wv_chunk = weighted_v.slice[kNElts, offset=i]()
+                    var new_wv = correction * wv_chunk + p * v_chunk_f
+                    weighted_v = weighted_v.insert[offset=i](new_wv)
 
-                    running_sum = correction * running_sum + p
-                    running_max = new_max
+                running_sum = correction * running_sum + p
+                running_max = new_max
 
         barrier()
 
-    # ---- Normalise + store output (lanes < kBlockM only).
-    if lane < kBlockM:
-        var q_pos_out: Int = q_block_start + lane
+    # ---- Normalise + store output. Lane t writes the head_dim half
+    # it accumulated for its query.
+    var q_pos_out: Int = q_block_start + sm_query
 
-        if q_pos_out < seqlen:
-            var inv_sum = Scalar[accum_t](1) / running_sum
+    if q_pos_out < seqlen:
+        var inv_sum = Scalar[accum_t](1) / running_sum
 
-            comptime for i in range(head_dim):
-                o[batch, q_pos_out, head, i] = (
-                    weighted_v[i] * inv_sum
-                ).cast[dtype]()
+        comptime for i in range(kHeadDimHalf):
+            o[batch, q_pos_out, head, sm_col_start + i] = (
+                weighted_v[i] * inv_sum
+            ).cast[dtype]()
