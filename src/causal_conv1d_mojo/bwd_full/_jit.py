@@ -24,7 +24,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from causal_conv1d_mojo._jit_common import compile_and_load
+from causal_conv1d_mojo._jit_common import compile_and_load, detect_gpu_backend
 
 _BWD_DIR = Path(__file__).resolve().parent
 _PKG_DIR = _BWD_DIR.parent
@@ -125,12 +125,15 @@ def _defines(config: tuple) -> dict[str, str]:
 @lru_cache(maxsize=None)
 def _get_variant_fn(config: tuple):
     mod_name = _mod_name(config)
+    backend, backend_arch = detect_gpu_backend()
     module = compile_and_load(
         subpkg="bwd_full",
         source_file=_VARIANT_MOJO,
         include_dirs=(_BWD_DIR, _PKG_DIR),
         defines=_defines(config),
         mod_name=mod_name,
+        backend=backend,
+        backend_arch=backend_arch,
     )
     fn = module.causal_conv1d_bwd_full_variant
     acquire = module.causal_conv1d_bwd_full_acquire_ctx

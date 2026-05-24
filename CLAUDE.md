@@ -27,17 +27,21 @@ upstream Tri Dao CUDA", with upstream as the moving target.
     The shared codegen → `mojo build` → `dlopen` plumbing lives in
     `_jit_common.py` at the package root (`compile_and_load_variant`).
     Per-variant artefacts cache under
-    `$XDG_CACHE_HOME/causal_conv1d_mojo/<sub>/<mod_name>/`, where
-    `<mod_name>` is a readable string like
-    `fp16_w4_hb0_hs0_hi0_silu0_contig1_aligned1`.
-  - `fwd_cpu/`, `bwd_full_cpu/`, `update_cpu/`: CPU fallbacks. These
-    still use the old AOT model — `__init__.py` does
-    `from causal_conv1d_mojo.<sub>_cpu import dispatch` which triggers
-    `mojo.importer` to build the whole `dispatch.mojo` AOT sweep on
-    first import, caching under `<sub>_cpu/__mojocache__/`. The CPU
-    trees are small enough that AOT cost is fine.
+    `$XDG_CACHE_HOME/causal_conv1d_mojo/<sub>/<backend>/<arch>/<mod_name>.hash-<h>.so`,
+    where `<backend>` is `cuda` / `rocm` / `metal`, `<arch>` is the
+    target identifier (`sm89`, `gfx942`, `macos15`), and `<mod_name>`
+    is a readable config string like
+    `fp16_w4_hb0_hs0_hi0_silu0_contig1_aligned1`. See "Cache-key
+    contents" below for what `<h>` covers.
+  - `fwd_cpu/`, `bwd_full_cpu/`, `update_cpu/`: CPU fallbacks. Same
+    JIT-on-first-use plumbing as the GPU subpackages — each (subpkg,
+    config) compiles its own `.so` via `mojo build` and caches under
+    `$XDG_CACHE_HOME/causal_conv1d_mojo/<sub>_cpu/cpu/<mod_name>.hash-<h>.so`.
+    No `arch` subdir for CPU because the host arch + OS are already
+    captured in the cache hash via the Python SOABI signal.
   - `_jit_common.py`: shared variant cache + compile + load helper used
-    by the three GPU subpackages.
+    by every subpackage. Also owns the env-signature → cache-hash
+    logic (see below).
   - `_fn.py`, `_update.py`, `reference.py`: Python facades + pure-PyTorch
     reference implementations.
 - `tests/`: pytest suite. Run with `uv run --extra nvidia pytest` (the
@@ -68,20 +72,46 @@ uv run --extra nvidia python benchmarks/bench_gpu_kernel_time.py
 uv run --extra nvidia plot-bench
 ```
 
-If you change `.mojo` source between envs, clear the caches (cached `.so`s
-have the *build env's* lib path baked into RUNPATH):
+In most cases you should never need to manually clear the cache — the
+hash mixes in the Python ABI tag, mojo compiler version, modular SDK
+install path, ptxas version (CUDA only), and this file's own hash, so
+env switches and toolchain bumps invalidate automatically. If you
+suspect something stale anyway:
 
 ```bash
-# CPU subpackages' AOT cache (only ever populated by `*_cpu` imports).
-find src -name __mojocache__ -type d -exec rm -rf {} +
-# GPU subpackages' per-variant JIT cache.
 rm -rf ~/.cache/causal_conv1d_mojo/
 ```
 
-The GPU JIT cache is content-addressed (`<mod_name>.hash-<srchash>.so`),
-so editing `kernel.mojo`/`launch.mojo`/`common.mojo` automatically busts
-the cache for every variant that depends on them on next compile — you
-usually only need to nuke it when switching envs.
+The cache is content-addressed (`<mod_name>.hash-<h>.so`), so editing
+`kernel.mojo`/`launch.mojo`/`common.mojo` also busts the cache for
+every variant that depends on them on next compile.
+
+### Cache-key contents
+
+`<h>` in the cached `.so` filename is sha256(…)[:16] over:
+1. The full contents of the per-variant `variant.mojo` source.
+2. Every `.mojo` in each `include_dirs` path (recursive but glob'd
+   per dir; matches how `mojo build -I` resolves imports).
+3. The `defines` dict (`-D KEY=VALUE` pairs) for that variant.
+4. An env signature dict (see `_env_signature` in `_jit_common.py`)
+   containing:
+   - **`soabi`**: `sysconfig.get_config_var('SOABI')` — captures
+     Python minor version + CPU arch + OS in one field.
+   - **`mojo_version`**: `mojo --version` output, includes git hash.
+   - **`modular_root`**: path to the modular SDK install — baked
+     into the `.so` RUNPATH.
+   - **`jit_common_hash`**: hash of `_jit_common.py` itself, so
+     future changes to the `mojo build` invocation bust the cache.
+   - **`ptxas`** (CUDA only): identifies the ptxas mojo will hand
+     PTX to. Three states: `bundled` (env var unset, uses the one
+     shipped with the modular SDK — subsumed by `mojo_version`),
+     `cu12:<pkg-version>` (vendored `nvidia-cuda-nvcc-cu12` wheel,
+     what `__init__.py` sets by default), or
+     `external:<path>:<--version output>` (user-overridden).
+
+The GPU compute capability (`sm89`, `gfx942`, …) is the *directory*,
+not part of `<h>`, so one machine can hold artefacts for multiple
+GPUs without collision.
 
 ## Measuring kernel performance properly
 
@@ -268,11 +298,14 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
   `ptr + i` for offsets.
 - `comptime for x, y, ... in product(...)` only handles up to 4
   iterables. Nest loops or call `product` recursively.
-- The `mojo build` caches (CPU AOT `__mojocache__/` and GPU JIT
-  `~/.cache/causal_conv1d_mojo/`) bake the *build env's* modular-lib
-  path into each `.so`'s `RUNPATH`. If you switch uv envs the runtime
-  loader can't find `libKGENCompilerRTShared.so`. Clear both caches
-  when changing envs (see the "Running the benches" section above).
+- The `mojo build` cache (`~/.cache/causal_conv1d_mojo/`) bakes the
+  *build env's* modular-lib path into each `.so`'s `RUNPATH`. If you
+  switch uv envs the runtime loader can't find
+  `libKGENCompilerRTShared.so`. Since the env signature now folds
+  the modular SDK install path into the cache hash, switching envs
+  auto-invalidates the affected entries — but the *files* aren't
+  cleaned up. To recover disk space periodically, just nuke the
+  whole cache (see the "Running the benches" section above).
 - `dump_asm` paths must be `StaticString(...)`-wrapped; bare string
   literals can fail the `Variant[Bool, Path, StaticString, ...]` coerce.
 - `TileTensor` has two non-obvious costs at very small kernel

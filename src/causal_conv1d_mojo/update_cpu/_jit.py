@@ -50,5 +50,6 @@ def _get_variant_fn(config: tuple):
         include_dirs=(_UPDATE_CPU_DIR, _PKG_DIR),
         defines=_defines(config),
         mod_name=_mod_name(config),
+        backend="cpu",
     )
     return module.causal_conv1d_update_cpu_variant
