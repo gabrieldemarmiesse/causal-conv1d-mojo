@@ -139,37 +139,50 @@ def fwd_kernel[
 
     for tile_idx in range(n_tiles):
         var tile_start: Int = tile_idx * kBlockN
-        var kv_load_row: Int = tid // 2
-        var kv_load_half: Int = tid % 2
-        var kv_global_row: Int = tile_start + kv_load_row
+        # 32 threads × 2 passes × half-row = 32 rows × full head_dim.
+        # Thread t handles row (pass*16 + t/2), half (t%2). 4 vec stores
+        # per pass.
+        comptime for pass_off in range(0, kBlockN, 16):
+            var kv_load_row: Int = pass_off + tid // 2
+            var kv_load_half: Int = tid % 2
+            var kv_global_row: Int = tile_start + kv_load_row
 
-        # Cooperative K, V loads. Same row-per-half-lane distribution.
-        if kv_global_row < seqlen:
-            comptime for vec_off in range(0, head_dim // 2, kNElts):
-                var col: Int = kv_load_half * (head_dim // 2) + vec_off
-                var kvec = k.load[width=kNElts, alignment=16](
-                    Coord(Idx(batch), Idx(kv_global_row), Idx(head), Idx(col))
-                )
-                (smem_K + kv_load_row * head_dim + col).store[alignment=16](
-                    kvec
-                )
-                var vvec = v.load[width=kNElts, alignment=16](
-                    Coord(Idx(batch), Idx(kv_global_row), Idx(head), Idx(col))
-                )
-                (smem_V + kv_load_row * head_dim + col).store[alignment=16](
-                    vvec
-                )
-        else:
-            var zero = SIMD[dtype, kNElts](0)
+            if kv_global_row < seqlen:
+                comptime for vec_off in range(0, head_dim // 2, kNElts):
+                    var col: Int = kv_load_half * (head_dim // 2) + vec_off
+                    var kvec = k.load[width=kNElts, alignment=16](
+                        Coord(
+                            Idx(batch),
+                            Idx(kv_global_row),
+                            Idx(head),
+                            Idx(col),
+                        )
+                    )
+                    (smem_K + kv_load_row * head_dim + col).store[
+                        alignment=16
+                    ](kvec)
+                    var vvec = v.load[width=kNElts, alignment=16](
+                        Coord(
+                            Idx(batch),
+                            Idx(kv_global_row),
+                            Idx(head),
+                            Idx(col),
+                        )
+                    )
+                    (smem_V + kv_load_row * head_dim + col).store[
+                        alignment=16
+                    ](vvec)
+            else:
+                var zero = SIMD[dtype, kNElts](0)
 
-            comptime for vec_off in range(0, head_dim // 2, kNElts):
-                var col: Int = kv_load_half * (head_dim // 2) + vec_off
-                (smem_K + kv_load_row * head_dim + col).store[alignment=16](
-                    zero
-                )
-                (smem_V + kv_load_row * head_dim + col).store[alignment=16](
-                    zero
-                )
+                comptime for vec_off in range(0, head_dim // 2, kNElts):
+                    var col: Int = kv_load_half * (head_dim // 2) + vec_off
+                    (smem_K + kv_load_row * head_dim + col).store[
+                        alignment=16
+                    ](zero)
+                    (smem_V + kv_load_row * head_dim + col).store[
+                        alignment=16
+                    ](zero)
 
         barrier()
 
