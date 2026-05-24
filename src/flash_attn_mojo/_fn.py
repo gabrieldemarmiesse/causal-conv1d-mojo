@@ -46,9 +46,19 @@ def _fwd_dispatch(
     """
     from flash_attn_mojo.fwd import native_fwd
 
-    if q.dtype != torch.float16:
+    # The mha_single_batch port goes through `linalg.matmul.gpu.multistage_mma`,
+    # which derives its MMA shape via `get_mma_shape[input, accum]`. For input=bf16
+    # the chosen shape is m16n8k16 (one PTX `mma.sync` instruction with the largest
+    # K we get on Ampere/Ada); for input=fp16 the published Mojo stdlib at the
+    # version we pin (mojo-compiler 1.0.0b1) only ships m16n8k8, so the multi-stage
+    # gemm fails to instantiate. We could route fp16 through a hand-rolled m16n8k8
+    # gemm but that defeats the point of using `multistage_mma`. So this entry
+    # point is bf16-only for now; an fp16 path lands once Mojo gains m16n8k16 fp16
+    # in the public stdlib (it's already in MAX's `tensor_core.get_mma_shape`).
+    if q.dtype != torch.bfloat16:
         raise NotImplementedError(
-            f"flash_attn_mojo current kernel supports fp16 only (got {q.dtype})."
+            "flash_attn_mojo current kernel supports bf16 only "
+            f"(got {q.dtype}). See `_fn.py` for the why."
         )
     if q.shape[-1] != 64:
         raise NotImplementedError(
