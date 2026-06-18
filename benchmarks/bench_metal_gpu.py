@@ -65,14 +65,27 @@ def _make_bwd_call(shape, *, dtype, activation, device, g):
     bias = torch.randn(d, generator=g).to(device=device, dtype=dtype)
     dout = torch.randn(b, d, l, generator=g).to(device=device, dtype=dtype)
 
+    # Build the autograd graph ONCE and re-run only `.backward()` each call
+    # (retain_graph keeps it alive). Otherwise every call would also run the
+    # forward kernel, and — since Mojo doesn't label its Metal encoders —
+    # the fwd and bwd Compute encoders would collapse into the same trace
+    # group, blending two different kernels' times. Isolating backward keeps
+    # `Compute Command` attributable to the bwd kernel (plus a couple of tiny
+    # torch zero/cast ops, negligible vs the kernel).
+    x_ = x.detach().requires_grad_()
+    w_ = weight.detach().requires_grad_()
+    b_ = bias.detach().requires_grad_()
+    out = causal_conv1d_mojo.causal_conv1d_fn(
+        x_, w_, bias=b_, activation=activation
+    )
+    inputs = [x_, w_, b_]
+
+    # `torch.autograd.grad` (not `.backward()`) so no AccumulateGrad nodes
+    # fire — those would add `dx`->`x.grad` etc. as extra ~4MB elementwise
+    # kernels per call, polluting the trace. This leaves just the bwd kernel
+    # plus a couple of tiny fp32 zero/cast ops.
     def call():
-        x_ = x.detach().requires_grad_()
-        w_ = weight.detach().requires_grad_()
-        b_ = bias.detach().requires_grad_()
-        out = causal_conv1d_mojo.causal_conv1d_fn(
-            x_, w_, bias=b_, activation=activation
-        )
-        out.backward(dout)
+        torch.autograd.grad(out, inputs, dout, retain_graph=True)
 
     return call
 
