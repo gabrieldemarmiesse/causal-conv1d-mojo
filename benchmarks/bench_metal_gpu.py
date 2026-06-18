@@ -75,9 +75,7 @@ def _make_bwd_call(shape, *, dtype, activation, device, g):
     x_ = x.detach().requires_grad_()
     w_ = weight.detach().requires_grad_()
     b_ = bias.detach().requires_grad_()
-    out = causal_conv1d_mojo.causal_conv1d_fn(
-        x_, w_, bias=b_, activation=activation
-    )
+    out = causal_conv1d_mojo.causal_conv1d_fn(x_, w_, bias=b_, activation=activation)
     inputs = [x_, w_, b_]
 
     # `torch.autograd.grad` (not `.backward()`) so no AccumulateGrad nodes
@@ -114,7 +112,9 @@ def _run(label: str, call: Callable[[], None], iters: int, warmup: int) -> None:
         call()
         torch.mps.synchronize()
     dt = (time.perf_counter_ns() - t0) / iters / 1e3  # us/call (wall-clock)
-    print(f"  {label:>22}: {iters} iters, {dt:8.1f} us/call (wall-clock, not the measurement)")
+    print(
+        f"  {label:>22}: {iters} iters, {dt:8.1f} us/call (wall-clock, not the measurement)"
+    )
 
 
 def _parse_shape(s: str) -> tuple[int, ...]:
@@ -124,8 +124,12 @@ def _parse_shape(s: str) -> tuple[int, ...]:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--kind", choices=("fwd", "bwd", "update"), default="fwd")
-    p.add_argument("--shape", type=str, default=None,
-                   help="Single shape, comma/x-separated. fwd/bwd: B,D,L,W; update: B,D")
+    p.add_argument(
+        "--shape",
+        type=str,
+        default=None,
+        help="Single shape, comma/x-separated. fwd/bwd: B,D,L,W; update: B,D",
+    )
     p.add_argument("--iters", type=int, default=50)
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--dtype", choices=("fp16", "bf16", "fp32"), default="fp16")
@@ -136,24 +140,30 @@ def main() -> None:
     if not torch.backends.mps.is_available():
         raise SystemExit("MPS (Apple GPU) device required")
     device = torch.device("mps")
-    dtype = {"fp16": torch.float16, "bf16": torch.bfloat16,
-             "fp32": torch.float32}[args.dtype]
+    dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[
+        args.dtype
+    ]
     g = torch.Generator(device="cpu").manual_seed(0)
 
     if args.shape is not None:
         shapes = [_parse_shape(args.shape)]
     else:
-        shapes = {"fwd": FWD_SHAPES, "bwd": FWD_SHAPES,
-                  "update": UPDATE_SHAPES}[args.kind]
+        shapes = {"fwd": FWD_SHAPES, "bwd": FWD_SHAPES, "update": UPDATE_SHAPES}[
+            args.kind
+        ]
 
-    builder = {"fwd": _make_fwd_call, "bwd": _make_bwd_call,
-               "update": _make_update_call}[args.kind]
+    builder = {
+        "fwd": _make_fwd_call,
+        "bwd": _make_bwd_call,
+        "update": _make_update_call,
+    }[args.kind]
 
-    print(f"{args.kind.upper()} on MPS | dtype={args.dtype} "
-          f"| activation={args.activation} | iters={args.iters}")
+    print(
+        f"{args.kind.upper()} on MPS | dtype={args.dtype} "
+        f"| activation={args.activation} | iters={args.iters}"
+    )
     for shape in shapes:
-        call = builder(shape, dtype=dtype, activation=activation,
-                       device=device, g=g)
+        call = builder(shape, dtype=dtype, activation=activation, device=device, g=g)
         _run(str(shape), call, args.iters, args.warmup)
 
 

@@ -42,10 +42,12 @@ def export_table(trace: str, schema: str = "metal-gpu-intervals") -> bytes:
     """Run `xctrace export` for the given trace table; return XML."""
     out = subprocess.run(
         [
-            "xctrace", "export", "--input", trace,
+            "xctrace",
+            "export",
+            "--input",
+            trace,
             "--xpath",
-            '/trace-toc/run[@number="1"]/data/'
-            f'table[@schema="{schema}"]',
+            f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]',
         ],
         capture_output=True,
     )
@@ -166,28 +168,47 @@ def parse_intervals(xml: bytes, process: str):
                 start_ns = int(el.text)
                 break
 
-        yield (channel, _normalize_label(label), start, start_ns,
-               int(durations[0].text))
+        yield (
+            channel,
+            _normalize_label(label),
+            start,
+            start_ns,
+            int(durations[0].text),
+        )
 
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Summarize per-encoder GPU intervals from an xctrace trace.")
+        description="Summarize per-encoder GPU intervals from an xctrace trace."
+    )
     p.add_argument("trace", help="path to the .trace bundle")
-    p.add_argument("needle", nargs="?", default="",
-                   help="case-insensitive substring filter on channel/label "
-                        "(e.g. 'Compute' to isolate the conv kernel)")
-    p.add_argument("--process", default="python",
-                   help="only rows from processes whose name contains this "
-                        "(default 'python'; '' for every process)")
-    p.add_argument("--raw", action="store_true",
-                   help="also print every matching interval, not just the summary")
-    p.add_argument("--clock", action="store_true",
-                   help="tag each interval with the GPU clock state it ran at "
-                        "(from gpu-performance-state-intervals) and split the "
-                        "summary by state. Apple's DVFS downclocks between the "
-                        "per-call syncs, so 'Maximum' rows are the trustworthy "
-                        "steady-state time and the rest is DVFS noise.")
+    p.add_argument(
+        "needle",
+        nargs="?",
+        default="",
+        help="case-insensitive substring filter on channel/label "
+        "(e.g. 'Compute' to isolate the conv kernel)",
+    )
+    p.add_argument(
+        "--process",
+        default="python",
+        help="only rows from processes whose name contains this "
+        "(default 'python'; '' for every process)",
+    )
+    p.add_argument(
+        "--raw",
+        action="store_true",
+        help="also print every matching interval, not just the summary",
+    )
+    p.add_argument(
+        "--clock",
+        action="store_true",
+        help="tag each interval with the GPU clock state it ran at "
+        "(from gpu-performance-state-intervals) and split the "
+        "summary by state. Apple's DVFS downclocks between the "
+        "per-call syncs, so 'Maximum' rows are the trustworthy "
+        "steady-state time and the rest is DVFS noise.",
+    )
     args = p.parse_args()
 
     needle = args.needle.lower()
@@ -209,8 +230,10 @@ def main() -> None:
             print(f"{start:>14}  {ns / 1e3:>10.2f}us  {channel:>8}{tag}  {label}")
 
     if not groups:
-        sys.exit(f"no GPU intervals matched (process={args.process!r}, "
-                 f"needle={args.needle!r})")
+        sys.exit(
+            f"no GPU intervals matched (process={args.process!r}, "
+            f"needle={args.needle!r})"
+        )
 
     if args.clock and not windows:
         print("(no gpu-performance-state-intervals in trace; clock unknown)\n")
@@ -218,8 +241,10 @@ def main() -> None:
     if args.raw:
         print()
     clock_col = f"  {'clock':>8}" if args.clock else ""
-    head = (f"{'channel':>8}{clock_col}  {'count':>5}  {'median':>10}  "
-            f"{'min':>10}  {'max':>10}  encoder")
+    head = (
+        f"{'channel':>8}{clock_col}  {'count':>5}  {'median':>10}  "
+        f"{'min':>10}  {'max':>10}  encoder"
+    )
     print(head)
     print("-" * len(head))
     for key, durs in sorted(groups.items(), key=lambda kv: -sum(kv[1])):
@@ -227,13 +252,17 @@ def main() -> None:
         clock_cell = f"  {key[2]:>8}" if args.clock else ""
         # Median, not mean: with DVFS the distribution is bimodal, and the
         # median of a single-clock group is a robust steady-state estimate.
-        print(f"{channel:>8}{clock_cell}  {len(durs):>5}  "
-              f"{statistics.median(durs) / 1e3:>8.2f}us  "
-              f"{min(durs) / 1e3:>8.2f}us  {max(durs) / 1e3:>8.2f}us  {label}")
+        print(
+            f"{channel:>8}{clock_cell}  {len(durs):>5}  "
+            f"{statistics.median(durs) / 1e3:>8.2f}us  "
+            f"{min(durs) / 1e3:>8.2f}us  {max(durs) / 1e3:>8.2f}us  {label}"
+        )
 
     grand = sum(sum(d) for d in groups.values())
-    print(f"\ntotal GPU time {grand / 1e6:.3f} ms across {n} encoder intervals "
-          f"(process filter: {args.process!r})")
+    print(
+        f"\ntotal GPU time {grand / 1e6:.3f} ms across {n} encoder intervals "
+        f"(process filter: {args.process!r})"
+    )
     if args.clock and windows:
         print("Trust the 'Maximum'-clock rows; other states are DVFS-throttled.")
 
