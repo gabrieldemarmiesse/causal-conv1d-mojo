@@ -212,6 +212,43 @@ uv run --extra nvidia nsys profile --stats=true \
 The summary table prints per-kernel total/avg time and call counts —
 sanity-check against torch.profiler.
 
+### 4. Apple silicon: xctrace "Metal System Trace"
+
+There is no torch device-time hook for Metal, so the CUPTI/rocprof path
+in `bench_gpu_kernel_time.py` doesn't work on Apple. The equivalent is
+an Instruments "Metal System Trace" recorded around the kernel, read
+back via the scriptable `metal-gpu-intervals` table.
+
+```bash
+# pre-warms the JIT cache, records a trace, prints per-encoder GPU time
+scripts/xctrace_bench.sh --kind fwd --shape 1,1024,2048,4 --iters 40
+scripts/xctrace_bench.sh --kind update --dtype bf16
+```
+
+`scripts/xctrace_bench.sh` drives `benchmarks/bench_metal_gpu.py` (a
+mojo-only MPS workload runner — upstream causal-conv1d is CUDA-only, so
+there's nothing to diff against here; the goal is precise *absolute* GPU
+time) under `xctrace record --template 'Metal System Trace'`, then parses
+the trace with `scripts/xctrace_gpu_intervals.py`. Our forward kernel
+shows up as `Compute / Compute Command`; host<->device copies are
+`Blit Command`. Notes:
+
+- **Mojo doesn't label its Metal encoders** (`metal-object-label` is
+  empty), so all compute dispatches group under one `Compute Command`
+  row — fine for single-kind/single-shape runs (the row's count matches
+  `iters`+warmup; its mean is the per-call GPU time). Run one shape at a
+  time to keep the attribution clean.
+- The export XML uses a global `id`/`ref` value dictionary; the parser
+  resolves it. A row's *first* `<duration>` is the GPU time; the second
+  is "CPU to GPU Latency".
+- `xctrace record --launch` **intermittently crashes** (Bus/Segfault)
+  while finalizing the bundle, leaving an unexportable `.trace`. The
+  wrapper retries until `xctrace export` succeeds — expect a few retries
+  per run; it's an Instruments bug, not ours.
+- HW counters (ALU busy, bandwidth, occupancy) are **GUI-only** on Apple
+  silicon — headless `xctrace export` doesn't expose them. Open the
+  printed `.trace` bundle in Instruments for those.
+
 ## Inspecting generated code (PTX, SASS)
 
 The Mojo `DeviceContext.compile_function` accepts:
