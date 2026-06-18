@@ -34,3 +34,6 @@ benchmarks/baselines/
 # mojo kgen trace dumps
 kgen.trace.json.time*
 .rocprofv3/
+
+# Vendored third-party Claude Code skills (kept local, not tracked).
+.claude/skills/
