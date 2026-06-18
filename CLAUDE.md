@@ -236,8 +236,10 @@ shows up as `Compute / Compute Command`; host<->device copies are
 - **Mojo doesn't label its Metal encoders** (`metal-object-label` is
   empty), so all compute dispatches group under one `Compute Command`
   row — fine for single-kind/single-shape runs (the row's count matches
-  `iters`+warmup; its mean is the per-call GPU time). Run one shape at a
-  time to keep the attribution clean.
+  `iters`+warmup; its median is the per-call GPU time). Run one shape at a
+  time to keep the attribution clean. (Backward runs fwd+bwd; the bench
+  isolates the bwd kernel via `torch.autograd.grad`, see
+  `bench_metal_gpu.py`.)
 - The export XML uses a global `id`/`ref` value dictionary; the parser
   resolves it. A row's *first* `<duration>` is the GPU time; the second
   is "CPU to GPU Latency".
@@ -245,9 +247,36 @@ shows up as `Compute / Compute Command`; host<->device copies are
   while finalizing the bundle, leaving an unexportable `.trace`. The
   wrapper retries until `xctrace export` succeeds — expect a few retries
   per run; it's an Instruments bug, not ours.
-- HW counters (ALU busy, bandwidth, occupancy) are **GUI-only** on Apple
-  silicon — headless `xctrace export` doesn't expose them. Open the
-  printed `.trace` bundle in Instruments for those.
+- **Watch out for DVFS.** The Mojo Metal launch syncs after *every* call,
+  so Apple's GPU governor drops the clock to its minimum between
+  dispatches; short kernels are frequently measured at a reduced clock,
+  which is the main source of run-to-run variance (a kernel can read
+  ~1.1 ms at Maximum clock and ~2.2 ms at Minimum in the same run). The
+  parser's `--clock` flag (passed by the wrapper) reads
+  `gpu-performance-state-intervals` and splits the summary by GPU clock
+  state — **trust the `Maximum`-clock row** as the steady-state time; the
+  rest is throttled noise. The summary reports the *median* per group
+  (robust to the bimodal DVFS distribution).
+
+### What you can and can't get headlessly
+
+Confirmed by inspecting the exported tables and testing the "Game
+Performance" / "Metal GPU Counters" templates:
+
+- **Available headless** (in the Metal System Trace export): per-encoder
+  GPU time (`metal-gpu-intervals`), GPU **clock/performance state** over
+  time (`gpu-performance-state-intervals`, used by `--clock`), command-
+  buffer timings, residency-set events. `powermetrics --samplers
+  gpu_power` (needs sudo) additionally gives aggregate GPU active
+  residency + frequency.
+- **GUI-only**: the rich per-shader counters — **occupancy %, ALU active
+  %, memory throughput, stall reasons, registers/thread**. Headless
+  templates only ever populate the `RT Unit Active` counter; the useful
+  counter sets require the Instruments GUI on Apple silicon. The static
+  occupancy proxy `MTLComputePipelineState.maxTotalThreadsPerThreadgroup`
+  is queryable via the Metal API, but Mojo's `DeviceContext` doesn't
+  currently expose it. So: per-kernel *time* and *clock* are scriptable;
+  *why* a kernel is slow (occupancy/stalls) needs the GUI.
 
 ## Inspecting generated code (PTX, SASS)
 

@@ -93,7 +93,10 @@ fi
 
 echo
 echo "=== per-encoder GPU intervals (Compute Command = the conv kernel) ==="
-uv run python scripts/xctrace_gpu_intervals.py "$OUTPUT" $NEEDLE || true
+# --clock: split by GPU clock state. Apple DVFS drops the clock between the
+# per-call syncs, so the 'Maximum'-clock row is the trustworthy steady-state
+# kernel time; lower-clock rows are throttled noise.
+uv run python scripts/xctrace_gpu_intervals.py "$OUTPUT" $NEEDLE --clock || true
 
 echo
 echo "trace kept at: $OUTPUT (open in Instruments for HW counters)"

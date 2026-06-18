@@ -38,20 +38,73 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 
 
-def export_table(trace: str) -> bytes:
-    """Run `xctrace export` for the metal-gpu-intervals table; return XML."""
+def export_table(trace: str, schema: str = "metal-gpu-intervals") -> bytes:
+    """Run `xctrace export` for the given trace table; return XML."""
     out = subprocess.run(
         [
             "xctrace", "export", "--input", trace,
             "--xpath",
             '/trace-toc/run[@number="1"]/data/'
-            'table[@schema="metal-gpu-intervals"]',
+            f'table[@schema="{schema}"]',
         ],
         capture_output=True,
     )
     if out.returncode != 0:
         sys.exit(f"xctrace export failed:\n{out.stderr.decode(errors='replace')}")
     return out.stdout
+
+
+def _resolver(root):
+    """id/ref value-dictionary resolver for an exported table (see
+    parse_intervals). Returns a fn mapping a ref-element to its definition."""
+    registry = {el.get("id"): el for el in root.iter() if el.get("id")}
+
+    def resolve(el):
+        ref = el.get("ref")
+        return registry.get(ref, el) if ref else el
+
+    return resolve
+
+
+def load_clock_timeline(trace: str):
+    """Return a sorted list of (start_ns, end_ns, state) GPU clock windows.
+
+    Parsed from `gpu-performance-state-intervals`, which the Metal System
+    Trace populates headlessly. `state` is e.g. "Maximum"/"Minimum". Empty
+    if the table is absent. Lets us tag each GPU interval with the clock it
+    ran at — Apple's DVFS drops the GPU to its minimum state between the
+    synchronized per-call dispatches, so short kernels are often measured
+    downclocked; filtering to "Maximum" recovers a stable steady-state time
+    without needing the Instruments GUI.
+    """
+    try:
+        root = ET.fromstring(export_table(trace, "gpu-performance-state-intervals"))
+    except SystemExit:
+        return []
+    resolve = _resolver(root)
+    windows = []
+    for row in root.iter("row"):
+        start = dur = None
+        state = None
+        for k in row:
+            if k.tag == "start-time":
+                start = int(resolve(k).text)
+            elif k.tag == "duration":
+                dur = int(resolve(k).text)
+            elif k.tag == "gpu-performance-state":
+                state = resolve(k).get("fmt", "")
+        if start is not None and state:
+            windows.append((start, start + (dur or 0), state))
+    windows.sort()
+    return windows
+
+
+def clock_at(windows, t: int) -> str:
+    """GPU clock state active at timestamp `t` (ns); '' if unknown."""
+    for s, e, st in windows:
+        if s <= t < e:
+            return st
+    return ""
 
 
 def _normalize_label(lbl: str) -> str:
@@ -65,7 +118,7 @@ def _normalize_label(lbl: str) -> str:
 
 
 def parse_intervals(xml: bytes, process: str):
-    """Yield (channel, label, start_fmt, duration_ns) per matching encoder.
+    """Yield (channel, label, start_fmt, start_ns, duration_ns) per encoder.
 
     The export uses a global id/ref value dictionary (the first use of a
     value carries `id=` + the data; later uses are `<tag ref=.../>`), so
@@ -74,11 +127,7 @@ def parse_intervals(xml: bytes, process: str):
     "CPU to GPU Latency" column, also typed `duration`.
     """
     root = ET.fromstring(xml)
-    registry = {el.get("id"): el for el in root.iter() if el.get("id")}
-
-    def resolve(el):
-        ref = el.get("ref")
-        return registry.get(ref, el) if ref else el
+    resolve = _resolver(root)
 
     for row in root.iter("row"):
         kids = list(row)
@@ -109,12 +158,16 @@ def parse_intervals(xml: bytes, process: str):
                 label = resolve(s).get("fmt", "") or "?"
 
         start = ""
+        start_ns = 0
         for k in kids:
             if k.tag == "start-time":
-                start = resolve(k).get("fmt", "")
+                el = resolve(k)
+                start = el.get("fmt", "")
+                start_ns = int(el.text)
                 break
 
-        yield channel, _normalize_label(label), start, int(durations[0].text)
+        yield (channel, _normalize_label(label), start, start_ns,
+               int(durations[0].text))
 
 
 def main() -> None:
@@ -129,38 +182,60 @@ def main() -> None:
                         "(default 'python'; '' for every process)")
     p.add_argument("--raw", action="store_true",
                    help="also print every matching interval, not just the summary")
+    p.add_argument("--clock", action="store_true",
+                   help="tag each interval with the GPU clock state it ran at "
+                        "(from gpu-performance-state-intervals) and split the "
+                        "summary by state. Apple's DVFS downclocks between the "
+                        "per-call syncs, so 'Maximum' rows are the trustworthy "
+                        "steady-state time and the rest is DVFS noise.")
     args = p.parse_args()
 
     needle = args.needle.lower()
-    groups: dict[tuple[str, str], list[int]] = defaultdict(list)
+    windows = load_clock_timeline(args.trace) if args.clock else []
+    # Key is (channel, label) or (channel, label, clock_state) with --clock.
+    groups: dict[tuple, list[int]] = defaultdict(list)
     n = 0
-    for channel, label, start, ns in parse_intervals(
+    for channel, label, start, start_ns, ns in parse_intervals(
         export_table(args.trace), args.process
     ):
         if needle and needle not in channel.lower() and needle not in label.lower():
             continue
         n += 1
-        groups[(channel, label)].append(ns)
+        clock = clock_at(windows, start_ns) or "?" if args.clock else None
+        key = (channel, label, clock) if args.clock else (channel, label)
+        groups[key].append(ns)
         if args.raw:
-            print(f"{start:>14}  {ns / 1e3:>10.2f}us  {channel:>8}  {label}")
+            tag = f"  {clock:>8}" if args.clock else ""
+            print(f"{start:>14}  {ns / 1e3:>10.2f}us  {channel:>8}{tag}  {label}")
 
     if not groups:
         sys.exit(f"no GPU intervals matched (process={args.process!r}, "
                  f"needle={args.needle!r})")
 
+    if args.clock and not windows:
+        print("(no gpu-performance-state-intervals in trace; clock unknown)\n")
+
     if args.raw:
         print()
-    head = (f"{'channel':>8}  {'count':>5}  {'mean':>10}  {'min':>10}  "
-            f"{'max':>10}  encoder")
+    clock_col = f"  {'clock':>8}" if args.clock else ""
+    head = (f"{'channel':>8}{clock_col}  {'count':>5}  {'median':>10}  "
+            f"{'min':>10}  {'max':>10}  encoder")
     print(head)
     print("-" * len(head))
-    for (channel, label), durs in sorted(groups.items(), key=lambda kv: -sum(kv[1])):
-        print(f"{channel:>8}  {len(durs):>5}  {statistics.mean(durs) / 1e3:>8.2f}us  "
+    for key, durs in sorted(groups.items(), key=lambda kv: -sum(kv[1])):
+        channel, label = key[0], key[1]
+        clock_cell = f"  {key[2]:>8}" if args.clock else ""
+        # Median, not mean: with DVFS the distribution is bimodal, and the
+        # median of a single-clock group is a robust steady-state estimate.
+        print(f"{channel:>8}{clock_cell}  {len(durs):>5}  "
+              f"{statistics.median(durs) / 1e3:>8.2f}us  "
               f"{min(durs) / 1e3:>8.2f}us  {max(durs) / 1e3:>8.2f}us  {label}")
 
     grand = sum(sum(d) for d in groups.values())
     print(f"\ntotal GPU time {grand / 1e6:.3f} ms across {n} encoder intervals "
           f"(process filter: {args.process!r})")
+    if args.clock and windows:
+        print("Trust the 'Maximum'-clock rows; other states are DVFS-throttled.")
 
 
 if __name__ == "__main__":
