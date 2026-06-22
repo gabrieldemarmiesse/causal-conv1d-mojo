@@ -65,11 +65,13 @@ upstream Tri Dao CUDA", with upstream as the moving target.
     min + spread over `--runs` N≥3; `--json` for tooling. Memoizes the
     stable upstream/pytorch baselines in `benchmarks/baselines/`
     (gitignored; keyed on baseline version + shape + config + GPU +
-    clock-lock state).
+    clock-lock state). `--device auto` picks cuda → mps → cpu; on Apple
+    (`--device mps`) `--measure kernel` self-orchestrates an Instruments
+    "Metal System Trace" (see "Apple silicon" below).
   - `plot_bench.py`: wall-clock end-to-end plots into `docs/bench_*.png`
     (uses `_baseline.py`'s JSON cache).
-  - `bench_metal_gpu.py`, `bench_small_fwd.py`: Apple-GPU drivers (see
-    `scripts/xctrace_bench.sh`).
+  - `bench_small_fwd.py`: small-shape MPS launch-overhead probe (kernel
+    internals decomposition; not part of the unified driver).
 - `scripts/`
   - `master_bench_nvidia.py`: **the autonomous NVIDIA perf gate** — a
     stdlib-only orchestrator (see "The master bench" below).
@@ -267,51 +269,63 @@ uv run --extra nvidia nsys profile --stats=true \
 The summary table prints per-kernel total/avg time and call counts —
 sanity-check against torch.profiler.
 
-### 4. Apple silicon: xctrace "Metal System Trace"
+### 4. Apple silicon: `bench.py --device mps --measure kernel`
 
 There is no torch device-time hook for Metal, so the CUPTI/rocprof path
-in `bench.py --measure kernel` doesn't work on Apple. The equivalent is
-an Instruments "Metal System Trace" recorded around the kernel, read
-back via the scriptable `metal-gpu-intervals` table.
+in `bench.py --measure kernel` can't read per-kernel time in-process on
+Apple. Instead `bench.py` **orchestrates Instruments itself**: it
+pre-warms the JIT cache, records an "Metal System Trace" with `xctrace`
+around a re-launch of *itself* as the traced `--measure raw` workload,
+then parses the scriptable `metal-gpu-intervals` table back out and
+prints per-encoder GPU time split by GPU clock state — all in one
+command, findings straight to stdout. (This folds in what used to be the
+separate `bench_metal_gpu.py` + `scripts/xctrace_bench.sh` +
+`scripts/xctrace_gpu_intervals.py` trio.)
 
 ```bash
-# pre-warms the JIT cache, records a trace, prints per-encoder GPU time
-scripts/xctrace_bench.sh --kind fwd --shape 1,1024,2048,4 --iters 40
-scripts/xctrace_bench.sh --kind update --dtype bf16
+# pre-warms, records a trace, prints per-encoder GPU time + clock split
+uv run python benchmarks/bench.py fwd --device mps --shape 1,1024,2048,4
+uv run python benchmarks/bench.py update --device mps --dtype bf16
+# on a mac with no cuda, --device defaults to auto -> mps, so just:
+uv run python benchmarks/bench.py fwd --shape 1,1024,2048,4
 ```
 
-`scripts/xctrace_bench.sh` drives `benchmarks/bench_metal_gpu.py` (a
-mojo-only MPS workload runner — upstream causal-conv1d is CUDA-only, so
-there's nothing to diff against here; the goal is precise *absolute* GPU
-time) under `xctrace record --template 'Metal System Trace'`, then parses
-the trace with `scripts/xctrace_gpu_intervals.py`. Our forward kernel
-shows up as `Compute / Compute Command`; host<->device copies are
-`Blit Command`. Notes:
+The mojo-only nature is intentional: upstream causal-conv1d is CUDA-only,
+so there's nothing to diff against on Apple — the goal is precise
+*absolute* GPU time. Our forward kernel shows up as
+`Compute / Compute Command`; host<->device copies are `Blit Command`.
+Implementation notes (all in `bench.py`):
 
+- The traced child is a re-launch of `bench.py` with `--device mps
+  --measure raw` and `CAUSAL_CONV1D_BENCH_TRACED=1` set, so it runs the
+  bare loop (bracketed by `torch.mps.profiler.profile`) instead of
+  recursively orchestrating another trace. `--measure walltime`/`raw`
+  run in-process on mps just like cuda (via `torch.mps.synchronize`).
 - **Mojo doesn't label its Metal encoders** (`metal-object-label` is
   empty), so all compute dispatches group under one `Compute Command`
   row — fine for single-kind/single-shape runs (the row's count matches
-  `iters`+warmup; its median is the per-call GPU time). Run one shape at a
-  time to keep the attribution clean. (Backward runs fwd+bwd; the bench
-  isolates the bwd kernel via `torch.autograd.grad`, see
-  `bench_metal_gpu.py`.)
+  `iters`; its median is the per-call GPU time). Run one shape at a time
+  to keep the attribution clean. For `bwd`, `_bwd_callable` builds the
+  autograd graph once and re-runs only `torch.autograd.grad`, so the
+  traced Compute encoder attributes to the bwd kernel rather than
+  blending in the fwd pass.
 - The export XML uses a global `id`/`ref` value dictionary; the parser
-  resolves it. A row's *first* `<duration>` is the GPU time; the second
-  is "CPU to GPU Latency".
+  (`_xml_resolver`) resolves it. A row's *first* `<duration>` is the GPU
+  time; the second is "CPU to GPU Latency".
 - `xctrace record --launch` **intermittently crashes** (Bus/Segfault)
-  while finalizing the bundle, leaving an unexportable `.trace`. The
-  wrapper retries until `xctrace export` succeeds — expect a few retries
-  per run; it's an Instruments bug, not ours.
+  while finalizing the bundle, leaving an unexportable `.trace`.
+  `_record_trace` retries until `xctrace export` succeeds — expect a few
+  retries per run; it's an Instruments bug, not ours.
 - **Watch out for DVFS.** The Mojo Metal launch syncs after *every* call,
   so Apple's GPU governor drops the clock to its minimum between
   dispatches; short kernels are frequently measured at a reduced clock,
   which is the main source of run-to-run variance (a kernel can read
-  ~1.1 ms at Maximum clock and ~2.2 ms at Minimum in the same run). The
-  parser's `--clock` flag (passed by the wrapper) reads
-  `gpu-performance-state-intervals` and splits the summary by GPU clock
-  state — **trust the `Maximum`-clock row** as the steady-state time; the
-  rest is throttled noise. The summary reports the *median* per group
-  (robust to the bimodal DVFS distribution).
+  ~1.1 ms at Maximum clock and ~2.2 ms at Minimum in the same run).
+  `bench.py` reads `gpu-performance-state-intervals` and splits the
+  per-encoder summary by GPU clock state — **trust the `Maximum`-clock
+  row** as the steady-state time (the reported headline kernel time picks
+  it); the rest is throttled noise. Each group's reported number is the
+  *median* (robust to the bimodal DVFS distribution).
 
 ### What you can and can't get headlessly
 
@@ -320,8 +334,8 @@ Performance" / "Metal GPU Counters" templates:
 
 - **Available headless** (in the Metal System Trace export): per-encoder
   GPU time (`metal-gpu-intervals`), GPU **clock/performance state** over
-  time (`gpu-performance-state-intervals`, used by `--clock`), command-
-  buffer timings, residency-set events. `powermetrics --samplers
+  time (`gpu-performance-state-intervals`, used for the clock split),
+  command-buffer timings, residency-set events. `powermetrics --samplers
   gpu_power` (needs sudo) additionally gives aggregate GPU active
   residency + frequency.
 - **GUI-only**: the rich per-shader counters — **occupancy %, ALU active

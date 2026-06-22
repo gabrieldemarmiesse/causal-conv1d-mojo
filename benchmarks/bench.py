@@ -15,7 +15,23 @@ shape, every function-argument flag, against every implementation
                              (``ncu`` / NSight Compute) can wrap the
                              whole process and attribute clean metrics.
 
-This file replaces the old pile of ``bench_*.py`` scripts: every shape
+Apple silicon (``--device mps``)
+--------------------------------
+Metal has no torch device-time hook (no CUPTI/rocprof), so
+``--measure kernel`` on ``mps`` can't read per-kernel time in-process.
+Instead the driver *orchestrates Instruments itself*: it pre-warms the
+JIT cache, records a "Metal System Trace" with ``xctrace`` around a
+re-launch of *this same script* as the traced workload (the timed loop
+is bracketed by ``torch.mps.profiler``), then parses the
+``metal-gpu-intervals`` table back out and prints per-encoder GPU time
+split by GPU clock state — the Instruments findings land in stdout
+automatically. ``--measure walltime`` / ``raw`` run in-process on mps
+just like cuda (using ``torch.mps.synchronize``). Upstream Tri Dao is
+CUDA-only, so mps comparisons are mojo-only.
+
+This file replaces the old pile of ``bench_*.py`` scripts (including the
+Apple-only ``bench_metal_gpu.py`` + ``scripts/xctrace_bench.sh`` +
+``scripts/xctrace_gpu_intervals.py``, now folded in here): every shape
 is one invocation, every comparison is a flag. The
 ``scripts/master_bench_nvidia.py`` orchestrator drives it across
 shapes/tiers and adds clock-locking, correctness gating, ncu, and
@@ -41,9 +57,18 @@ Examples
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
 import time
+import xml.etree.ElementTree as ET
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -67,6 +92,62 @@ from causal_conv1d_mojo.reference import (
 # ---------------------------------------------------------------------------
 
 _DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
+
+
+# ---------------------------------------------------------------------------
+# Device helpers. One place that knows how to pick a device, how to drain it,
+# and (on Apple) how to name the SoC for the env signature.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_device(spec: str) -> str:
+    """`auto` -> cuda if present, else mps (Apple), else cpu; else verbatim."""
+    if spec != "auto":
+        return spec
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _sync(device: str) -> Callable[[], None]:
+    """The right device-drain for `device` (no-op on cpu)."""
+    if device == "cuda":
+        return torch.cuda.synchronize
+    if device == "mps":
+        return torch.mps.synchronize
+    return lambda: None
+
+
+def _mac_chip() -> str:
+    """Best-effort Apple SoC brand for the env signature (e.g. 'Apple M2 Pro').
+
+    On Apple silicon the GPU is integrated, so the CPU brand identifies the
+    GPU too. Falls back to a generic tag if sysctl is unavailable.
+    """
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return f"mps:{out.stdout.strip()}"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "mps"
+
+
+# Set in the child process that `xctrace --launch`es as the traced workload,
+# so it runs the bare `--measure raw` loop instead of recursively orchestrating
+# another trace.
+_TRACED_ENV = "CAUSAL_CONV1D_BENCH_TRACED"
+
+
+def _is_traced_workload() -> bool:
+    return os.environ.get(_TRACED_ENV) == "1"
 
 
 def _upstream_module():
@@ -247,8 +328,14 @@ def _make_update_inputs(cfg: Config) -> dict[str, torch.Tensor | None]:
 
 
 def _supports(impl: str, cfg: Config) -> bool:
-    """The pure-PyTorch references don't cover packed sequences / paged
-    caches; skip those (impl, config) combinations rather than crash."""
+    """Which (impl, config) combos are runnable on this device.
+
+    - The upstream Tri Dao wheel is CUDA-only, so it can't run on mps/cpu.
+    - The pure-PyTorch references don't cover packed sequences / paged
+      caches; skip those combinations rather than crash.
+    """
+    if impl == "upstream" and cfg.device != "cuda":
+        return False
     if impl != "pytorch":
         return True
     if cfg.has_seq_idx or cfg.has_conv_state_indices:
@@ -292,6 +379,29 @@ def _bwd_callable(impl: str, cfg: Config) -> Callable[[], Any]:
 
     use_seq_idx = cfg.has_seq_idx and impl != "pytorch"
 
+    if cfg.device == "mps":
+        # Apple trace path: Mojo doesn't label its Metal encoders, so a
+        # fwd+bwd-per-call closure would collapse both kernels' Compute
+        # encoders into one trace group, blending two kernels' times. Build
+        # the autograd graph ONCE and re-run only backward each call (via
+        # torch.autograd.grad, not .backward(), so no AccumulateGrad nodes
+        # fire and add stray elementwise kernels). This leaves the traced
+        # Compute Command attributable to the bwd kernel.
+        x_ = t["x"].detach().requires_grad_()
+        w_ = t["weight"].detach().requires_grad_()
+        b_ = t["bias"].detach().requires_grad_() if t["bias"] is not None else None
+        kw = dict(bias=b_, initial_states=t["initial_states"], activation=cfg.activation)
+        if use_seq_idx:
+            kw["seq_idx"] = t["seq_idx"]
+        out = fwd(x_, w_, **kw)
+        if isinstance(out, tuple):
+            out = out[0]
+        inputs = [v for v in (x_, w_, b_) if v is not None]
+        return lambda: torch.autograd.grad(out, inputs, dout, retain_graph=True)
+
+    # cuda/cpu: rebuild the graph each call and run the full fwd+bwd. The
+    # profiler classifier isolates the bwd kernel by name, so blending the
+    # fwd kernel into the same call is harmless here.
     def call():
         x_ = t["x"].detach().requires_grad_()
         w_ = t["weight"].detach().requires_grad_()
@@ -337,6 +447,21 @@ def make_callable(impl: str, cfg: Config) -> Callable[[], Any]:
 # ---------------------------------------------------------------------------
 
 
+def _mps_profiler_ctx(device: str):
+    """Bracket the timed loop in `torch.mps.profiler` when we are the traced
+    Apple workload, so the Metal System Trace gets OS-signpost-scoped
+    intervals around the benchmark. No-op everywhere else.
+    """
+    if device == "mps" and _is_traced_workload():
+        try:
+            import torch.mps.profiler as mps_profiler  # noqa: PLC0415
+
+            return mps_profiler.profile(mode="interval", wait_until_completed=False)
+        except Exception:  # noqa: BLE001 — profiler is best-effort scoping
+            return contextlib.nullcontext()
+    return contextlib.nullcontext()
+
+
 def measure_kernel(
     call: Callable[[], Any],
     classify: Callable[[str], bool] | None,
@@ -351,7 +476,7 @@ def measure_kernel(
     """
     from torch.profiler import ProfilerActivity, profile  # noqa: PLC0415
 
-    sync = torch.cuda.synchronize if device == "cuda" else (lambda: None)
+    sync = _sync(device)
     for _ in range(warmup):
         call()
     sync()
@@ -372,7 +497,11 @@ def measure_kernel(
 
 
 def measure_walltime(
-    call: Callable[[], Any], *, min_run_time: float = 0.5, warmup: int = 10
+    call: Callable[[], Any],
+    *,
+    min_run_time: float = 0.5,
+    warmup: int = 10,
+    device: str = "cuda",
 ) -> float:
     """End-to-end per-call wall-clock (µs) via torch.utils.benchmark.
 
@@ -385,8 +514,7 @@ def measure_walltime(
 
     for _ in range(warmup):
         call()
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    _sync(device)()
     timer = tbench.Timer(stmt="_call()", globals={"_call": call})
     m = timer.blocked_autorange(min_run_time=min_run_time)
     return m.median * 1e6
@@ -398,17 +526,22 @@ def measure_raw(
     """Tight synchronized loop, *no* profiler — for ncu/NSight to wrap.
 
     Returns a coarse wall-clock per-call number (not the measurement of
-    record; the external profiler's per-kernel metrics are). The point
-    is to drive the kernel with zero profiling overhead in-process.
+    record; the external profiler's per-kernel metrics are). The point is
+    to drive the kernel with zero profiling overhead in-process.
+
+    This is also the mode the Apple `xctrace` orchestrator re-launches as
+    its traced workload (`--device mps --measure raw`); on mps the timed
+    loop is bracketed by `torch.mps.profiler` (see `_mps_profiler_ctx`).
     """
-    sync = torch.cuda.synchronize if device == "cuda" else (lambda: None)
+    sync = _sync(device)
     for _ in range(warmup):
         call()
     sync()
-    t0 = time.perf_counter_ns()
-    for _ in range(iters):
-        call()
-    sync()
+    with _mps_profiler_ctx(device):
+        t0 = time.perf_counter_ns()
+        for _ in range(iters):
+            call()
+        sync()
     return (time.perf_counter_ns() - t0) / iters / 1e3
 
 
@@ -499,25 +632,371 @@ def _jsonable(key: tuple) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Apple-silicon kernel time via xctrace "Metal System Trace".
+#
+# Metal has no torch device-time hook, so `--measure kernel` on mps can't
+# read per-kernel GPU time in-process the way CUPTI does on cuda. Instead we
+# orchestrate Instruments: record a Metal System Trace around a re-launch of
+# this script as the traced workload, then read the per-encoder GPU intervals
+# back out of the `metal-gpu-intervals` table. This folds in what used to be
+# `bench_metal_gpu.py` + `scripts/xctrace_bench.sh` +
+# `scripts/xctrace_gpu_intervals.py`.
+# ---------------------------------------------------------------------------
+
+_XCTRACE_SCHEMA = "metal-gpu-intervals"
+_CLOCK_SCHEMA = "gpu-performance-state-intervals"
+
+
+def _shape_str(shape: tuple[int, ...]) -> str:
+    return ",".join(str(x) for x in shape)
+
+
+def _workload_argv(cfg: Config, args, *, iters: int, warmup: int) -> list[str]:
+    """Argv that re-launches *this* script as the mojo-only mps workload.
+
+    `--measure raw` is a bare synchronized loop (bracketed by
+    `torch.mps.profiler` when the traced env var is set); it's the thing
+    xctrace records, and also what we run un-traced to pre-warm the JIT
+    cache so `mojo build` never lands inside the trace.
+    """
+    argv = [
+        sys.executable,
+        os.path.abspath(__file__),
+        cfg.fn,
+        "--device", "mps",
+        "--measure", "raw",
+        "--impl", "mojo",
+        "--dtype", cfg.dtype,
+        "--width", str(cfg.width),
+        "--activation", cfg.activation or "none",
+        "--iters", str(iters),
+        "--warmup", str(warmup),
+        "--runs", "1",
+        "--seed", str(cfg.seed),
+        "--shape", _shape_str(cfg.shape),
+    ]
+    if not cfg.has_bias:
+        argv.append("--no-bias")
+    if cfg.has_seq_idx:
+        argv.append("--seq-idx")
+    if cfg.has_initial_states:
+        argv.append("--initial-states")
+    if cfg.return_final_states:
+        argv.append("--return-final-states")
+    if cfg.channel_last:
+        argv.append("--channel-last")
+    if cfg.has_cache_seqlens:
+        argv.append("--cache-seqlens")
+    if cfg.has_conv_state_indices:
+        argv.append("--conv-state-indices")
+    if cfg.fn == "update" and cfg.state_len:
+        argv += ["--state-len", str(cfg.state_len)]
+    return argv
+
+
+def _xctrace_export(trace: str, schema: str) -> bytes:
+    """`xctrace export` for one trace table; returns XML (raises on failure)."""
+    out = subprocess.run(
+        [
+            "xctrace", "export", "--input", trace,
+            "--xpath", f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]',
+        ],
+        capture_output=True,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.decode(errors="replace"))
+    return out.stdout
+
+
+def _xml_resolver(root):
+    """id/ref value-dictionary resolver for an exported table.
+
+    The export uses a global id/ref dictionary: the first use of a value
+    carries `id=` + the data, later uses are `<tag ref=.../>`. Return a fn
+    mapping any element to its definition.
+    """
+    registry = {el.get("id"): el for el in root.iter() if el.get("id")}
+
+    def resolve(el):
+        ref = el.get("ref")
+        return registry.get(ref, el) if ref else el
+
+    return resolve
+
+
+def _load_clock_timeline(trace: str) -> list[tuple[int, int, str]]:
+    """Sorted (start_ns, end_ns, state) GPU clock windows from the trace.
+
+    Apple's DVFS drops the GPU clock between the synchronized per-call
+    dispatches, so short kernels are often measured downclocked; tagging
+    each interval with its clock lets us trust the 'Maximum'-clock rows as
+    steady state. Empty if the table is absent.
+    """
+    try:
+        root = ET.fromstring(_xctrace_export(trace, _CLOCK_SCHEMA))
+    except RuntimeError:
+        return []
+    resolve = _xml_resolver(root)
+    windows: list[tuple[int, int, str]] = []
+    for row in root.iter("row"):
+        start = dur = state = None
+        for k in row:
+            if k.tag == "start-time":
+                start = int(resolve(k).text)
+            elif k.tag == "duration":
+                dur = int(resolve(k).text)
+            elif k.tag == "gpu-performance-state":
+                state = resolve(k).get("fmt", "")
+        if start is not None and state:
+            windows.append((start, start + (dur or 0), state))
+    windows.sort()
+    return windows
+
+
+def _clock_at(windows: list[tuple[int, int, str]], t: int) -> str:
+    """GPU clock state active at timestamp `t` (ns); '' if unknown."""
+    for s, e, st in windows:
+        if s <= t < e:
+            return st
+    return ""
+
+
+def _normalize_label(lbl: str) -> str:
+    """Collapse per-iteration encoder labels so they group across calls.
+
+    `Command Buffer 7:Compute Command 0` -> `Compute Command`.
+    """
+    lbl = re.sub(r"Command Buffer \d+:", "", lbl)
+    lbl = re.sub(r" \d+$", "", lbl)
+    return lbl.strip() or "?"
+
+
+def _parse_intervals(xml: bytes, process: str):
+    """Yield (channel, label, start_ns, duration_ns) per GPU encoder.
+
+    Each row's GPU duration is its *first* `<duration>` child — the second
+    is the "CPU to GPU Latency" column, also typed `duration`. The
+    `metal-gpu-intervals` table lumps every process's GPU work together
+    (WindowServer compositing dominates the row count), so filter by
+    `process` (the workload is `python`).
+    """
+    root = ET.fromstring(xml)
+    resolve = _xml_resolver(root)
+    for row in root.iter("row"):
+        kids = list(row)
+        proc = ""
+        durations = []
+        channel = ""
+        flabel = None
+        for k in kids:
+            if k.tag == "process" and not proc:
+                proc = resolve(k).get("fmt", "")
+            elif k.tag == "duration":
+                durations.append(resolve(k))
+            elif k.tag == "gpu-channel-name" and not channel:
+                channel = resolve(k).get("fmt", "")
+            elif k.tag == "formatted-label" and flabel is None:
+                flabel = resolve(k)
+        if process and process not in proc:
+            continue
+        if not durations or durations[0].text is None:
+            continue
+        label = "?"
+        if flabel is not None:
+            s = flabel.find("string")
+            if s is not None:
+                label = resolve(s).get("fmt", "") or "?"
+        start_ns = 0
+        for k in kids:
+            if k.tag == "start-time":
+                start_ns = int(resolve(k).text)
+                break
+        yield channel, _normalize_label(label), start_ns, int(durations[0].text)
+
+
+def _record_trace(child_argv: list[str], trace: str, *, attempts: int = 6) -> None:
+    """Record a Metal System Trace around `child_argv`, retrying flaky runs.
+
+    `xctrace record --launch` intermittently crashes (Bus/Segfault) while
+    finalizing the bundle, leaving an unexportable `.trace`. It's flaky, not
+    deterministic, so retry until the intervals table actually exports back.
+    The traced child inherits `_TRACED_ENV=1` so it runs the bare workload
+    loop instead of recursively orchestrating another trace.
+    """
+    env = {**os.environ, _TRACED_ENV: "1"}
+    for attempt in range(1, attempts + 1):
+        if os.path.exists(trace):
+            shutil.rmtree(trace, ignore_errors=True)
+        subprocess.run(
+            [
+                "xctrace", "record", "--template", "Metal System Trace",
+                "--output", trace, "--launch", "--", *child_argv,
+            ],
+            env=env,
+        )  # ignore returncode: xctrace crashes on finalize but may still write
+        try:
+            _xctrace_export(trace, _XCTRACE_SCHEMA)
+            return
+        except RuntimeError:
+            print(f"  (attempt {attempt}/{attempts}: unreadable trace, retrying)")
+    raise SystemExit(
+        f"xctrace failed to produce a readable trace after {attempts} attempts"
+    )
+
+
+# Apple GPU performance states, lowest to highest clock. Used to pick the
+# least-throttled group as the headline when full Maximum clock never landed.
+_CLOCK_RANK = {"Minimum": 0, "Low": 1, "Medium": 2, "High": 3, "Maximum": 4}
+
+
+def _pick_headline(groups: list[dict]) -> dict | None:
+    """The conv kernel's group: the `Compute Command` encoder, at the highest
+    GPU clock state observed.
+
+    Mojo doesn't label its Metal encoders, so the kernel lands under the
+    `Compute Command` encoder label; host<->device copies are `Blit Command`
+    (often on the same `Compute` GPU channel, so we must match on the
+    *label*, not the channel). We trust the Maximum-clock group (DVFS steady
+    state); if the governor never got there, we take the highest clock seen
+    as the least-throttled estimate (and warn). Ties break by interval count.
+    """
+    kernel = [g for g in groups if "compute command" in g["label"].lower()]
+    if not kernel:
+        # Fall back to any compute-channel encoder that isn't a copy.
+        kernel = [
+            g for g in groups
+            if "compute" in g["channel"].lower() and "blit" not in g["label"].lower()
+        ]
+    if not kernel:
+        return None
+    return max(kernel, key=lambda g: (_CLOCK_RANK.get(g["clock"], -1), g["count"]))
+
+
+def _summarize_trace(trace: str, *, process: str = "python") -> tuple[dict, list[float]]:
+    """Parse the trace into a structured Instruments analysis.
+
+    Returns (analysis_dict, headline_durs_us) where the analysis lists every
+    GPU encoder grouped by (channel, label, clock) and headline_durs_us is
+    the per-interval µs list for the conv kernel (for min/spread reporting).
+    """
+    windows = _load_clock_timeline(trace)
+    bucket: dict[tuple[str, str, str], list[int]] = defaultdict(list)
+    n = 0
+    grand_ns = 0
+    for channel, label, start_ns, ns in _parse_intervals(
+        _xctrace_export(trace, _XCTRACE_SCHEMA), process
+    ):
+        clock = _clock_at(windows, start_ns) or "?"
+        bucket[(channel, label, clock)].append(ns)
+        n += 1
+        grand_ns += ns
+
+    groups: list[dict] = []
+    headline_by_key: dict[tuple, list[int]] = {}
+    for (channel, label, clock), durs in bucket.items():
+        groups.append(
+            {
+                "channel": channel,
+                "label": label,
+                "clock": clock,
+                "count": len(durs),
+                # Median, not mean: with DVFS the distribution is bimodal and
+                # the median of a single-clock group is a robust estimate.
+                "median_us": statistics.median(durs) / 1e3,
+                "min_us": min(durs) / 1e3,
+                "max_us": max(durs) / 1e3,
+                "total_us": sum(durs) / 1e3,
+            }
+        )
+        headline_by_key[(channel, label, clock)] = durs
+    groups.sort(key=lambda g: -g["total_us"])
+
+    headline = _pick_headline(groups)
+    headline_durs = []
+    if headline is not None:
+        key = (headline["channel"], headline["label"], headline["clock"])
+        headline_durs = [d / 1e3 for d in headline_by_key[key]]
+
+    analysis = {
+        "trace": trace,
+        "process": process,
+        "clock_windows": bool(windows),
+        "groups": groups,
+        "headline": headline,
+        "intervals": n,
+        "total_gpu_ms": grand_ns / 1e6,
+    }
+    return analysis, headline_durs
+
+
+def run_metal_kernel(cfg: Config, args, env_sig: dict, tag: str) -> dict:
+    """Orchestrate the Apple kernel-time measurement and assemble the report.
+
+    Pre-warms the JIT cache (un-traced subprocess), records a Metal System
+    Trace around the workload, parses the per-encoder GPU intervals, and
+    returns a report carrying both the headline kernel time (mojo) and the
+    full Instruments analysis (`metal_analysis`).
+    """
+    if shutil.which("xctrace") is None:
+        raise SystemExit(
+            "--measure kernel on mps needs Apple `xctrace` (install the Xcode "
+            "command line tools), or use --measure walltime / raw instead"
+        )
+
+    # 1) Pre-warm in a separate, un-traced process so `mojo build` lands in the
+    #    on-disk JIT cache and the traced run only dlopen()s the cached .so.
+    #    Capture its output: the workload's own report is noise here, but we
+    #    surface it if the pre-warm fails (e.g. a JIT compile error).
+    print("=== pre-warm (fills JIT cache; not traced) ===")
+    prewarm = _workload_argv(cfg, args, iters=1, warmup=3)
+    warm = subprocess.run(prewarm, capture_output=True, text=True)
+    if warm.returncode != 0:
+        raise SystemExit(
+            f"pre-warm workload failed (exit {warm.returncode}):\n"
+            f"{warm.stdout}\n{warm.stderr}"
+        )
+
+    # 2) Record the Metal System Trace around a re-launch of the workload.
+    trace_dir = tempfile.mkdtemp(prefix="ccv_metal_")
+    trace = os.path.join(trace_dir, f"ccv_{cfg.fn}.trace")
+    child = _workload_argv(cfg, args, iters=args.iters, warmup=1)
+    print(f"\n=== xctrace record (Metal System Trace) -> {trace} ===")
+    _record_trace(child, trace)
+
+    # 3) Read per-encoder GPU intervals back out.
+    analysis, headline_durs = _summarize_trace(trace)
+    m = Measurement(runs_us=headline_durs)
+    if not headline_durs:
+        m.error = "no Compute GPU intervals found in trace"
+
+    rep = _assemble_report(cfg, args, env_sig, tag, {"mojo": m})
+    rep["metal_analysis"] = analysis
+    return rep
+
+
+# ---------------------------------------------------------------------------
 # Driver.
 # ---------------------------------------------------------------------------
 
 
-def _env_signature(args) -> dict[str, str]:
-    gpu = (
-        torch.cuda.get_device_name(0)
-        if torch.cuda.is_available()
-        else f"cpu:{os.cpu_count()}"
-    )
+def _env_signature(args, device: str) -> dict[str, str]:
+    if device == "cuda" and torch.cuda.is_available():
+        gpu = torch.cuda.get_device_name(0)
+    elif device == "mps":
+        gpu = _mac_chip()
+    else:
+        gpu = f"cpu:{os.cpu_count()}"
     # The master script passes the locked clock (MHz) so the cache key
     # tracks the measurement environment; "unlocked" otherwise.
     return {"gpu": gpu, "clock": args.clock_locked or "unlocked"}
 
 
 def run(args) -> dict:
-    device = args.device
+    device = _resolve_device(args.device)
     if device == "cuda" and not torch.cuda.is_available():
         raise SystemExit("CUDA device required for --device cuda")
+    if device == "mps" and not torch.backends.mps.is_available():
+        raise SystemExit("MPS (Apple GPU) device required for --device mps")
 
     shape = _parse_shape(args.shape, args.fn, args.width)
     if args.fn in ("fwd", "bwd"):
@@ -545,16 +1024,26 @@ def run(args) -> dict:
     )
 
     impls = _parse_impls(args.impl)
-    env_sig = _env_signature(args)
+    env_sig = _env_signature(args, device)
     upstream_tag = args.baseline_tag or (
         getattr(_upstream_module(), "__version__", "unknown")
-        if ("upstream" in impls and args.measure != "raw")
+        if ("upstream" in impls and args.measure != "raw" and device == "cuda")
         else "n/a"
     )
     # Per-impl cache tags (see BaselineCache): upstream tracks the wheel
     # version; pytorch is our own ref, so a stable constant.
     tags = {"upstream": upstream_tag, "pytorch": "pytorch-ref"}
     tag = upstream_tag  # headline tag shown in the report
+
+    # Apple: no in-process device-time hook, so kernel-time measurement is an
+    # out-of-process xctrace orchestration (mojo-only — upstream is CUDA-only).
+    if device == "mps" and args.measure == "kernel" and not _is_traced_workload():
+        if "mojo" not in impls:
+            raise SystemExit(
+                "mps kernel-time tracing is mojo-only (upstream is CUDA-only); "
+                "pass --impl mojo, or use --measure walltime/raw for other impls"
+            )
+        return run_metal_kernel(cfg, args, env_sig, tag)
 
     cache = None
     if args.measure in ("kernel", "walltime") and not args.no_baseline_cache:
@@ -602,7 +1091,8 @@ def _measure_impl(impl: str, cfg: Config, args) -> Measurement:
                 )
             elif args.measure == "walltime":
                 us = measure_walltime(
-                    call, min_run_time=args.min_run_time, warmup=args.warmup
+                    call, min_run_time=args.min_run_time, warmup=args.warmup,
+                    device=cfg.device,
                 )
             else:  # raw
                 us = measure_raw(
@@ -676,6 +1166,51 @@ def _print_human(rep: dict) -> None:
         base = name.replace("mojo_over_", "")
         verdict = _verdict(ratio, rep, ("mojo", base))
         print(f"  ratio {name}: {ratio:.3f}x  {verdict}")
+    if rep.get("metal_analysis"):
+        _print_metal_analysis(rep["metal_analysis"])
+
+
+def _print_metal_analysis(a: dict) -> None:
+    """Print the per-encoder GPU-time breakdown read back from the trace."""
+    print()
+    print(f"  METAL INSTRUMENTS ANALYSIS  (Metal System Trace, process={a['process']!r})")
+    if not a["clock_windows"]:
+        print("    (no gpu-performance-state-intervals in trace; clock state unknown)")
+    hdr = (
+        f"    {'channel':>8} | {'clock':>8} | {'count':>5} | {'median':>9} | "
+        f"{'min':>9} | {'max':>9} | encoder"
+    )
+    print(hdr)
+    print("    " + "-" * (len(hdr) - 4))
+    for g in a["groups"]:
+        print(
+            f"    {g['channel']:>8} | {g['clock']:>8} | {g['count']:>5} | "
+            f"{g['median_us']:8.2f}u | {g['min_us']:8.2f}u | {g['max_us']:8.2f}u | "
+            f"{g['label']}"
+        )
+    h = a["headline"]
+    if h:
+        print(
+            f"    headline kernel time (Compute Command @ {h['clock']} clock, "
+            f"median): {h['median_us']:.2f} us  (count={h['count']})"
+        )
+        if a["clock_windows"] and h["clock"] != "Maximum":
+            print(
+                f"    WARNING: GPU never reached Maximum clock (best observed: "
+                f"{h['clock']}); this is a DVFS-throttled number, not steady "
+                f"state. The per-call sync lets the governor downclock between "
+                f"dispatches — re-run, or drive a larger/longer workload."
+            )
+    else:
+        print("    (no Compute Command encoder intervals found — nothing to attribute)")
+    print(
+        f"    total GPU time: {a['total_gpu_ms']:.3f} ms across "
+        f"{a['intervals']} encoder intervals"
+    )
+    if a["clock_windows"]:
+        print("    NOTE: trust the 'Maximum'-clock rows; lower states are DVFS noise.")
+    print("    NOTE: occupancy / ALU% / bandwidth / stalls are GUI-only on Apple —")
+    print(f"          open the trace in Instruments for those: {a['trace']}")
 
 
 def _verdict(ratio: float, rep: dict, impls: tuple[str, ...]) -> str:
@@ -721,7 +1256,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="B,D,L,W for fwd/bwd (W optional, use --width); B,D for update",
     )
     p.add_argument("--dtype", choices=tuple(_DTYPES), default="fp16")
-    p.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    p.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto",
+                   help="auto: cuda if present, else mps (Apple), else cpu")
     p.add_argument("--width", type=int, default=4, help="conv width (update; fwd/bwd take it from --shape)")
     p.add_argument("--state-len", type=int, default=0, help="update conv_state length (default width-1)")
     p.add_argument("--activation", choices=("none", "silu", "swish"), default="silu")
@@ -763,6 +1299,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.fn is None:
         parser.error("a function is required: pass it positionally (e.g. `fwd`) or via --kind")
     rep = run(args)
+    # The traced Apple workload exists only to drive the kernel under
+    # xctrace; its own report is noise inside the recording. Stay silent
+    # (the orchestrator parses the trace and prints the real findings).
+    if _is_traced_workload() and not args.json:
+        return
     if args.json:
         print(json.dumps(rep))
     else:
