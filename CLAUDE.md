@@ -334,18 +334,26 @@ Performance" / "Metal GPU Counters" templates:
 
 - **Available headless** (in the Metal System Trace export): per-encoder
   GPU time (`metal-gpu-intervals`), GPU **clock/performance state** over
-  time (`gpu-performance-state-intervals`, used for the clock split),
-  command-buffer timings, residency-set events. `powermetrics --samplers
-  gpu_power` (needs sudo) additionally gives aggregate GPU active
-  residency + frequency.
+  time (`gpu-performance-state-intervals`, used for the clock split), the
+  GPU **Active vs Idle duty cycle** (`metal-gpu-state-intervals` — surfaced
+  by `bench.py` as the "GPU duty cycle" line; low active % == the workload
+  is launch/sync-bound, the single most actionable headless signal),
+  command-buffer timings, residency-set events, `device-thermal-state-
+  intervals`. `powermetrics --samplers gpu_power` (needs sudo) additionally
+  gives aggregate GPU active residency + frequency.
 - **GUI-only**: the rich per-shader counters — **occupancy %, ALU active
-  %, memory throughput, stall reasons, registers/thread**. Headless
-  templates only ever populate the `RT Unit Active` counter; the useful
-  counter sets require the Instruments GUI on Apple silicon. The static
-  occupancy proxy `MTLComputePipelineState.maxTotalThreadsPerThreadgroup`
-  is queryable via the Metal API, but Mojo's `DeviceContext` doesn't
-  currently expose it. So: per-kernel *time* and *clock* are scriptable;
-  *why* a kernel is slow (occupancy/stalls) needs the GUI.
+  %, memory throughput, stall reasons, registers/thread** (the
+  `gpu-counter-value` / `gpu-shader-profiler-sample` tables). Verified:
+  even forcing `xctrace record --instrument 'Metal GPU Counters'` records
+  with `Counter Set: (null)` by default, and selecting a profile makes the
+  GPU service reject it ("counter profile not supported on target device")
+  so those tables export **empty**. The counter set must be configured in
+  the Instruments GUI; once authored, a saved `.tracetemplate` *file* with
+  "Induced GPU Performance State = Maximum" + a supported counter set can
+  be replayed headlessly via `xctrace record --template <path>` (there is
+  no CLI/env flag for either knob). So: per-kernel *time*, *clock*, and
+  *duty cycle* are scriptable; *why* a kernel is slow (occupancy/stalls)
+  needs the GUI, or a one-time GUI-authored template.
 
 ## Inspecting generated code (PTX, SASS)
 

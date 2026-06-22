@@ -761,6 +761,47 @@ def _clock_at(windows: list[tuple[int, int, str]], t: int) -> str:
     return ""
 
 
+def _gpu_duty_cycle(trace: str) -> dict | None:
+    """GPU Active vs Idle residency over the trace, from
+    `metal-gpu-state-intervals`.
+
+    This is device-global (the GPU state machine, not per-process), but
+    during a headless bench run our workload is the only meaningful GPU
+    user, so it reads as the kernel's duty cycle. A low active fraction
+    means the work is launch/sync-bound rather than compute-bound — the
+    most actionable headless signal Instruments gives us on Apple, since
+    the per-shader counters (ALU%, occupancy, bandwidth) need the GUI.
+    Returns None if the table is absent.
+    """
+    try:
+        root = ET.fromstring(_xctrace_export(trace, "metal-gpu-state-intervals"))
+    except RuntimeError:
+        return None
+    resolve = _xml_resolver(root)
+    by_state: dict[str, int] = defaultdict(int)
+    for row in root.iter("row"):
+        state = None
+        dur = 0
+        for k in row:
+            if k.tag == "gpu-state":
+                state = resolve(k).get("fmt", "")
+            elif k.tag == "duration":
+                txt = resolve(k).text
+                dur = int(txt) if txt else 0
+        if state:
+            by_state[state] += dur
+    total = sum(by_state.values())
+    if not total:
+        return None
+    active = by_state.get("Active", 0)
+    return {
+        "active_ms": active / 1e6,
+        "idle_ms": by_state.get("Idle", 0) / 1e6,
+        "busy_pct": active / total * 100.0,
+        "states_ms": {k: v / 1e6 for k, v in sorted(by_state.items())},
+    }
+
+
 def _normalize_label(lbl: str) -> str:
     """Collapse per-iteration encoder labels so they group across calls.
 
@@ -925,6 +966,7 @@ def _summarize_trace(trace: str, *, process: str = "python") -> tuple[dict, list
         "headline": headline,
         "intervals": n,
         "total_gpu_ms": grand_ns / 1e6,
+        "duty": _gpu_duty_cycle(trace),
     }
     return analysis, headline_durs
 
@@ -1207,6 +1249,17 @@ def _print_metal_analysis(a: dict) -> None:
         f"    total GPU time: {a['total_gpu_ms']:.3f} ms across "
         f"{a['intervals']} encoder intervals"
     )
+    d = a.get("duty")
+    if d:
+        print(
+            f"    GPU duty cycle (device-global): {d['busy_pct']:.1f}% active  "
+            f"({d['active_ms']:.2f} ms active / {d['idle_ms']:.2f} ms idle)"
+        )
+        if d["busy_pct"] < 40.0:
+            print(
+                "          -> low residency: launch/sync-bound, not compute-bound "
+                "(the per-call sync starves the GPU and holds the clock down)."
+            )
     if a["clock_windows"]:
         print("    NOTE: trust the 'Maximum'-clock rows; lower states are DVFS noise.")
     print("    NOTE: occupancy / ALU% / bandwidth / stalls are GUI-only on Apple —")
