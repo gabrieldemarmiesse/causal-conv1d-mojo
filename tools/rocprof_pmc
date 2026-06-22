@@ -63,7 +63,7 @@ PMC
 
 exec flock /tmp/.gpu_bench_lock bash -c "
     rocprofv3 -i '$pmc' --kernel-include-regex '$KERNEL_RE' -f csv -d '$outdir' -- \
-        '$repo/.venv/bin/python' '$repo/benchmarks/bench_gpu_kernel_time.py' $(printf ' %q' "${ARGS[@]}") \
+        '$repo/.venv/bin/python' '$repo/benchmarks/bench.py' $(printf ' %q' "${ARGS[@]}") \
         2> '$outdir/rocprof.log'
     rc=\$?
     if [ \$rc -ne 0 ]; then

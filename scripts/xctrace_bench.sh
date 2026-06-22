@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xctrace_bench.sh — precise Apple-GPU kernel timing for causal_conv1d.
 #
-# The Apple analog of running `bench_gpu_kernel_time.py` under CUPTI:
+# The Apple analog of running `bench.py` under CUPTI:
 # Metal has no torch device-time hook, so we record an Instruments
 # "Metal System Trace" around the Mojo Metal kernel and read the
 # per-encoder GPU intervals back out with xctrace_gpu_intervals.py.

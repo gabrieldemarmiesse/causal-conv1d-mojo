@@ -121,7 +121,7 @@ WARMUP_UPDATE = 50
 ITERS_UPDATE = 500
 
 # CPU bench: same shape grid would take minutes per call at the top
-# end, so use a smaller grid (matches benchmarks/bench_cpu.py) and
+# end, so use a smaller grid (matches the old bench_cpu grid) and
 # fewer iters. CPU calls are synchronous, no profiler needed — wall
 # time around the call is the kernel time.
 CPU_SHAPES = [

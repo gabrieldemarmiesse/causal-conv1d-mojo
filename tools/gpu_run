@@ -6,7 +6,7 @@
 # exercises the GPU heavily (benches, ncu/rocprof, big pytest runs).
 #
 # Usage: ./tools/gpu_run <command> [args...]
-#   ./tools/gpu_run uv run python benchmarks/bench_gpu_kernel_time.py --kind fwd
+#   ./tools/gpu_run uv run python benchmarks/bench.py --kind fwd
 #   ./tools/gpu_run uv run pytest tests/test_causal_conv1d.py -k width4 -x
 
 set -euo pipefail

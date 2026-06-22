@@ -1,7 +1,7 @@
 """Apple-silicon GPU workload driver, launched *under* xctrace.
 
 There is no torch device-time hook for Metal (unlike CUPTI/rocprof on
-NVIDIA/AMD), so `bench_gpu_kernel_time.py`'s profiler path doesn't work
+NVIDIA/AMD), so `bench.py`'s profiler path doesn't work
 here. Instead we run the Mojo Metal kernel in a tight, synchronized loop
 inside a process that Instruments records as a "Metal System Trace", and
 read the per-encoder GPU intervals back with

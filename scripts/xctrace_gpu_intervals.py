@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extract per-encoder GPU execution intervals from an xctrace trace.
 
-This is the Apple-silicon analog of `bench_gpu_kernel_time.py`'s
+This is the Apple-silicon analog of `bench.py`'s
 torch.profiler path: on NVIDIA/AMD we read per-kernel device time from
 CUPTI/rocprof, but Metal has no torch device-time hook, so the only way
 to get real GPU-side timings is to record an Instruments "Metal System
