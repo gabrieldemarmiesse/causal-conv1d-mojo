@@ -37,3 +37,6 @@ kgen.trace.json.time*
 
 # Vendored third-party Claude Code skills (kept local, not tracked).
 .claude/skills/
+
+# Slurm job submission scripts (cluster-specific, not part of the codebase).
+*.slurm

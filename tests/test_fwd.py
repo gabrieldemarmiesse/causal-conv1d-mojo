@@ -480,12 +480,17 @@ def test_fwd_width10_fp16_rejected():
 # so dynamo can capture the call as an atomic FX node. Without that
 # wrapping, `torch.compile(fullgraph=True)` would crash trying to
 # trace into the JIT-compile path (which does filesystem I/O).
+#
+# On ROCm, the default `inductor` backend spawns a Triton subprocess to
+# compile kernels; that subprocess crashes when it inherits an active HIP
+# context via fork.  The `aot_eager` backend runs the same dynamo tracing
+# pass (so `fullgraph=True` is still enforced and graph breaks still
+# error) but skips subprocess compilation entirely.  We use it on ROCm so
+# the tests exercise what actually matters — dynamo correctness — without
+# the crashing backend.
+_COMPILE_BACKEND = "aot_eager" if torch.version.hip is not None else "inductor"
 
 
-@pytest.mark.skipif(
-    torch.version.hip is not None,
-    reason="torch.compile/Triton backend is unstable on ROCm and crashes the process",
-)
 def test_torch_compile_fullgraph_cuda():
     """torch.compile(fullgraph=True) must trace cleanly, no graph break."""
     if not torch.cuda.is_available():
@@ -495,7 +500,7 @@ def test_torch_compile_fullgraph_cuda():
     w = torch.randn(D, 4, dtype=torch.float16, device="cuda")
     b = torch.randn(D, dtype=torch.float16, device="cuda")
 
-    @torch.compile(fullgraph=True)
+    @torch.compile(fullgraph=True, backend=_COMPILE_BACKEND)
     def f(x, w, b):
         return causal_conv1d_mojo.causal_conv1d_fn(x, w, b, activation="silu")
 
@@ -506,10 +511,6 @@ def test_torch_compile_fullgraph_cuda():
     assert torch.equal(out_compiled, out_eager)
 
 
-@pytest.mark.skipif(
-    torch.version.hip is not None,
-    reason="torch.compile/Triton backend is unstable on ROCm and crashes the process",
-)
 def test_torch_compile_autograd_cuda():
     """Backward through a compiled forward must work."""
     if not torch.cuda.is_available():
@@ -519,7 +520,7 @@ def test_torch_compile_autograd_cuda():
     w = torch.randn(D, 4, dtype=torch.float16, device="cuda", requires_grad=True)
     b = torch.randn(D, dtype=torch.float16, device="cuda", requires_grad=True)
 
-    @torch.compile()
+    @torch.compile(backend=_COMPILE_BACKEND)
     def f(x, w, b):
         return causal_conv1d_mojo.causal_conv1d_fn(x, w, b, activation="silu").sum()
 
