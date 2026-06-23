@@ -52,9 +52,7 @@ def causal_conv1d_ref(
     else:
         x_in = torch.cat([initial_states, x], dim=-1)  # (batch, dim, width-1+seqlen)
     x_unfolded = x_in.unfold(-1, width, 1)  # (batch, dim, seqlen, width)
-    out = (x_unfolded * weight.unsqueeze(0).unsqueeze(2)).sum(
-        -1
-    )  # (batch, dim, seqlen)
+    out = (x_unfolded * weight.unsqueeze(0).unsqueeze(2)).sum(-1)  # (batch, dim, seqlen)
     if bias is not None:
         out = out + bias.view(1, -1, 1)
     out = out[..., :seqlen]
@@ -124,9 +122,7 @@ def causal_conv1d_update_ref(
     # the AMD ROCm Triton dispatch of the grouped unpadded conv, which gives
     # wrong fp16/fp32 results on gfx942 (MI300A).
     x_unfolded = x_new.unfold(-1, width, 1)  # (batch, dim, L-width+1, width)
-    out = (x_unfolded * weight.unsqueeze(0).unsqueeze(2)).sum(
-        -1
-    )  # (batch, dim, L-width+1)
+    out = (x_unfolded * weight.unsqueeze(0).unsqueeze(2)).sum(-1)  # (batch, dim, L-width+1)
     if bias is not None:
         out = out + bias.view(1, -1, 1)
     out = out[:, :, -seqlen:]
