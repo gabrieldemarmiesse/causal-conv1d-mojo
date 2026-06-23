@@ -76,29 +76,29 @@ def causal_conv1d_update_cpu_variant(
     var x_tt = TileTensor(
         x_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+            (batch_int, dim_int, seqlen_int),
+            (x_b_stride, x_c_stride, x_l_stride),
         ),
     )
     var w_tt = TileTensor(
         w_ptr,
         Layout(
-            (Idx(dim_int), Idx[WIDTH]()),
-            (Idx(w_c_stride), Idx(w_w_stride)),
+            (dim_int, Idx[WIDTH]),
+            (w_c_stride, w_w_stride),
         ),
     )
     var state_tt = TileTensor(
         state_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(state_len_int)),
-            (Idx(state_b_stride), Idx(state_c_stride), Idx(state_l_stride)),
+            (batch_int, dim_int, state_len_int),
+            (state_b_stride, state_c_stride, state_l_stride),
         ),
     )
     var o_tt = TileTensor(
         o_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(o_b_stride), Idx(o_c_stride), Idx(o_l_stride)),
+            (batch_int, dim_int, seqlen_int),
+            (o_b_stride, o_c_stride, o_l_stride),
         ),
     )
     update_kernel_cpu[
@@ -129,7 +129,7 @@ def causal_conv1d_update_cpu_variant(
 
 
 @export
-def PyInit_variant() -> PythonObject:
+def PyInit_variant() abi("C") -> PythonObject:
     try:
         var m = PythonModuleBuilder("variant")
         m.def_py_function[causal_conv1d_update_cpu_variant](

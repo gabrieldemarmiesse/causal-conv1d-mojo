@@ -70,7 +70,7 @@ def launch_update[
     # Reconstruct a non-owning DeviceContext from the cached handle —
     # avoids the hipStreamCreate/Destroy that would happen with the
     # default `DeviceContext()` constructor each call.
-    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutExternalOrigin](
+    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutUntrackedOrigin](
         unsafe_from_address=ctx_handle_addr
     )
     var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
@@ -112,15 +112,7 @@ def launch_update[
             apply_silu,
             has_state_indices,
             is_circular,
-        ],
-        update_kernel[
-            dtype,
-            width,
-            has_bias,
-            apply_silu,
-            has_state_indices,
-            is_circular,
-        ],
+        ]
     ]()
     comptime if use_external_stream:
         var stream = ctx.create_external_stream(stream_opaque)

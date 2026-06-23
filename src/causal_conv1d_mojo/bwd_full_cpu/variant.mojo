@@ -95,57 +95,57 @@ def causal_conv1d_bwd_full_cpu_variant(
     var x_tt = TileTensor(
         x_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+            (batch_int, dim_int, seqlen_int),
+            (x_b_stride, x_c_stride, x_l_stride),
         ),
     )
     var w_tt = TileTensor(
         w_ptr,
         Layout(
-            (Idx(dim_int), Idx[WIDTH]()),
-            (Idx(w_c_stride), Idx(w_w_stride)),
+            (dim_int, Idx[WIDTH]),
+            (w_c_stride, w_w_stride),
         ),
     )
     var dout_tt = TileTensor(
         dout_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(dout_b_stride), Idx(dout_c_stride), Idx(dout_l_stride)),
+            (batch_int, dim_int, seqlen_int),
+            (dout_b_stride, dout_c_stride, dout_l_stride),
         ),
     )
     var dx_tt = TileTensor(
         dx_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(dx_b_stride), Idx(dx_c_stride), Idx(dx_l_stride)),
+            (batch_int, dim_int, seqlen_int),
+            (dx_b_stride, dx_c_stride, dx_l_stride),
         ),
     )
     var seq_idx_tt = TileTensor(
         seq_idx_ptr,
         Layout(
-            (Idx(batch_int), Idx(seqlen_int)),
-            (Idx(seq_idx_b_stride), Idx(seq_idx_l_stride)),
+            (batch_int, seqlen_int),
+            (seq_idx_b_stride, seq_idx_l_stride),
         ),
     )
     var initial_states_tt = TileTensor(
         initial_states_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx[WIDTH - 1]()),
+            (batch_int, dim_int, Idx[WIDTH - 1]),
             (
-                Idx(initial_states_b_stride),
-                Idx(initial_states_c_stride),
-                Idx(initial_states_l_stride),
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
             ),
         ),
     )
     var dinitial_states_tt = TileTensor(
         dinitial_states_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx[WIDTH - 1]()),
+            (batch_int, dim_int, Idx[WIDTH - 1]),
             (
-                Idx(dinitial_states_b_stride),
-                Idx(dinitial_states_c_stride),
-                Idx(dinitial_states_l_stride),
+                dinitial_states_b_stride,
+                dinitial_states_c_stride,
+                dinitial_states_l_stride,
             ),
         ),
     )
@@ -182,7 +182,7 @@ def causal_conv1d_bwd_full_cpu_variant(
 
 
 @export
-def PyInit_variant() -> PythonObject:
+def PyInit_variant() abi("C") -> PythonObject:
     try:
         var m = PythonModuleBuilder("variant")
         m.def_py_function[causal_conv1d_bwd_full_cpu_variant](

@@ -74,7 +74,7 @@ def launch_bwd_full[
     # avoids the hipStreamCreate/Destroy that would otherwise happen
     # on every launch with the default `DeviceContext()` constructor.
     # See `acquire_ctx_handle` above.
-    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutExternalOrigin](
+    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutUntrackedOrigin](
         unsafe_from_address=ctx_handle_addr
     )
     var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
@@ -135,29 +135,29 @@ def launch_bwd_full[
     var seq_idx_tt = TileTensor(
         seq_idx_ptr,
         Layout(
-            (Idx(batch_int), Idx(seqlen_int)),
-            (Idx(UInt32(seq_idx_b_stride)), Idx(UInt32(seq_idx_l_stride))),
+            (batch_int, seqlen_int),
+            (UInt32(seq_idx_b_stride), UInt32(seq_idx_l_stride)),
         ),
     )
     var initial_states_tt = TileTensor(
         initial_states_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx[width - 1]()),
+            (batch_int, dim_int, Idx[width - 1]),
             (
-                Idx(UInt32(initial_states_b_stride)),
-                Idx(UInt32(initial_states_c_stride)),
-                Idx(UInt32(initial_states_l_stride)),
+                UInt32(initial_states_b_stride),
+                UInt32(initial_states_c_stride),
+                UInt32(initial_states_l_stride),
             ),
         ),
     )
     var dinitial_states_tt = TileTensor(
         dinitial_states_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx[width - 1]()),
+            (batch_int, dim_int, Idx[width - 1]),
             (
-                Idx(UInt32(dinitial_states_b_stride)),
-                Idx(UInt32(dinitial_states_c_stride)),
-                Idx(UInt32(dinitial_states_l_stride)),
+                UInt32(dinitial_states_b_stride),
+                UInt32(dinitial_states_c_stride),
+                UInt32(dinitial_states_l_stride),
             ),
         ),
     )
@@ -198,25 +198,7 @@ def launch_bwd_full[
                 SLT,
                 ILT,
                 DILT,
-            ],
-            bwd_full_kernel[
-                dtype,
-                n_elts,
-                width,
-                has_bias,
-                has_seq_idx,
-                has_initial_states,
-                apply_silu,
-                contig_inner,
-                aligned_seq,
-                XLT,
-                WLT,
-                DoutLT,
-                DxLT,
-                SLT,
-                ILT,
-                DILT,
-            ],
+            ]
         ]()
         comptime if use_external_stream:
             var stream = ctx.create_external_stream(stream_opaque)
@@ -267,40 +249,40 @@ def launch_bwd_full[
         var x_tt = TileTensor(
             x_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(x_b_stride)),
-                    Idx(UInt32(x_c_stride)),
-                    Idx[1](),
+                    UInt32(x_b_stride),
+                    UInt32(x_c_stride),
+                    Idx[1],
                 ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
-                (Idx(dim_int), Idx[width]()),
-                (Idx(UInt32(w_c_stride)), Idx[1]()),
+                (dim_int, Idx[width]),
+                (UInt32(w_c_stride), Idx[1]),
             ),
         )
         var dout_tt = TileTensor(
             dout_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(dout_b_stride)),
-                    Idx(UInt32(dout_c_stride)),
-                    Idx[1](),
+                    UInt32(dout_b_stride),
+                    UInt32(dout_c_stride),
+                    Idx[1],
                 ),
             ),
         )
         var dx_tt = TileTensor(
             dx_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(dx_b_stride)),
-                    Idx(UInt32(dx_c_stride)),
-                    Idx[1](),
+                    UInt32(dx_b_stride),
+                    UInt32(dx_c_stride),
+                    Idx[1],
                 ),
             ),
         )
@@ -317,40 +299,40 @@ def launch_bwd_full[
         var x_tt = TileTensor(
             x_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(x_b_stride)),
-                    Idx(UInt32(x_c_stride)),
-                    Idx(UInt32(x_l_stride)),
+                    UInt32(x_b_stride),
+                    UInt32(x_c_stride),
+                    UInt32(x_l_stride),
                 ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
-                (Idx(dim_int), Idx[width]()),
-                (Idx(UInt32(w_c_stride)), Idx(UInt32(w_w_stride))),
+                (dim_int, Idx[width]),
+                (UInt32(w_c_stride), UInt32(w_w_stride)),
             ),
         )
         var dout_tt = TileTensor(
             dout_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(dout_b_stride)),
-                    Idx(UInt32(dout_c_stride)),
-                    Idx(UInt32(dout_l_stride)),
+                    UInt32(dout_b_stride),
+                    UInt32(dout_c_stride),
+                    UInt32(dout_l_stride),
                 ),
             ),
         )
         var dx_tt = TileTensor(
             dx_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(dx_b_stride)),
-                    Idx(UInt32(dx_c_stride)),
-                    Idx(UInt32(dx_l_stride)),
+                    UInt32(dx_b_stride),
+                    UInt32(dx_c_stride),
+                    UInt32(dx_l_stride),
                 ),
             ),
         )

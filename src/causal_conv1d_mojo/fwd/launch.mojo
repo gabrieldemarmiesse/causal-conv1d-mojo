@@ -72,7 +72,7 @@ def launch_fwd[
     # Reconstruct a non-owning DeviceContext from the cached handle —
     # avoids the hipStreamCreate/Destroy that would happen with the
     # default `DeviceContext()` constructor each call.
-    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutExternalOrigin](
+    var raw_ctx_ptr = UnsafePointer[_DeviceContextCpp, MutUntrackedOrigin](
         unsafe_from_address=ctx_handle_addr
     )
     var ctx = DeviceContext(_DeviceContextPtr[mut=True](raw_ctx_ptr))
@@ -111,7 +111,7 @@ def launch_fwd[
         unsafe_from_address=o_addr
     )
 
-    # The `contig_inner` fast path bakes `Idx[1]()` into the inner stride
+    # The `contig_inner` fast path bakes `Idx[1]` into the inner stride
     # slot of each Layout, so the multiply on the innermost stride folds
     # out at comptime. The Layout *types* differ per branch (comptime
     # stride slot vs runtime), so the TileTensor construction has to
@@ -129,18 +129,18 @@ def launch_fwd[
     var seq_idx_tt = TileTensor(
         seq_idx_ptr,
         Layout(
-            (Idx(batch_int), Idx(seqlen_int)),
-            (Idx(UInt32(seq_idx_b_stride)), Idx(UInt32(seq_idx_l_stride))),
+            (batch_int, seqlen_int),
+            (UInt32(seq_idx_b_stride), UInt32(seq_idx_l_stride)),
         ),
     )
     var initial_states_tt = TileTensor(
         initial_states_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx[width - 1]()),
+            (batch_int, dim_int, Idx[width - 1]),
             (
-                Idx(UInt32(initial_states_b_stride)),
-                Idx(UInt32(initial_states_c_stride)),
-                Idx(UInt32(initial_states_l_stride)),
+                UInt32(initial_states_b_stride),
+                UInt32(initial_states_c_stride),
+                UInt32(initial_states_l_stride),
             ),
         ),
     )
@@ -175,23 +175,7 @@ def launch_fwd[
                 OLT,
                 SLT,
                 ILT,
-            ],
-            fwd_kernel[
-                dtype,
-                width,
-                has_bias,
-                has_seq_idx,
-                has_initial_states,
-                apply_silu,
-                contig_inner,
-                aligned_seq,
-                vec_aligned,
-                XLT,
-                WLT,
-                OLT,
-                SLT,
-                ILT,
-            ],
+            ]
         ]()
         comptime if use_external_stream:
             var stream = ctx.create_external_stream(stream_opaque)
@@ -234,29 +218,29 @@ def launch_fwd[
         var x_tt = TileTensor(
             x_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(x_b_stride)),
-                    Idx(UInt32(x_c_stride)),
-                    Idx[1](),
+                    UInt32(x_b_stride),
+                    UInt32(x_c_stride),
+                    Idx[1],
                 ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
-                (Idx(dim_int), Idx[width]()),
-                (Idx(UInt32(w_c_stride)), Idx[1]()),
+                (dim_int, Idx[width]),
+                (UInt32(w_c_stride), Idx[1]),
             ),
         )
         var o_tt = TileTensor(
             o_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(o_b_stride)),
-                    Idx(UInt32(o_c_stride)),
-                    Idx[1](),
+                    UInt32(o_b_stride),
+                    UInt32(o_c_stride),
+                    Idx[1],
                 ),
             ),
         )
@@ -271,29 +255,29 @@ def launch_fwd[
         var x_tt = TileTensor(
             x_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(x_b_stride)),
-                    Idx(UInt32(x_c_stride)),
-                    Idx(UInt32(x_l_stride)),
+                    UInt32(x_b_stride),
+                    UInt32(x_c_stride),
+                    UInt32(x_l_stride),
                 ),
             ),
         )
         var w_tt = TileTensor(
             w_ptr,
             Layout(
-                (Idx(dim_int), Idx[width]()),
-                (Idx(UInt32(w_c_stride)), Idx(UInt32(w_w_stride))),
+                (dim_int, Idx[width]),
+                (UInt32(w_c_stride), UInt32(w_w_stride)),
             ),
         )
         var o_tt = TileTensor(
             o_ptr,
             Layout(
-                (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
+                (batch_int, dim_int, seqlen_int),
                 (
-                    Idx(UInt32(o_b_stride)),
-                    Idx(UInt32(o_c_stride)),
-                    Idx(UInt32(o_l_stride)),
+                    UInt32(o_b_stride),
+                    UInt32(o_c_stride),
+                    UInt32(o_l_stride),
                 ),
             ),
         )

@@ -121,7 +121,7 @@ def causal_conv1d_fwd_variant(
 
 
 @export
-def PyInit_variant() -> PythonObject:
+def PyInit_variant() abi("C") -> PythonObject:
     try:
         var m = PythonModuleBuilder("variant")
         m.def_py_function[causal_conv1d_fwd_variant]("causal_conv1d_fwd_variant")

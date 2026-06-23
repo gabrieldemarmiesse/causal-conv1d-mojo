@@ -104,39 +104,39 @@ def causal_conv1d_fwd_cpu_variant(
     var x_tt = TileTensor(
         x_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+            (batch_int, dim_int, seqlen_int),
+            (x_b_stride, x_c_stride, x_l_stride),
         ),
     )
     var w_tt = TileTensor(
         w_ptr,
         Layout(
-            (Idx(dim_int), Idx[WIDTH]()),
-            (Idx(w_c_stride), Idx(w_w_stride)),
+            (dim_int, Idx[WIDTH]),
+            (w_c_stride, w_w_stride),
         ),
     )
     var o_tt = TileTensor(
         o_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(o_b_stride), Idx(o_c_stride), Idx(o_l_stride)),
+            (batch_int, dim_int, seqlen_int),
+            (o_b_stride, o_c_stride, o_l_stride),
         ),
     )
     var seq_idx_tt = TileTensor(
         seq_idx_ptr,
         Layout(
-            (Idx(batch_int), Idx(seqlen_int)),
-            (Idx(seq_idx_b_stride), Idx(seq_idx_l_stride)),
+            (batch_int, seqlen_int),
+            (seq_idx_b_stride, seq_idx_l_stride),
         ),
     )
     var initial_states_tt = TileTensor(
         initial_states_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx[WIDTH - 1]()),
+            (batch_int, dim_int, Idx[WIDTH - 1]),
             (
-                Idx(initial_states_b_stride),
-                Idx(initial_states_c_stride),
-                Idx(initial_states_l_stride),
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
             ),
         ),
     )
@@ -167,7 +167,7 @@ def causal_conv1d_fwd_cpu_variant(
 
 
 @export
-def PyInit_variant() -> PythonObject:
+def PyInit_variant() abi("C") -> PythonObject:
     try:
         var m = PythonModuleBuilder("variant")
         m.def_py_function[causal_conv1d_fwd_cpu_variant](
