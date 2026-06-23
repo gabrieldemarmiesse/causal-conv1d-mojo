@@ -144,11 +144,11 @@ def test_width_seq_idx_forward(device, dtype, width):
 
 
 def test_width_invalid_raises():
-    """Widths outside {2, 3, 4} are rejected by the validator before
-    touching the kernel."""
+    """Widths outside the supported range (2..9 for fp16/bf16) are
+    rejected by the validator before touching the kernel."""
     x = torch.randn(1, 8, 16, dtype=torch.float16)
-    weight = torch.randn(8, 5, dtype=torch.float16)
-    with pytest.raises(NotImplementedError, match="width in"):
+    weight = torch.randn(8, 10, dtype=torch.float16)
+    with pytest.raises(NotImplementedError, match="width must be in"):
         causal_conv1d_mojo.causal_conv1d_fn(x, weight)
 
 
