@@ -48,25 +48,25 @@ def launch_bwd_full[
     seq_idx_addr: Int,
     initial_states_addr: Int,
     dinitial_states_addr: Int,
-    x_b_stride: Int,
-    x_c_stride: Int,
-    x_l_stride: Int,
-    w_c_stride: Int,
-    w_w_stride: Int,
-    dout_b_stride: Int,
-    dout_c_stride: Int,
-    dout_l_stride: Int,
-    dx_b_stride: Int,
-    dx_c_stride: Int,
-    dx_l_stride: Int,
-    seq_idx_b_stride: Int,
-    seq_idx_l_stride: Int,
-    initial_states_b_stride: Int,
-    initial_states_c_stride: Int,
-    initial_states_l_stride: Int,
-    dinitial_states_b_stride: Int,
-    dinitial_states_c_stride: Int,
-    dinitial_states_l_stride: Int,
+    x_b_stride: UInt32,
+    x_c_stride: UInt32,
+    x_l_stride: UInt32,
+    w_c_stride: UInt32,
+    w_w_stride: UInt32,
+    dout_b_stride: UInt32,
+    dout_c_stride: UInt32,
+    dout_l_stride: UInt32,
+    dx_b_stride: UInt32,
+    dx_c_stride: UInt32,
+    dx_l_stride: UInt32,
+    seq_idx_b_stride: UInt32,
+    seq_idx_l_stride: UInt32,
+    initial_states_b_stride: UInt32,
+    initial_states_c_stride: UInt32,
+    initial_states_l_stride: UInt32,
+    dinitial_states_b_stride: UInt32,
+    dinitial_states_c_stride: UInt32,
+    dinitial_states_l_stride: UInt32,
     stream_handle_addr: Int,
     ctx_handle_addr: Int,
 ) raises:
@@ -136,7 +136,7 @@ def launch_bwd_full[
         seq_idx_ptr,
         Layout(
             (batch_int, seqlen_int),
-            (UInt32(seq_idx_b_stride), UInt32(seq_idx_l_stride)),
+            (seq_idx_b_stride, seq_idx_l_stride),
         ),
     )
     var initial_states_tt = TileTensor(
@@ -144,9 +144,9 @@ def launch_bwd_full[
         Layout(
             (batch_int, dim_int, Idx[width - 1]),
             (
-                UInt32(initial_states_b_stride),
-                UInt32(initial_states_c_stride),
-                UInt32(initial_states_l_stride),
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
             ),
         ),
     )
@@ -155,9 +155,9 @@ def launch_bwd_full[
         Layout(
             (batch_int, dim_int, Idx[width - 1]),
             (
-                UInt32(dinitial_states_b_stride),
-                UInt32(dinitial_states_c_stride),
-                UInt32(dinitial_states_l_stride),
+                dinitial_states_b_stride,
+                dinitial_states_c_stride,
+                dinitial_states_l_stride,
             ),
         ),
     )
@@ -251,8 +251,8 @@ def launch_bwd_full[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(x_b_stride),
-                    UInt32(x_c_stride),
+                    x_b_stride,
+                    x_c_stride,
                     Idx[1],
                 ),
             ),
@@ -261,7 +261,7 @@ def launch_bwd_full[
             w_ptr,
             Layout(
                 (dim_int, Idx[width]),
-                (UInt32(w_c_stride), Idx[1]),
+                (w_c_stride, Idx[1]),
             ),
         )
         var dout_tt = TileTensor(
@@ -269,8 +269,8 @@ def launch_bwd_full[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(dout_b_stride),
-                    UInt32(dout_c_stride),
+                    dout_b_stride,
+                    dout_c_stride,
                     Idx[1],
                 ),
             ),
@@ -280,8 +280,8 @@ def launch_bwd_full[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(dx_b_stride),
-                    UInt32(dx_c_stride),
+                    dx_b_stride,
+                    dx_c_stride,
                     Idx[1],
                 ),
             ),
@@ -301,9 +301,9 @@ def launch_bwd_full[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(x_b_stride),
-                    UInt32(x_c_stride),
-                    UInt32(x_l_stride),
+                    x_b_stride,
+                    x_c_stride,
+                    x_l_stride,
                 ),
             ),
         )
@@ -311,7 +311,7 @@ def launch_bwd_full[
             w_ptr,
             Layout(
                 (dim_int, Idx[width]),
-                (UInt32(w_c_stride), UInt32(w_w_stride)),
+                (w_c_stride, w_w_stride),
             ),
         )
         var dout_tt = TileTensor(
@@ -319,9 +319,9 @@ def launch_bwd_full[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(dout_b_stride),
-                    UInt32(dout_c_stride),
-                    UInt32(dout_l_stride),
+                    dout_b_stride,
+                    dout_c_stride,
+                    dout_l_stride,
                 ),
             ),
         )
@@ -330,9 +330,9 @@ def launch_bwd_full[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(dx_b_stride),
-                    UInt32(dx_c_stride),
-                    UInt32(dx_l_stride),
+                    dx_b_stride,
+                    dx_c_stride,
+                    dx_l_stride,
                 ),
             ),
         )

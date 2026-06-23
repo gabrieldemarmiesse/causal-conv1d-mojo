@@ -53,19 +53,19 @@ def launch_fwd[
     o_addr: Int,
     seq_idx_addr: Int,
     initial_states_addr: Int,
-    x_b_stride: Int,
-    x_c_stride: Int,
-    x_l_stride: Int,
-    w_c_stride: Int,
-    w_w_stride: Int,
-    o_b_stride: Int,
-    o_c_stride: Int,
-    o_l_stride: Int,
-    seq_idx_b_stride: Int,
-    seq_idx_l_stride: Int,
-    initial_states_b_stride: Int,
-    initial_states_c_stride: Int,
-    initial_states_l_stride: Int,
+    x_b_stride: UInt32,
+    x_c_stride: UInt32,
+    x_l_stride: UInt32,
+    w_c_stride: UInt32,
+    w_w_stride: UInt32,
+    o_b_stride: UInt32,
+    o_c_stride: UInt32,
+    o_l_stride: UInt32,
+    seq_idx_b_stride: UInt32,
+    seq_idx_l_stride: UInt32,
+    initial_states_b_stride: UInt32,
+    initial_states_c_stride: UInt32,
+    initial_states_l_stride: UInt32,
     stream_handle_addr: Int,
     ctx_handle_addr: Int,
 ) raises:
@@ -130,7 +130,7 @@ def launch_fwd[
         seq_idx_ptr,
         Layout(
             (batch_int, seqlen_int),
-            (UInt32(seq_idx_b_stride), UInt32(seq_idx_l_stride)),
+            (seq_idx_b_stride, seq_idx_l_stride),
         ),
     )
     var initial_states_tt = TileTensor(
@@ -138,9 +138,9 @@ def launch_fwd[
         Layout(
             (batch_int, dim_int, Idx[width - 1]),
             (
-                UInt32(initial_states_b_stride),
-                UInt32(initial_states_c_stride),
-                UInt32(initial_states_l_stride),
+                initial_states_b_stride,
+                initial_states_c_stride,
+                initial_states_l_stride,
             ),
         ),
     )
@@ -220,8 +220,8 @@ def launch_fwd[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(x_b_stride),
-                    UInt32(x_c_stride),
+                    x_b_stride,
+                    x_c_stride,
                     Idx[1],
                 ),
             ),
@@ -230,7 +230,7 @@ def launch_fwd[
             w_ptr,
             Layout(
                 (dim_int, Idx[width]),
-                (UInt32(w_c_stride), Idx[1]),
+                (w_c_stride, Idx[1]),
             ),
         )
         var o_tt = TileTensor(
@@ -238,8 +238,8 @@ def launch_fwd[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(o_b_stride),
-                    UInt32(o_c_stride),
+                    o_b_stride,
+                    o_c_stride,
                     Idx[1],
                 ),
             ),
@@ -257,9 +257,9 @@ def launch_fwd[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(x_b_stride),
-                    UInt32(x_c_stride),
-                    UInt32(x_l_stride),
+                    x_b_stride,
+                    x_c_stride,
+                    x_l_stride,
                 ),
             ),
         )
@@ -267,7 +267,7 @@ def launch_fwd[
             w_ptr,
             Layout(
                 (dim_int, Idx[width]),
-                (UInt32(w_c_stride), UInt32(w_w_stride)),
+                (w_c_stride, w_w_stride),
             ),
         )
         var o_tt = TileTensor(
@@ -275,9 +275,9 @@ def launch_fwd[
             Layout(
                 (batch_int, dim_int, seqlen_int),
                 (
-                    UInt32(o_b_stride),
-                    UInt32(o_c_stride),
-                    UInt32(o_l_stride),
+                    o_b_stride,
+                    o_c_stride,
+                    o_l_stride,
                 ),
             ),
         )
