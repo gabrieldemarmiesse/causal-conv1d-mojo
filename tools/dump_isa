@@ -6,14 +6,14 @@
 # `-D DUMP_GPU_ASM=...` define to the `mojo build`, and the stdlib's
 # `compile_function` writes the ISA at runtime. No more patching
 # launch.mojo. (On NVIDIA, turn the PTX into SASS / a spill report with
-# `scripts/asm_tools.py sass|spill`.)
+# `scripts/_asm_tools.py sass|spill`.)
 #
 # Usage:
 #   ./tools/dump_isa --sub fwd --shape 1,1024,2048,4
 #   ./tools/dump_isa --sub bwd_full --shape 1,2048,2048,4
 #   ./tools/dump_isa --sub update --shape 1,2048
 #
-# Extra args after `--` are forwarded to benchmarks/bench.py.
+# Extra args after `--` are forwarded to scripts/bench.py.
 
 set -euo pipefail
 
@@ -49,7 +49,7 @@ SHAPE_ARG=()
 # One synced call with the dump define active writes the variant's ISA.
 flock /tmp/.gpu_bench_lock \
     env CAUSAL_CONV1D_DUMP_ASM="$outdir" \
-    uv run python "$repo/benchmarks/bench.py" "$FN" \
+    uv run python "$repo/scripts/bench.py" "$FN" \
         --impl mojo --measure raw --iters 1 --warmup 0 --runs 1 \
         "${SHAPE_ARG[@]}" "${EXTRA[@]}"
 

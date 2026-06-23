@@ -8,7 +8,7 @@ launch them in parallel — they block until the GPU is free.
 
 | Tool | What it does |
 |---|---|
-| `./tools/bench <fn> [args]` | Run the unified `benchmarks/bench.py` driver with the GPU lock applied. `fn` is `fwd`/`bwd`/`update` (legacy `--kind` still accepted); `--impl mojo,upstream,pytorch` (or `all`/`both`), `--shape B,D,L,W` (or B,D for update), `--measure kernel,walltime,raw`, `--iters`, `--warmup`. |
+| `./tools/bench <fn> [args]` | Run the unified `scripts/bench.py` driver with the GPU lock applied. `fn` is `fwd`/`bwd`/`update` (legacy `--kind` still accepted); `--impl mojo,upstream,pytorch` (or `all`/`both`), `--shape B,D,L,W` (or B,D for update), `--measure kernel,walltime,raw`, `--iters`, `--warmup`. |
 | `./tools/dump_isa --sub <fwd\|bwd_full\|update> --shape <...>` | Set `CAUSAL_CONV1D_DUMP_ASM` and JIT-compile **one** variant, dumping its GPU ISA (PTX on NVIDIA, AMDGPU asm on ROCm) to `/tmp/mojo_isa/<sub>__<modname>.ptx`. Non-invasive — no `launch.mojo` patching. |
 | `./tools/dump_upstream_isa [filter]` | Extract gfx942 code object from the upstream `.so`, disassemble all kernels into `/tmp/upstream_isa/upstream.s`. With a `filter` arg (regex), also writes `/tmp/upstream_isa/upstream_<filter>.s`. |
 | `./tools/rocprof_kernels [bench args]` | Runs `rocprofv3 --kernel-trace --stats` against the bench. Prints per-kernel GPU time CSV. **Forces `--impl upstream`** unless you override (Mojo doesn't survive rocprof instrumentation). |
@@ -45,8 +45,8 @@ EOF
 ./tools/dump_isa --sub fwd --shape 1,1024,2048,4
 # → /tmp/mojo_isa/fwd__<modname>.ptx   (PTX on NVIDIA; AMDGPU asm on ROCm)
 # On NVIDIA, turn it into SASS / a spill report:
-#   uv run python scripts/asm_tools.py sass  /tmp/mojo_isa/fwd__*.ptx out.sass
-#   uv run python scripts/asm_tools.py spill /tmp/mojo_isa/fwd__*.ptx
+#   uv run python scripts/_asm_tools.py sass  /tmp/mojo_isa/fwd__*.ptx out.sass
+#   uv run python scripts/_asm_tools.py spill /tmp/mojo_isa/fwd__*.ptx
 
 # Upstream side — filter to a kernel substring.
 ./tools/dump_upstream_isa fwd_kernel

@@ -4,8 +4,8 @@
 Fully non-interactive (passwordless ``sudo -n`` only — never prompts), so it
 runs unattended in CI or under an agent. It is a stdlib-only *coordinator*:
 the actual work happens in subprocesses run under the project venv
-(``uv run --extra nvidia python benchmarks/bench.py ...`` and
-``scripts/asm_tools.py``). This script just locks the environment, sequences
+(``uv run --extra nvidia python scripts/bench.py ...`` and
+``scripts/_asm_tools.py``). This script just locks the environment, sequences
 the phases, parses their JSON, and gates on the results.
 
 Phases (Phase 1 of the Measurement Protocol):
@@ -49,8 +49,16 @@ UV = ["uv", "run", "--extra", "nvidia", "python"]
 SHAPES = {
     "fwd": {
         "canon": "1,4096,2048,4",
-        "full": ["1,1024,512,4", "1,1024,2048,4", "1,1024,8192,4", "1,2048,2048,4",
-                 "1,4096,2048,4", "4,2048,2048,4", "4,4096,2048,4", "8,2048,4096,4"],
+        "full": [
+            "1,1024,512,4",
+            "1,1024,2048,4",
+            "1,1024,8192,4",
+            "1,2048,2048,4",
+            "1,4096,2048,4",
+            "4,2048,2048,4",
+            "4,4096,2048,4",
+            "8,2048,4096,4",
+        ],
     },
     "update": {
         "canon": "16,2048",
@@ -92,11 +100,16 @@ class Gate:
         print(f"{_RED}[FAIL]{_RST} {msg}", file=sys.stderr, flush=True)
 
 
-def run(cmd: list[str], *, env=None, capture=False, check=False) -> subprocess.CompletedProcess:
+def run(
+    cmd: list[str], *, env=None, capture=False, check=False
+) -> subprocess.CompletedProcess:
     """Run a subprocess, echoing the command. Streams output unless captured."""
     print(f"$ {' '.join(cmd)}", flush=True)
     return subprocess.run(
-        cmd, env=env, check=check, text=True,
+        cmd,
+        env=env,
+        check=check,
+        text=True,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )
@@ -105,7 +118,8 @@ def run(cmd: list[str], *, env=None, capture=False, check=False) -> subprocess.C
 def nvidia_smi(query: str) -> str:
     r = subprocess.run(
         ["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ""
 
@@ -128,10 +142,14 @@ def lock_clocks(enabled: bool) -> tuple[str, bool]:
         return "unlocked", False
 
     def sudo(args: list[str]) -> bool:
-        return subprocess.run(
-            ["sudo", "-n", "nvidia-smi", *args],
-            capture_output=True, text=True,
-        ).returncode == 0
+        return (
+            subprocess.run(
+                ["sudo", "-n", "nvidia-smi", *args],
+                capture_output=True,
+                text=True,
+            ).returncode
+            == 0
+        )
 
     max_sm = nvidia_smi("clocks.max.sm")
     if max_sm and sudo(["-pm", "1"]) and sudo([f"--lock-gpu-clocks={max_sm}"]):
@@ -171,9 +189,20 @@ def correctness(tier: str, clean: bool) -> bool:
         print(f"clearing JIT cache {cache} (keeping mojo compiler cache)")
         shutil.rmtree(cache, ignore_errors=True)
     if tier == "quick":
-        cmd = ["uv", "run", "--extra", "nvidia", "pytest", "-q", "-x",
-               "tests/test_fwd.py", "tests/test_bwd.py", "tests/test_update.py",
-               "-k", SMOKE_K]
+        cmd = [
+            "uv",
+            "run",
+            "--extra",
+            "nvidia",
+            "pytest",
+            "-q",
+            "-x",
+            "tests/test_fwd.py",
+            "tests/test_bwd.py",
+            "tests/test_update.py",
+            "-k",
+            SMOKE_K,
+        ]
     else:
         print("full regression suite (every landed feature, all devices/dtypes)")
         cmd = ["uv", "run", "--extra", "nvidia", "pytest", "-q"]
@@ -194,10 +223,26 @@ def bench_kernel(fn, dtype, shapes, runs, clock, baseline_flags) -> None:
     section("(c) kernel-time bench vs upstream baseline (torch.profiler)")
     rows = []
     for shape in shapes:
-        cmd = [*taskset_prefix(), *UV, str(REPO / "benchmarks" / "bench.py"), fn,
-               "--shape", shape, "--dtype", dtype, "--impl", "all",
-               "--measure", "kernel", "--runs", str(runs),
-               "--clock-locked", clock, "--json", *baseline_flags]
+        cmd = [
+            *taskset_prefix(),
+            *UV,
+            str(REPO / "scripts" / "bench.py"),
+            fn,
+            "--shape",
+            shape,
+            "--dtype",
+            dtype,
+            "--impl",
+            "all",
+            "--measure",
+            "kernel",
+            "--runs",
+            str(runs),
+            "--clock-locked",
+            clock,
+            "--json",
+            *baseline_flags,
+        ]
         r = run(cmd, capture=True)
         if r.stderr:
             sys.stderr.write(r.stderr)
@@ -216,7 +261,9 @@ def _aggregate(rows: list[dict]) -> None:
     if not rows:
         Gate.fail("no parseable bench results")
         return
-    print(f"\n  {'shape':>18} | {'mojo us':>9} | {'up us':>9} | {'ratio':>7} | {'spread':>7} | verdict")
+    print(
+        f"\n  {'shape':>18} | {'mojo us':>9} | {'up us':>9} | {'ratio':>7} | {'spread':>7} | verdict"
+    )
     print("  " + "-" * 78)
     worst = 0.0
     for r in rows:
@@ -226,14 +273,25 @@ def _aggregate(rows: list[dict]) -> None:
         ratio = r["ratio_min"].get("mojo_over_upstream", math.nan)
         # Trust gate uses only the two impls in the ratio — a noisy third
         # impl (pytorch) must not mask a real mojo-vs-upstream delta.
-        spread = max((res[i]["spread_pct"] for i in ("mojo", "upstream")
-                      if i in res and res[i]["runs_us"]), default=0.0)
+        spread = max(
+            (
+                res[i]["spread_pct"]
+                for i in ("mojo", "upstream")
+                if i in res and res[i]["runs_us"]
+            ),
+            default=0.0,
+        )
         if ratio != ratio:  # NaN — mojo and/or upstream produced no usable number
-            errs = [f"{i}={res[i]['error']}" for i in ("mojo", "upstream")
-                    if res.get(i, {}).get("error")]
+            errs = [
+                f"{i}={res[i]['error']}"
+                for i in ("mojo", "upstream")
+                if res.get(i, {}).get("error")
+            ]
             verdict = "NO-BASELINE"
-            Gate.fail(f"no usable mojo/upstream measurement on {tuple(r['shape'])}"
-                      + (f" ({'; '.join(errs)})" if errs else ""))
+            Gate.fail(
+                f"no usable mojo/upstream measurement on {tuple(r['shape'])}"
+                + (f" ({'; '.join(errs)})" if errs else "")
+            )
         else:
             gap = abs(ratio - 1) * 100
             worst = max(worst, ratio)
@@ -245,16 +303,23 @@ def _aggregate(rows: list[dict]) -> None:
                 verdict = "faster"
             else:
                 verdict = "SLOWER"
-                Gate.fail(f"perf regression on {tuple(r['shape'])}: {ratio:.3f}x "
-                          f"(gap {gap:.1f}% > spread {spread:.1f}%)")
-        print(f"  {str(tuple(r['shape'])):>18} | {mojo:9.2f} | {up:9.2f} | "
-              f"{ratio:6.3f}x | {spread:6.1f}% | {verdict}")
+                Gate.fail(
+                    f"perf regression on {tuple(r['shape'])}: {ratio:.3f}x "
+                    f"(gap {gap:.1f}% > spread {spread:.1f}%)"
+                )
+        print(
+            f"  {str(tuple(r['shape'])):>18} | {mojo:9.2f} | {up:9.2f} | "
+            f"{ratio:6.3f}x | {spread:6.1f}% | {verdict}"
+        )
     print("  " + "-" * 78)
     if worst == 0.0:
         print("  no usable mojo/upstream comparison — see [FAIL] lines above")
     else:
-        tail = ("(within 3% across all shapes — PASS)" if worst <= 1.03
-                else "(REVIEW: a shape exceeds 1.03x)")
+        tail = (
+            "(within 3% across all shapes — PASS)"
+            if worst <= 1.03
+            else "(REVIEW: a shape exceeds 1.03x)"
+        )
         print(f"  worst mojo/upstream ratio: {worst:.3f}x  {tail}")
 
 
@@ -262,15 +327,17 @@ def _aggregate(rows: list[dict]) -> None:
 # (d) ncu profiler pass (ephemeral via pixi exec).
 # --------------------------------------------------------------------------
 
-_NCU_METRICS = ",".join([
-    "gpu__time_duration.avg",
-    "launch__waves_per_multiprocessor",
-    "sm__throughput.avg.pct_of_peak_sustained_elapsed",
-    "dram__throughput.avg.pct_of_peak_sustained_elapsed",
-    "l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum",
-    "smsp__inst_executed_op_shared_st.sum",
-    "smsp__inst_executed_op_shared_ld.sum",
-])
+_NCU_METRICS = ",".join(
+    [
+        "gpu__time_duration.avg",
+        "launch__waves_per_multiprocessor",
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+        "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+        "l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum",
+        "smsp__inst_executed_op_shared_st.sum",
+        "smsp__inst_executed_op_shared_ld.sum",
+    ]
+)
 
 
 def _ncu_cmd() -> list[str] | None:
@@ -293,11 +360,32 @@ def profiler(fn, dtype, canon, skip) -> None:
         warn("(the raw-mode driver 'bench.py ... --measure raw' is ready for it.)")
         return
     print(f"profiler: {' '.join(ncu)}")
-    cmd = [*ncu, "--target-processes", "all", "--launch-skip", "10",
-           "--launch-count", "5", "--metrics", _NCU_METRICS,
-           *UV, str(REPO / "benchmarks" / "bench.py"), fn, "--shape", canon,
-           "--dtype", dtype, "--impl", "mojo", "--measure", "raw",
-           "--iters", "30", "--warmup", "10"]
+    cmd = [
+        *ncu,
+        "--target-processes",
+        "all",
+        "--launch-skip",
+        "10",
+        "--launch-count",
+        "5",
+        "--metrics",
+        _NCU_METRICS,
+        *UV,
+        str(REPO / "scripts" / "bench.py"),
+        fn,
+        "--shape",
+        canon,
+        "--dtype",
+        dtype,
+        "--impl",
+        "mojo",
+        "--measure",
+        "raw",
+        "--iters",
+        "30",
+        "--warmup",
+        "10",
+    ]
     if run(cmd).returncode != 0:
         warn("ncu run failed (perf-counter perms? needs root/CAP_SYS_ADMIN)")
 
@@ -312,7 +400,7 @@ def assembly(fn, dtype, canon, sm, sm_a, refresh_reference) -> None:
     ref_dir = REPO / "reference_assembly" / "nvidia"
     asm_dir.mkdir(parents=True, exist_ok=True)
     ref_dir.mkdir(parents=True, exist_ok=True)
-    tools = str(REPO / "scripts" / "asm_tools.py")
+    tools = str(REPO / "scripts" / "_asm_tools.py")
 
     section("(e) dump our PTX/SASS -> assembly/nvidia/")
     for stale in asm_dir.glob(f"{SUBPKG[fn]}__*.ptx"):
@@ -320,10 +408,27 @@ def assembly(fn, dtype, canon, sm, sm_a, refresh_reference) -> None:
     env = os.environ.copy()
     env["CAUSAL_CONV1D_DUMP_ASM"] = str(asm_dir)
     dump = run(
-        [*UV, str(REPO / "benchmarks" / "bench.py"), fn, "--shape", canon,
-         "--dtype", dtype, "--impl", "mojo", "--measure", "raw",
-         "--iters", "1", "--warmup", "0", "--runs", "1"],
-        env=env, capture=True,
+        [
+            *UV,
+            str(REPO / "scripts" / "bench.py"),
+            fn,
+            "--shape",
+            canon,
+            "--dtype",
+            dtype,
+            "--impl",
+            "mojo",
+            "--measure",
+            "raw",
+            "--iters",
+            "1",
+            "--warmup",
+            "0",
+            "--runs",
+            "1",
+        ],
+        env=env,
+        capture=True,
     )
     ptxs = sorted(asm_dir.glob(f"{SUBPKG[fn]}__*.ptx"), key=lambda p: p.stat().st_mtime)
     if dump.returncode != 0 or not ptxs:
@@ -337,7 +442,10 @@ def assembly(fn, dtype, canon, sm, sm_a, refresh_reference) -> None:
         Gate.fail("PTX->SASS failed")
 
     section("(g) ptxas -v spill / regalloc canary")
-    if run([*UV, tools, "spill", ptx, "--arch", sm_a, "--max-spill", "0"]).returncode != 0:
+    if (
+        run([*UV, tools, "spill", ptx, "--arch", sm_a, "--max-spill", "0"]).returncode
+        != 0
+    ):
         Gate.fail("spill canary: register spills detected")
 
     section("(f) instruction-mix histogram vs upstream reference")
@@ -361,10 +469,25 @@ def assembly(fn, dtype, canon, sm, sm_a, refresh_reference) -> None:
 
 def walltime(fn, dtype, canon, runs, clock, baseline_flags) -> None:
     section("(h) end-to-end wall-clock (torch.utils.benchmark, auto cpu<->gpu sync)")
-    cmd = [*taskset_prefix(), *UV, str(REPO / "benchmarks" / "bench.py"), fn,
-           "--shape", canon, "--dtype", dtype, "--impl", "all",
-           "--measure", "walltime", "--runs", str(runs),
-           "--clock-locked", clock, *baseline_flags]
+    cmd = [
+        *taskset_prefix(),
+        *UV,
+        str(REPO / "scripts" / "bench.py"),
+        fn,
+        "--shape",
+        canon,
+        "--dtype",
+        dtype,
+        "--impl",
+        "all",
+        "--measure",
+        "walltime",
+        "--runs",
+        str(runs),
+        "--clock-locked",
+        clock,
+        *baseline_flags,
+    ]
     if run(cmd).returncode != 0:
         warn("walltime run failed")
 
@@ -375,7 +498,9 @@ def walltime(fn, dtype, canon, runs, clock, baseline_flags) -> None:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--full", action="store_true", help="full tier (task gate)")
     p.add_argument("--fn", choices=("fwd", "bwd", "update", "all"), default="fwd")
     p.add_argument("--dtype", default="fp16")
@@ -392,13 +517,17 @@ def main() -> int:
     fns = ["fwd", "bwd", "update"] if args.fn == "all" else [args.fn]
     runs = 5 if args.full else 3
     # Full tier re-seeds the baseline (authoritative); quick reuses the cache.
-    baseline_flags = ["--refresh-baseline"] if (args.full or args.refresh_baseline) else []
+    baseline_flags = (
+        ["--refresh-baseline"] if (args.full or args.refresh_baseline) else []
+    )
 
     gpu = nvidia_smi("name")
     cc = nvidia_smi("compute_cap").replace(".", "")
     sm, sm_a = f"sm_{cc}", f"sm_{cc}a"
-    print(f"master_bench_nvidia: fn={args.fn} tier={tier} dtype={args.dtype} "
-          f"gpu='{gpu}' arch={sm}/{sm_a}")
+    print(
+        f"master_bench_nvidia: fn={args.fn} tier={tier} dtype={args.dtype} "
+        f"gpu='{gpu}' arch={sm}/{sm_a}"
+    )
 
     clock, locked = lock_clocks(not args.no_lock)
     if locked:
@@ -434,7 +563,9 @@ def main() -> int:
     if Gate.failed:
         print(f"ISSUES — one or more gates failed above (fn={args.fn} tier={tier})")
         return 1
-    print(f"PASS — correctness, perf, and spill canary all green (fn={args.fn} tier={tier})")
+    print(
+        f"PASS — correctness, perf, and spill canary all green (fn={args.fn} tier={tier})"
+    )
     return 0
 
 

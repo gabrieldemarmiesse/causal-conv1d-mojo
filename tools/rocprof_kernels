@@ -34,7 +34,7 @@ ARGS+=(--no-cache)
 
 exec flock /tmp/.gpu_bench_lock bash -c "
     rocprofv3 --kernel-trace --stats -f csv -d '$outdir' -- \
-        '$repo/.venv/bin/python' '$repo/benchmarks/bench.py' $(printf ' %q' "${ARGS[@]}") \
+        '$repo/.venv/bin/python' '$repo/scripts/bench.py' $(printf ' %q' "${ARGS[@]}") \
         2> '$outdir/rocprof.log'
     rc=\$?
     if [ \$rc -ne 0 ]; then

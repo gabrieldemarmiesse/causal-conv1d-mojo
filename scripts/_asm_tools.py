@@ -102,7 +102,9 @@ _REG_RE = re.compile(r"Used\s+(\d+)\s+registers")
 def cmd_spill(args) -> int:
     ptxas = _triton_bin("ptxas")
     # ptxas needs a real output target; throw the cubin away.
-    r = _run([ptxas, "-v", f"-arch={args.arch}", "-O3", str(args.ptx), "-o", "/dev/null"])
+    r = _run(
+        [ptxas, "-v", f"-arch={args.arch}", "-O3", str(args.ptx), "-o", "/dev/null"]
+    )
     info = r.stderr + r.stdout
     if r.returncode != 0:
         sys.stderr.write(info)
@@ -186,11 +188,15 @@ def cmd_upstream_sass(args) -> int:
         )
     idx = args.index or 0
     if not (0 <= idx < len(matches)):
-        raise SystemExit(f"--index {idx} out of range; {len(matches)} kernel(s) matched")
+        raise SystemExit(
+            f"--index {idx} out of range; {len(matches)} kernel(s) matched"
+        )
     name, body = matches[idx]
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     # Record the selected mangled name as a header comment for provenance.
-    Path(args.out).write_text(f"// selected: {name}\n// from: {Path(so).name}\n{body}\n")
+    Path(args.out).write_text(
+        f"// selected: {name}\n// from: {Path(so).name}\n{body}\n"
+    )
     print(f"wrote {args.out} ({len(body.splitlines())} SASS lines)\n  kernel: {name}")
     return 0
 
@@ -243,11 +249,14 @@ def cmd_histogram(args) -> int:
     rows = sorted(keys, key=lambda k: max(ours[k], theirs[k]), reverse=True)
     if args.top:
         rows = rows[: args.top]
+
     def _lbl(p):
         q = Path(p)
         return f"{q.parent.name}/{q.name}"
 
-    print(f"instruction-mix histogram  (ours={_lbl(args.ours)}  theirs={_lbl(args.theirs)})")
+    print(
+        f"instruction-mix histogram  (ours={_lbl(args.ours)}  theirs={_lbl(args.theirs)})"
+    )
     print(f"  {'opcode':>14} | {'ours':>6} | {'theirs':>6} | {'delta':>6}")
     print("  " + "-" * 44)
     for k in rows:
@@ -265,7 +274,9 @@ def cmd_histogram(args) -> int:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("sass", help="PTX -> SASS via ptxas+nvdisasm")
@@ -277,14 +288,21 @@ def main(argv=None) -> int:
     s = sub.add_parser("spill", help="ptxas -v spill/regalloc canary")
     s.add_argument("ptx")
     s.add_argument("--arch", default="sm_90a")
-    s.add_argument("--max-spill", type=int, default=0, help="max total spill bytes before failing")
+    s.add_argument(
+        "--max-spill", type=int, default=0, help="max total spill bytes before failing"
+    )
     s.set_defaults(func=cmd_spill)
 
     s = sub.add_parser("upstream-sass", help="extract upstream SASS via cuobjdump")
     s.add_argument("fn", choices=("fwd", "bwd", "update"))
     s.add_argument("out")
     s.add_argument("--arch", default="sm_90")
-    s.add_argument("--match", action="append", default=[], help="extra mangled-name substring (repeatable)")
+    s.add_argument(
+        "--match",
+        action="append",
+        default=[],
+        help="extra mangled-name substring (repeatable)",
+    )
     s.add_argument("--index", type=int, default=None, help="pick the Nth match")
     s.add_argument("--list", action="store_true", help="list matching kernels and exit")
     s.set_defaults(func=cmd_upstream_sass)

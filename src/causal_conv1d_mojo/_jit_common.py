@@ -237,7 +237,7 @@ def _maybe_add_asm_dump(
     shells out to a hard-coded ``/usr/local/cuda/bin/nvdisasm`` and aborts
     if it's missing. The asm tooling derives SASS (and the ptxas ``-v``
     spill canary) from this PTX with a portable ``ptxas``/``nvdisasm``
-    instead — see ``scripts/asm_tools.py``.
+    instead — see ``scripts/_asm_tools.py``.
 
     The file lands at ``<dir>/<subpkg>__<mod_name>.ptx`` — one per variant,
     no ``%`` placeholder collisions. The path must be absolute (the

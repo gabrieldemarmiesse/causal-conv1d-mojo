@@ -40,17 +40,17 @@ assembly diffing.
 Examples
 --------
     # mojo-only fwd kernel time on one shape (fast inner loop)
-    python benchmarks/bench.py fwd --shape 1,4096,2048,4 --impl mojo
+    python scripts/bench.py fwd --shape 1,4096,2048,4 --impl mojo
 
     # mojo vs upstream vs pytorch, kernel time, 5 runs, JSON for tooling
-    python benchmarks/bench.py fwd --shape 1,1024,2048,4 \
+    python scripts/bench.py fwd --shape 1,1024,2048,4 \
         --impl all --runs 5 --json
 
     # end-to-end wall-clock (torch.utils.benchmark) for the update kernel
-    python benchmarks/bench.py update --shape 16,2048 --measure walltime
+    python scripts/bench.py update --shape 16,2048 --measure walltime
 
     # raw loop for ncu to wrap (no profiler overhead)
-    python benchmarks/bench.py bwd --shape 4,4096,2048,4 \
+    python scripts/bench.py bwd --shape 4,4096,2048,4 \
         --impl mojo --measure raw
 """
 
@@ -70,7 +70,6 @@ import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -80,6 +79,8 @@ from causal_conv1d_mojo.reference import (
     causal_conv1d_ref,
     causal_conv1d_update_ref,
 )
+
+from _baseline import _BASELINE_DIR, BaselineCache
 
 # ---------------------------------------------------------------------------
 # Implementations.
@@ -390,7 +391,9 @@ def _bwd_callable(impl: str, cfg: Config) -> Callable[[], Any]:
         x_ = t["x"].detach().requires_grad_()
         w_ = t["weight"].detach().requires_grad_()
         b_ = t["bias"].detach().requires_grad_() if t["bias"] is not None else None
-        kw = dict(bias=b_, initial_states=t["initial_states"], activation=cfg.activation)
+        kw = dict(
+            bias=b_, initial_states=t["initial_states"], activation=cfg.activation
+        )
         if use_seq_idx:
             kw["seq_idx"] = t["seq_idx"]
         out = fwd(x_, w_, **kw)
@@ -406,7 +409,9 @@ def _bwd_callable(impl: str, cfg: Config) -> Callable[[], Any]:
         x_ = t["x"].detach().requires_grad_()
         w_ = t["weight"].detach().requires_grad_()
         b_ = t["bias"].detach().requires_grad_() if t["bias"] is not None else None
-        kw = dict(bias=b_, initial_states=t["initial_states"], activation=cfg.activation)
+        kw = dict(
+            bias=b_, initial_states=t["initial_states"], activation=cfg.activation
+        )
         if use_seq_idx:
             kw["seq_idx"] = t["seq_idx"]
         out = fwd(x_, w_, **kw)
@@ -419,7 +424,9 @@ def _bwd_callable(impl: str, cfg: Config) -> Callable[[], Any]:
 
 def _update_callable(impl: str, cfg: Config) -> Callable[[], Any]:
     t = _make_update_inputs(cfg)
-    kw = dict(bias=t["bias"], activation=cfg.activation, cache_seqlens=t["cache_seqlens"])
+    kw = dict(
+        bias=t["bias"], activation=cfg.activation, cache_seqlens=t["cache_seqlens"]
+    )
     if impl == "mojo":
         fn = causal_conv1d_mojo.causal_conv1d_update
         kw["conv_state_indices"] = t["conv_state_indices"]
@@ -546,18 +553,12 @@ def measure_raw(
 
 
 # ---------------------------------------------------------------------------
-# Baseline cache.
+# Measurement result type.
 #
-# The mojo kernel is the moving target; upstream + pytorch are stable on a
-# pinned baseline with locked clocks, so we measure them once and reuse.
-# Key: (baseline_tag, fn, shape, config, measure, env signature). The env
-# signature folds in the GPU name and the clock-lock state, so unlocking
-# the GPU or moving to different hardware auto-invalidates the cache (same
-# discipline as the JIT cache). Stored under benchmarks/baselines/ (which
-# is .gitignored — these numbers are machine + clock specific).
+# The JSON baseline cache (upstream/pytorch are stable, mojo is the moving
+# target) lives in `_baseline.BaselineCache`; it trades in plain run-lists,
+# which we wrap in / unwrap from `Measurement` at the call site below.
 # ---------------------------------------------------------------------------
-
-_BASELINE_DIR = Path(__file__).resolve().parent / "baselines"
 
 
 @dataclass
@@ -575,60 +576,6 @@ class Measurement:
         if len(self.runs_us) < 2 or self.min_us == 0:
             return 0.0
         return (max(self.runs_us) - min(self.runs_us)) / self.min_us * 100.0
-
-
-class BaselineCache:
-    """Memoizes stable baseline (upstream/pytorch) measurements to JSON.
-
-    The version tag is keyed *per impl*: the `upstream` records carry the
-    upstream wheel version (so an upstream bump invalidates them), while
-    `pytorch` records carry a stable constant — otherwise a pytorch entry
-    measured during an `--impl all` run (tag=upstream version) would miss
-    on a later `--impl mojo,pytorch` run (no upstream → different tag).
-    """
-
-    def __init__(self, *, fn: str, measure: str, env_sig: dict[str, str], tags: dict[str, str]):
-        _BASELINE_DIR.mkdir(parents=True, exist_ok=True)
-        self.path = _BASELINE_DIR / f"{fn}_{measure}.json"
-        self.env_sig = env_sig
-        self.tags = tags
-        self._records: list[dict] = []
-        if self.path.exists():
-            try:
-                self._records = json.loads(self.path.read_text()).get("records", [])
-            except json.JSONDecodeError:
-                self._records = []
-
-    def _key(self, impl: str, shape: tuple, config: dict) -> tuple:
-        return (
-            self.tags.get(impl, "n/a"),
-            impl,
-            tuple(shape),
-            tuple(sorted(config.items())),
-            tuple(sorted(self.env_sig.items())),
-        )
-
-    def get(self, impl: str, shape: tuple, config: dict) -> Measurement | None:
-        key = self._key(impl, shape, config)
-        for r in self._records:
-            if tuple(r["key"]) == _jsonable(key):
-                m = Measurement(runs_us=r["runs_us"], from_cache=True)
-                return m
-        return None
-
-    def put(self, impl: str, shape: tuple, config: dict, m: Measurement) -> None:
-        key = _jsonable(self._key(impl, shape, config))
-        self._records = [r for r in self._records if tuple(r["key"]) != key]
-        self._records.append({"key": list(key), "runs_us": m.runs_us})
-        self.path.write_text(
-            json.dumps({"records": self._records}, indent=2) + "\n"
-        )
-
-
-def _jsonable(key: tuple) -> tuple:
-    """Round-trip a key through JSON-native types so cached and live keys
-    compare equal (JSON turns tuples into lists, ints stay ints)."""
-    return tuple(json.loads(json.dumps(list(key))))
 
 
 # ---------------------------------------------------------------------------
@@ -663,17 +610,28 @@ def _workload_argv(cfg: Config, args, *, iters: int, warmup: int) -> list[str]:
         sys.executable,
         os.path.abspath(__file__),
         cfg.fn,
-        "--device", "mps",
-        "--measure", "raw",
-        "--impl", "mojo",
-        "--dtype", cfg.dtype,
-        "--width", str(cfg.width),
-        "--activation", cfg.activation or "none",
-        "--iters", str(iters),
-        "--warmup", str(warmup),
-        "--runs", "1",
-        "--seed", str(cfg.seed),
-        "--shape", _shape_str(cfg.shape),
+        "--device",
+        "mps",
+        "--measure",
+        "raw",
+        "--impl",
+        "mojo",
+        "--dtype",
+        cfg.dtype,
+        "--width",
+        str(cfg.width),
+        "--activation",
+        cfg.activation or "none",
+        "--iters",
+        str(iters),
+        "--warmup",
+        str(warmup),
+        "--runs",
+        "1",
+        "--seed",
+        str(cfg.seed),
+        "--shape",
+        _shape_str(cfg.shape),
     ]
     if not cfg.has_bias:
         argv.append("--no-bias")
@@ -698,8 +656,12 @@ def _xctrace_export(trace: str, schema: str) -> bytes:
     """`xctrace export` for one trace table; returns XML (raises on failure)."""
     out = subprocess.run(
         [
-            "xctrace", "export", "--input", trace,
-            "--xpath", f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]',
+            "xctrace",
+            "export",
+            "--input",
+            trace,
+            "--xpath",
+            f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]',
         ],
         capture_output=True,
     )
@@ -870,8 +832,15 @@ def _record_trace(child_argv: list[str], trace: str, *, attempts: int = 6) -> No
             shutil.rmtree(trace, ignore_errors=True)
         subprocess.run(
             [
-                "xctrace", "record", "--template", "Metal System Trace",
-                "--output", trace, "--launch", "--", *child_argv,
+                "xctrace",
+                "record",
+                "--template",
+                "Metal System Trace",
+                "--output",
+                trace,
+                "--launch",
+                "--",
+                *child_argv,
             ],
             env=env,
         )  # ignore returncode: xctrace crashes on finalize but may still write
@@ -905,7 +874,8 @@ def _pick_headline(groups: list[dict]) -> dict | None:
     if not kernel:
         # Fall back to any compute-channel encoder that isn't a copy.
         kernel = [
-            g for g in groups
+            g
+            for g in groups
             if "compute" in g["channel"].lower() and "blit" not in g["label"].lower()
         ]
     if not kernel:
@@ -913,7 +883,9 @@ def _pick_headline(groups: list[dict]) -> dict | None:
     return max(kernel, key=lambda g: (_CLOCK_RANK.get(g["clock"], -1), g["count"]))
 
 
-def _summarize_trace(trace: str, *, process: str = "python") -> tuple[dict, list[float]]:
+def _summarize_trace(
+    trace: str, *, process: str = "python"
+) -> tuple[dict, list[float]]:
     """Parse the trace into a structured Instruments analysis.
 
     Returns (analysis_dict, headline_durs_us) where the analysis lists every
@@ -1090,7 +1062,9 @@ def run(args) -> dict:
     cache = None
     if args.measure in ("kernel", "walltime") and not args.no_baseline_cache:
         cache = BaselineCache(
-            fn=args.fn, measure=args.measure, env_sig=env_sig, tags=tags
+            path=_BASELINE_DIR / f"{args.fn}_{args.measure}.json",
+            env_sig=env_sig,
+            tags=tags,
         )
 
     results: dict[str, Measurement] = {}
@@ -1104,15 +1078,15 @@ def run(args) -> dict:
             cache is not None
             and is_baseline
             and not args.refresh_baseline
-            and (hit := cache.get(impl, shape, cfg.as_dict())) is not None
+            and (hit := cache.get_runs(impl, shape, cfg.as_dict())) is not None
         ):
-            results[impl] = hit
+            results[impl] = Measurement(runs_us=hit, from_cache=True)
             continue
 
         m = _measure_impl(impl, cfg, args)
         results[impl] = m
         if cache is not None and is_baseline:
-            cache.put(impl, shape, cfg.as_dict(), m)
+            cache.put_runs(impl, shape, cfg.as_dict(), m.runs_us)
 
     return _assemble_report(cfg, args, env_sig, tag, results)
 
@@ -1128,12 +1102,17 @@ def _measure_impl(impl: str, cfg: Config, args) -> Measurement:
         for _ in range(args.runs):
             if args.measure == "kernel":
                 us = measure_kernel(
-                    call, classify, iters=args.iters, warmup=args.warmup,
+                    call,
+                    classify,
+                    iters=args.iters,
+                    warmup=args.warmup,
                     device=cfg.device,
                 )
             elif args.measure == "walltime":
                 us = measure_walltime(
-                    call, min_run_time=args.min_run_time, warmup=args.warmup,
+                    call,
+                    min_run_time=args.min_run_time,
+                    warmup=args.warmup,
                     device=cfg.device,
                 )
             else:  # raw
@@ -1162,7 +1141,9 @@ def _assemble_report(cfg, args, env_sig, tag, results: dict[str, Measurement]) -
     if "mojo" in results and results["mojo"].runs_us:
         for base in ("upstream", "pytorch"):
             if base in results and results[base].min_us > 0:
-                ratios[f"mojo_over_{base}"] = results["mojo"].min_us / results[base].min_us
+                ratios[f"mojo_over_{base}"] = (
+                    results["mojo"].min_us / results[base].min_us
+                )
     return {
         "fn": cfg.fn,
         "shape": list(cfg.shape),
@@ -1185,8 +1166,18 @@ def _assemble_report(cfg, args, env_sig, tag, results: dict[str, Measurement]) -
 
 def _print_human(rep: dict) -> None:
     cfg = rep["config"]
-    flags = [k for k in ("bias", "seq_idx", "initial_states", "return_final_states",
-                         "cache_seqlens", "conv_state_indices") if cfg.get(k)]
+    flags = [
+        k
+        for k in (
+            "bias",
+            "seq_idx",
+            "initial_states",
+            "return_final_states",
+            "cache_seqlens",
+            "conv_state_indices",
+        )
+        if cfg.get(k)
+    ]
     print(
         f"{rep['fn'].upper()} | shape={tuple(rep['shape'])} | dtype={cfg['dtype']} "
         f"| act={cfg['activation']} | {'+'.join(flags) or 'no-flags'} "
@@ -1215,7 +1206,9 @@ def _print_human(rep: dict) -> None:
 def _print_metal_analysis(a: dict) -> None:
     """Print the per-encoder GPU-time breakdown read back from the trace."""
     print()
-    print(f"  METAL INSTRUMENTS ANALYSIS  (Metal System Trace, process={a['process']!r})")
+    print(
+        f"  METAL INSTRUMENTS ANALYSIS  (Metal System Trace, process={a['process']!r})"
+    )
     if not a["clock_windows"]:
         print("    (no gpu-performance-state-intervals in trace; clock state unknown)")
     hdr = (
@@ -1300,45 +1293,100 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("fn", choices=("fwd", "bwd", "update"), nargs="?", default=None,
-                   help="function to benchmark")
-    p.add_argument("--kind", choices=("fwd", "bwd", "update"), default=None,
-                   help="legacy alias for the positional function name")
+    p.add_argument(
+        "fn",
+        choices=("fwd", "bwd", "update"),
+        nargs="?",
+        default=None,
+        help="function to benchmark",
+    )
+    p.add_argument(
+        "--kind",
+        choices=("fwd", "bwd", "update"),
+        default=None,
+        help="legacy alias for the positional function name",
+    )
     p.add_argument(
         "--shape",
         help="B,D,L,W for fwd/bwd (W optional, use --width); B,D for update",
     )
     p.add_argument("--dtype", choices=tuple(_DTYPES), default="fp16")
-    p.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto",
-                   help="auto: cuda if present, else mps (Apple), else cpu")
-    p.add_argument("--width", type=int, default=4, help="conv width (update; fwd/bwd take it from --shape)")
-    p.add_argument("--state-len", type=int, default=0, help="update conv_state length (default width-1)")
+    p.add_argument(
+        "--device",
+        choices=("auto", "cuda", "mps", "cpu"),
+        default="auto",
+        help="auto: cuda if present, else mps (Apple), else cpu",
+    )
+    p.add_argument(
+        "--width",
+        type=int,
+        default=4,
+        help="conv width (update; fwd/bwd take it from --shape)",
+    )
+    p.add_argument(
+        "--state-len",
+        type=int,
+        default=0,
+        help="update conv_state length (default width-1)",
+    )
     p.add_argument("--activation", choices=("none", "silu", "swish"), default="silu")
     p.add_argument("--no-bias", action="store_true")
     # fwd/bwd function-argument flags
-    p.add_argument("--seq-idx", action="store_true", help="packed-sequence mask (fwd/bwd)")
-    p.add_argument("--initial-states", action="store_true", help="prepend conv state (fwd/bwd)")
-    p.add_argument("--return-final-states", action="store_true", help="emit final states (fwd)")
-    p.add_argument("--channel-last", action="store_true",
-                   help="channel-last x layout (required by upstream for seq-idx/initial-states)")
+    p.add_argument(
+        "--seq-idx", action="store_true", help="packed-sequence mask (fwd/bwd)"
+    )
+    p.add_argument(
+        "--initial-states", action="store_true", help="prepend conv state (fwd/bwd)"
+    )
+    p.add_argument(
+        "--return-final-states", action="store_true", help="emit final states (fwd)"
+    )
+    p.add_argument(
+        "--channel-last",
+        action="store_true",
+        help="channel-last x layout (required by upstream for seq-idx/initial-states)",
+    )
     # update function-argument flags
-    p.add_argument("--cache-seqlens", action="store_true", help="circular conv_state (update)")
-    p.add_argument("--conv-state-indices", action="store_true", help="paged conv_state (update)")
+    p.add_argument(
+        "--cache-seqlens", action="store_true", help="circular conv_state (update)"
+    )
+    p.add_argument(
+        "--conv-state-indices", action="store_true", help="paged conv_state (update)"
+    )
     # impls + measurement
-    p.add_argument("--impl", default="mojo",
-                   help="comma list of {mojo,upstream,pytorch}, or 'all' / 'both' (legacy)")
+    p.add_argument(
+        "--impl",
+        default="mojo",
+        help="comma list of {mojo,upstream,pytorch}, or 'all' / 'both' (legacy)",
+    )
     p.add_argument("--measure", choices=("kernel", "walltime", "raw"), default="kernel")
     p.add_argument("--iters", type=int, default=100, help="inner iters (kernel/raw)")
     p.add_argument("--warmup", type=int, default=25)
-    p.add_argument("--runs", type=int, default=3, help="repeat measurements (>=3 for min+spread)")
-    p.add_argument("--min-run-time", type=float, default=0.5, help="walltime autorange budget (s)")
+    p.add_argument(
+        "--runs", type=int, default=3, help="repeat measurements (>=3 for min+spread)"
+    )
+    p.add_argument(
+        "--min-run-time", type=float, default=0.5, help="walltime autorange budget (s)"
+    )
     p.add_argument("--seed", type=int, default=0)
     # baseline cache
-    p.add_argument("--no-baseline-cache", "--no-cache", action="store_true",
-                   help="always re-measure baselines (--no-cache is a legacy alias)")
-    p.add_argument("--refresh-baseline", action="store_true", help="re-measure + re-seed baselines")
-    p.add_argument("--baseline-tag", default=None, help="override baseline identity (default: upstream version)")
-    p.add_argument("--clock-locked", default=None, help="locked clock MHz (folded into cache key)")
+    p.add_argument(
+        "--no-baseline-cache",
+        "--no-cache",
+        action="store_true",
+        help="always re-measure baselines (--no-cache is a legacy alias)",
+    )
+    p.add_argument(
+        "--refresh-baseline", action="store_true", help="re-measure + re-seed baselines"
+    )
+    p.add_argument(
+        "--baseline-tag",
+        default=None,
+        help="override baseline identity (default: upstream version)",
+    )
+    p.add_argument(
+        "--clock-locked", default=None, help="locked clock MHz (folded into cache key)"
+    )
     # output
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     return p
@@ -1350,7 +1398,9 @@ def main(argv: list[str] | None = None) -> None:
     # Resolve the function from the positional arg or the legacy --kind alias.
     args.fn = args.fn or args.kind
     if args.fn is None:
-        parser.error("a function is required: pass it positionally (e.g. `fwd`) or via --kind")
+        parser.error(
+            "a function is required: pass it positionally (e.g. `fwd`) or via --kind"
+        )
     rep = run(args)
     # The traced Apple workload exists only to drive the kernel under
     # xctrace; its own report is noise inside the recording. Stay silent

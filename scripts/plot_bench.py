@@ -301,7 +301,7 @@ def main() -> None:
     gpu_slug = _device_slug(gpu_name)
     labels = [f"({b},{d},{l},{w})" for b, d, l, w in SHAPES]
 
-    cache = BaselineCache(__file__)
+    cache = BaselineCache.for_plot(__file__)
 
     fwd_mojo, fwd_up, fwd_pt, fwd_pt_c = [], [], [], []
     bwd_mojo, bwd_up, bwd_pt, bwd_pt_c = [], [], [], []

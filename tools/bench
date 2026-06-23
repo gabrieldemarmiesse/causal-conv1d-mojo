@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Single-shape / single-impl kernel-time bench, with the GPU lock applied.
 #
-# Thin wrapper around the unified driver `benchmarks/bench.py` (all flags
+# Thin wrapper around the unified driver `scripts/bench.py` (all flags
 # are forwarded). The function is a positional arg; `--impl`, `--shape`,
 # `--measure`, `--iters`, `--warmup` are the common knobs.
 #
@@ -21,4 +21,4 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(dirname "$here")"
 exec flock /tmp/.gpu_bench_lock \
-    uv run python "$repo/benchmarks/bench.py" "$@"
+    uv run python "$repo/scripts/bench.py" "$@"
