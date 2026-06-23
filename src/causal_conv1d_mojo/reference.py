@@ -42,15 +42,27 @@ def causal_conv1d_ref(
     x = x.to(weight.dtype)
     seqlen = x.shape[-1]
     dim, width = weight.shape
+    # Use unfold + matmul instead of F.conv1d(groups=dim) to avoid MIOpen on
+    # AMD ROCm — F.conv1d dispatches to MIOpen which requires a writable user
+    # kernel-cache DB; when that DB is read-only the call raises
+    # miopenStatusInternalError.  The unfold path is numerically identical and
+    # backend-agnostic.
     if initial_states is None:
-        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
+        x_in = F.pad(x, (width - 1, 0))  # left-pad only: (batch, dim, seqlen+width-1)
     else:
-        x = torch.cat([initial_states, x], dim=-1)
-        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
+        x_in = torch.cat([initial_states, x], dim=-1)  # (batch, dim, width-1+seqlen)
+    x_unfolded = x_in.unfold(-1, width, 1)  # (batch, dim, seqlen, width)
+    out = (x_unfolded * weight.unsqueeze(0).unsqueeze(2)).sum(
+        -1
+    )  # (batch, dim, seqlen)
+    if bias is not None:
+        out = out + bias.view(1, -1, 1)
     out = out[..., :seqlen]
     if return_final_states:
-        # (batch, dim, width - 1)
-        final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(dtype_in)
+        # (batch, dim, width - 1): last (width-1) elements of the extended sequence.
+        # x_in[-:-(width-1)] is equivalent to the original F.pad(x, (width-1-seqlen, 0))
+        # for both the padded and initial_states cases (verified by case analysis).
+        final_states = x_in[:, :, -(width - 1) :].to(dtype_in)
         if final_states_out is not None:
             final_states_out.copy_(final_states)
         else:
@@ -108,9 +120,16 @@ def causal_conv1d_update_ref(
         ) + cache_seqlens.unsqueeze(1)
         copy_idx = torch.remainder(copy_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
         conv_state.scatter_(2, copy_idx, x)
-    out = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0, groups=dim)[
-        :, :, -seqlen:
-    ]
+    # Use unfold + einsum instead of F.conv1d(groups=dim, padding=0) to avoid
+    # the AMD ROCm Triton dispatch of the grouped unpadded conv, which gives
+    # wrong fp16/fp32 results on gfx942 (MI300A).
+    x_unfolded = x_new.unfold(-1, width, 1)  # (batch, dim, L-width+1, width)
+    out = (x_unfolded * weight.unsqueeze(0).unsqueeze(2)).sum(
+        -1
+    )  # (batch, dim, L-width+1)
+    if bias is not None:
+        out = out + bias.view(1, -1, 1)
+    out = out[:, :, -seqlen:]
     if unsqueeze:
         out = out.squeeze(-1)
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)

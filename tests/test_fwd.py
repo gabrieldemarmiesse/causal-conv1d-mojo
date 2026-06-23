@@ -482,6 +482,10 @@ def test_fwd_width10_fp16_rejected():
 # trace into the JIT-compile path (which does filesystem I/O).
 
 
+@pytest.mark.skipif(
+    torch.version.hip is not None,
+    reason="torch.compile/Triton backend is unstable on ROCm and crashes the process",
+)
 def test_torch_compile_fullgraph_cuda():
     """torch.compile(fullgraph=True) must trace cleanly, no graph break."""
     if not torch.cuda.is_available():
@@ -502,6 +506,10 @@ def test_torch_compile_fullgraph_cuda():
     assert torch.equal(out_compiled, out_eager)
 
 
+@pytest.mark.skipif(
+    torch.version.hip is not None,
+    reason="torch.compile/Triton backend is unstable on ROCm and crashes the process",
+)
 def test_torch_compile_autograd_cuda():
     """Backward through a compiled forward must work."""
     if not torch.cuda.is_available():

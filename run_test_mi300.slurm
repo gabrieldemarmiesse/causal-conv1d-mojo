@@ -17,6 +17,12 @@ set -euo pipefail
 # a newer libstdc++ that covers it.
 export LD_LIBRARY_PATH=/opt/software/gcc/13.2.0/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
+# MIOpen writes a per-user SQLite kernel-cache DB.  On some CINES nodes the
+# default path (~/.config/miopen/ or similar) is read-only, causing
+# miopenStatusInternalError whenever a MIOpen-dispatched op (e.g. F.conv1d)
+# is first encountered.  Redirect to /tmp so MIOpen always has a writable DB.
+export MIOPEN_USER_DB_PATH=/tmp/miopen_${SLURM_JOB_ID}
+
 REPO=/lus/scratch/CT10/cad17897/gdemarmiesse/causal-conv1d-mojo
 VENV="$REPO/.venv-rocm"
 
@@ -48,7 +54,7 @@ for i in range(torch.cuda.device_count()):
     print('GPU', i, ':', torch.cuda.get_device_name(i))
 "
 
-echo "=== Running single test ==="
-"$VENV/bin/python" -m pytest "tests/test_fwd.py::test_contiguous[cuda-fp16-None-with_bias-shape0]" -v --no-header -s 2>&1
+echo "=== Running all cuda tests ==="
+"$VENV/bin/python" -m pytest tests/ -v -k "cuda" --no-header 2>&1
 
 echo "=== Done ==="
