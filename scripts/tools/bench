@@ -7,18 +7,18 @@
 #
 # Examples:
 #   # Just the mojo fwd kernel on one shape, 20 iters — fastest feedback loop.
-#   ./tools/bench fwd --impl mojo --shape 1,1024,2048,4 --iters 20
+#   ./scripts/tools/bench fwd --impl mojo --shape 1,1024,2048,4 --iters 20
 #
 #   # Compare mojo vs upstream for the bwd kernel on one shape:
-#   ./tools/bench bwd --impl mojo,upstream --shape 4,2048,2048,4 --iters 50
+#   ./scripts/tools/bench bwd --impl mojo,upstream --shape 4,2048,2048,4 --iters 50
 #
 #   # Update kernel, end-to-end wall-clock:
-#   ./tools/bench update --shape 1,2048 --measure walltime
+#   ./scripts/tools/bench update --shape 1,2048 --measure walltime
 #
 # The legacy `--kind <fn>` / `--impl both` / `--no-cache` flags still work.
 
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(dirname "$here")"
+repo="$(dirname "$(dirname "$here")")"
 exec flock /tmp/.gpu_bench_lock \
     uv run python "$repo/scripts/bench.py" "$@"

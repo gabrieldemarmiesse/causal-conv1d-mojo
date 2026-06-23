@@ -13,8 +13,8 @@ Phases (Phase 1 of the Measurement Protocol):
     b. clear our JIT cache, recompile, correctness suite (quick/full tiers)
     c. benchmark vs cached/refreshed baseline (min + spread, 3% stop-criterion)
     d. ncu profiler pass (ephemeral via `pixi exec`; graceful no-op if absent)
-    e. dump our PTX/SASS to assembly/nvidia/        (committed path)
-    f. side-by-side instruction-mix histogram vs reference_assembly/nvidia/
+    e. dump our PTX/SASS to scripts/assembly/nvidia/        (committed path)
+    f. side-by-side instruction-mix histogram vs reference_scripts/assembly/nvidia/
     g. ptxas -v spill / regalloc canary             (fails loudly on regression)
     h. independent torch.utils.benchmark (walltime) run
 
@@ -396,13 +396,13 @@ def profiler(fn, dtype, canon, skip) -> None:
 
 
 def assembly(fn, dtype, canon, sm, sm_a, refresh_reference) -> None:
-    asm_dir = REPO / "assembly" / "nvidia"
-    ref_dir = REPO / "reference_assembly" / "nvidia"
+    asm_dir = REPO / "scripts" / "assembly" / "nvidia"
+    ref_dir = REPO / "scripts" / "reference_assembly" / "nvidia"
     asm_dir.mkdir(parents=True, exist_ok=True)
     ref_dir.mkdir(parents=True, exist_ok=True)
     tools = str(REPO / "scripts" / "_asm_tools.py")
 
-    section("(e) dump our PTX/SASS -> assembly/nvidia/")
+    section("(e) dump our PTX/SASS -> scripts/assembly/nvidia/")
     for stale in asm_dir.glob(f"{SUBPKG[fn]}__*.ptx"):
         stale.unlink()
     env = os.environ.copy()

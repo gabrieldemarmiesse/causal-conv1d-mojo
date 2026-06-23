@@ -10,17 +10,17 @@
 # Mojo's `DeviceContext` (you'll see "HIP architecture query failed:
 # Failed to initialize HSA runtime"). So this tool runs against
 # --impl upstream by default; pass --impl <whatever> at your own risk.
-# For Mojo kernel timing use ./tools/bench (torch.profiler works fine
+# For Mojo kernel timing use ./scripts/tools/bench (torch.profiler works fine
 # because PyTorch already owns the HSA runtime).
 #
 # Usage:
-#   ./tools/rocprof_kernels --kind fwd --shape 1,1024,2048,4 --iters 100
-#   ./tools/rocprof_kernels --kind bwd --shape 4,2048,2048,4 --iters 100
-#   ./tools/rocprof_kernels --kind update --shape 1,2048 --iters 200
+#   ./scripts/tools/rocprof_kernels --kind fwd --shape 1,1024,2048,4 --iters 100
+#   ./scripts/tools/rocprof_kernels --kind bwd --shape 4,2048,2048,4 --iters 100
+#   ./scripts/tools/rocprof_kernels --kind update --shape 1,2048 --iters 200
 
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(dirname "$here")"
+repo="$(dirname "$(dirname "$here")")"
 outdir="$(mktemp -d /tmp/rocprof_kernels.XXXXXX)"
 
 # Default --impl to upstream (Mojo doesn't survive rocprof instrumentation).

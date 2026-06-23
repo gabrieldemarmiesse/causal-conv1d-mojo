@@ -27,7 +27,7 @@ RUN uv python install 3.13 \
  && uv venv --python 3.13 /opt/venv
 
 COPY --from=builder /out/*.whl /tmp/
-COPY tools/check_wheel/check_cuda.py /app/check_cuda.py
+COPY scripts/tools/check_wheel/check_cuda.py /app/check_cuda.py
 
 RUN uv pip install --python /opt/venv/bin/python \
         /tmp/causal_conv1d_mojo-*.whl \

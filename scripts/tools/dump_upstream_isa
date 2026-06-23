@@ -7,19 +7,19 @@
 # -d` to disassemble. Output goes to /tmp/upstream_isa/.
 #
 # Examples:
-#   ./tools/dump_upstream_isa                  # dump all kernels
-#   ./tools/dump_upstream_isa fwd_kernel       # only kernels matching regex
-#   ./tools/dump_upstream_isa bwd_kernel       # only bwd
-#   ./tools/dump_upstream_isa update_kernel    # only update
+#   ./scripts/tools/dump_upstream_isa                  # dump all kernels
+#   ./scripts/tools/dump_upstream_isa fwd_kernel       # only kernels matching regex
+#   ./scripts/tools/dump_upstream_isa bwd_kernel       # only bwd
+#   ./scripts/tools/dump_upstream_isa update_kernel    # only update
 #
 # The disassembly file (/tmp/upstream_isa/upstream.s) contains all
 # kernels — use `grep -n '<_Z'` to find labels, then read around them.
-# Tip: pair this with `./tools/dump_isa --sub fwd` to compare side by
+# Tip: pair this with `./scripts/tools/dump_isa --sub fwd` to compare side by
 # side.
 
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(dirname "$here")"
+repo="$(dirname "$(dirname "$here")")"
 filter="${1:-}"
 
 so="$repo/.venv/lib/python3.13/site-packages/causal_conv1d_cuda.cpython-313-x86_64-linux-gnu.so"

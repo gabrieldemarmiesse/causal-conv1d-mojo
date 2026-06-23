@@ -9,9 +9,9 @@
 # `scripts/_asm_tools.py sass|spill`.)
 #
 # Usage:
-#   ./tools/dump_isa --sub fwd --shape 1,1024,2048,4
-#   ./tools/dump_isa --sub bwd_full --shape 1,2048,2048,4
-#   ./tools/dump_isa --sub update --shape 1,2048
+#   ./scripts/tools/dump_isa --sub fwd --shape 1,1024,2048,4
+#   ./scripts/tools/dump_isa --sub bwd_full --shape 1,2048,2048,4
+#   ./scripts/tools/dump_isa --sub update --shape 1,2048
 #
 # Extra args after `--` are forwarded to scripts/bench.py.
 
@@ -38,7 +38,7 @@ case "$SUB" in
 esac
 
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(dirname "$here")"
+repo="$(dirname "$(dirname "$here")")"
 outdir="${DUMP_ISA_DIR:-/tmp/mojo_isa}"
 mkdir -p "$outdir"
 rm -f "$outdir/${SUB}__"*.ptx

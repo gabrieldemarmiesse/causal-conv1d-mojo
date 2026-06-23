@@ -4,9 +4,9 @@
 # after a perf change without paying for the full 30-min cold suite.
 #
 # Examples:
-#   ./tools/quick_test fwd 'width4 and fp16 and seqlen2048'
-#   ./tools/quick_test bwd 'width4 and fp16 and not silu'
-#   ./tools/quick_test update 'width4 and fp16'
+#   ./scripts/tools/quick_test fwd 'width4 and fp16 and seqlen2048'
+#   ./scripts/tools/quick_test bwd 'width4 and fp16 and not silu'
+#   ./scripts/tools/quick_test update 'width4 and fp16'
 #
 # Cap: max 3 tests (-x stops on first failure). Tweak the -k expression
 # until the count is small enough. Run `pixi run -e bench pytest tests/ --collect-only -q | wc -l`
@@ -22,7 +22,7 @@ if [[ -z "$KIND" || -z "$KEXPR" ]]; then
 fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(dirname "$here")"
+repo="$(dirname "$(dirname "$here")")"
 
 case "$KIND" in
     fwd)   target="tests/test_fwd.py" ;;
