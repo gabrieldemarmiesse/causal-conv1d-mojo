@@ -23,26 +23,7 @@ wheels = [
 [[package]]
 name = "causal-conv1d"
 version = "1.6.2.post1"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.12'",
-    "python_full_version == '3.11.*'",
-    "python_full_version < '3.11'",
-]
-dependencies = [
-    { name = "ninja" },
-    { name = "packaging" },
-    { name = "torch", version = "2.8.0+rocm6.4", source = { registry = "https://download.pytorch.org/whl/rocm6.4" } },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/63/5c/2403b8410122d159405c4bd8456340c7251c193358fa24d30cb273fb5048/causal_conv1d-1.6.2.post1.tar.gz", hash = "sha256:245e314ea21064ded7a5bf6b3b842b644aa6f92e45cecfe3e935629744c35ff4", size = 29434, upload-time = "2026-05-09T13:00:51.622Z" }
-
-[[package]]
-name = "causal-conv1d"
-version = "1.6.2.post1"
 source = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" }
-resolution-markers = [
-    "python_full_version >= '3.12'",
-]
 dependencies = [
     { name = "ninja", marker = "python_full_version >= '3.12'" },
     { name = "packaging", marker = "python_full_version >= '3.12'" },
@@ -73,12 +54,11 @@ dependencies = [
 
 [package.optional-dependencies]
 nvidia = [
-    { name = "causal-conv1d", version = "1.6.2.post1", source = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" }, marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
+    { name = "causal-conv1d", marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
     { name = "nvidia-cuda-nvcc-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torch", version = "2.8.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux'" },
 ]
 rocm = [
-    { name = "causal-conv1d", version = "1.6.2.post1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
     { name = "pytorch-triton-rocm", marker = "sys_platform == 'linux'" },
     { name = "torch", version = "2.8.0+rocm6.4", source = { registry = "https://download.pytorch.org/whl/rocm6.4" }, marker = "sys_platform == 'linux'" },
 ]
@@ -102,9 +82,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "causal-conv1d", marker = "sys_platform == 'linux' and extra == 'nvidia'", url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" },
-    { name = "causal-conv1d", marker = "sys_platform == 'linux' and extra == 'rocm'" },
-    { name = "mojo-compiler", specifier = "==1.0.0b2" },
-    { name = "mojo-compiler-mojo-libs", specifier = "==1.0.0b2" },
+    { name = "mojo-compiler", specifier = "==1.0.0b3.dev2026062306", index = "https://whl.modular.com/nightly/simple/" },
+    { name = "mojo-compiler-mojo-libs", specifier = "==1.0.0b3.dev2026062306", index = "https://whl.modular.com/nightly/simple/" },
     { name = "nvidia-cuda-nvcc-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'nvidia'", specifier = "==12.8.*" },
     { name = "pytorch-triton-rocm", marker = "sys_platform == 'linux' and extra == 'rocm'", index = "https://download.pytorch.org/whl/rocm6.4", conflict = { package = "causal-conv1d-mojo", extra = "rocm" } },
     { name = "torch", specifier = ">=2,<3" },
@@ -628,23 +607,23 @@ wheels = [
 
 [[package]]
 name = "mojo-compiler"
-version = "1.0.0b2"
-source = { registry = "https://pypi.org/simple" }
+version = "1.0.0b3.dev2026062306"
+source = { registry = "https://whl.modular.com/nightly/simple/" }
 dependencies = [
     { name = "mojo-compiler-mojo-libs" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d5/0b/3b0d33545a684c6e92b77730f55d3317d487a926345ab923f640b03d655e/mojo_compiler-1.0.0b2-py3-none-macosx_13_0_arm64.whl", hash = "sha256:45013b502b31d9dfa02b2071f7ce9a56d3bb7997a91f26b89e3e69614e070a9d", size = 70684069, upload-time = "2026-06-18T15:38:14.876Z" },
-    { url = "https://files.pythonhosted.org/packages/47/6f/037a8337f4f4d8f3be33109134cbfeab07600c6c8261a50da95429c55a7b/mojo_compiler-1.0.0b2-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:344a35eae3fecb31f6d22380f821e84da1c6c302d852573444fcdc47a5fcf2f5", size = 92042307, upload-time = "2026-06-18T15:37:53.405Z" },
-    { url = "https://files.pythonhosted.org/packages/b7/cb/ace18363deee8f3d8cdf439a2c9460334efd7d3a2883d266a6c7ab9e2e50/mojo_compiler-1.0.0b2-py3-none-manylinux_2_34_x86_64.whl", hash = "sha256:7c10021ca0d775f37af1ee8afa62094294405cee85f0bdb2af7eeb956055f140", size = 96904189, upload-time = "2026-06-18T15:38:22.444Z" },
+    { url = "https://us-central1-python.pkg.dev/distribution-prod-0a7c7b3/nightly/mojo-compiler/mojo_compiler-1.0.0b3.dev2026062306-py3-none-macosx_13_0_arm64.whl", hash = "sha256:97c663da6db35b1eb2d9c79d323a871e1f3e0141905804c5dc2af823676b3212" },
+    { url = "https://us-central1-python.pkg.dev/distribution-prod-0a7c7b3/nightly/mojo-compiler/mojo_compiler-1.0.0b3.dev2026062306-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:6791f589f2f84768278afb88c40f22c003de482bdc222226b243df6023638a03" },
+    { url = "https://us-central1-python.pkg.dev/distribution-prod-0a7c7b3/nightly/mojo-compiler/mojo_compiler-1.0.0b3.dev2026062306-py3-none-manylinux_2_34_x86_64.whl", hash = "sha256:77a4b8a36d0c33089f2b0b2e9e696d06a743caa54b9614319b653a047b4dfa63" },
 ]
 
 [[package]]
 name = "mojo-compiler-mojo-libs"
-version = "1.0.0b2"
-source = { registry = "https://pypi.org/simple" }
+version = "1.0.0b3.dev2026062306"
+source = { registry = "https://whl.modular.com/nightly/simple/" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/5c/5c78b66b2e9ce5d94c873583e252c7ccd51195031b966c51836c12528854/mojo_compiler_mojo_libs-1.0.0b2-py3-none-any.whl", hash = "sha256:2d63d3740ca667b1657547ced2d26f4236e1698a9944562b6ebb40b3a95840bc", size = 5207861, upload-time = "2026-06-18T15:37:37.995Z" },
+    { url = "https://us-central1-python.pkg.dev/distribution-prod-0a7c7b3/nightly/mojo-compiler-mojo-libs/mojo_compiler_mojo_libs-1.0.0b3.dev2026062306-py3-none-any.whl", hash = "sha256:a8e5dd43cf363d3b3b5085fbe22b04ad874c0497c18e7c0c4e4ebd1e54213c6e" },
 ]
 
 [[package]]
