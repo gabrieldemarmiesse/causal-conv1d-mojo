@@ -893,9 +893,10 @@ def assembly(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     elif be.name == "rocm":
         _assembly_dump_only(be, fn, dtype, canon)
     elif be.name == "metal":
-        # The Mojo dump hook (DUMP_GPU_ASM) emits textual ISA only for PTX /
-        # AMDGPU targets; Metal lowers straight to a metallib with no textual
-        # ISA dump, so there is nothing to write (and occupancy is GUI-only).
+        # compile_function's dump_asm (our DUMP_ASSEMBLY_INTO) emits textual
+        # ISA only for PTX / AMDGPU targets; Metal lowers straight to a
+        # metallib with no textual ISA dump, so there is nothing to write
+        # (and occupancy is GUI-only).
         skip(
             "(e/f/g) GPU asm",
             "Mojo emits no textual Metal ISA (metallib only); occupancy is GUI-only",

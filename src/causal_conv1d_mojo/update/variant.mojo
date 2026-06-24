@@ -6,7 +6,12 @@ Comptime params come from `-D` defines set by `_jit.py`.
 from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
-from std.sys import get_defined_bool, get_defined_dtype, get_defined_int
+from std.sys import (
+    get_defined_bool,
+    get_defined_dtype,
+    get_defined_int,
+    get_defined_string,
+)
 
 from launch import launch_update
 from _ctx import acquire_ctx_handle
@@ -18,6 +23,10 @@ comptime APPLY_SILU = get_defined_bool["APPLY_SILU"]()
 comptime HAS_STATE_INDICES = get_defined_bool["HAS_STATE_INDICES"]()
 comptime IS_CIRCULAR = get_defined_bool["IS_CIRCULAR"]()
 comptime USE_EXTERNAL_STREAM = get_defined_bool["USE_EXTERNAL_STREAM"]()
+# When non-empty, the path `compile_function` dumps this variant's PTX to
+# (set via the `DUMP_ASSEMBLY_INTO` env var, threaded through `_jit_common`
+# as a `-D` define). Empty => no dump. `%` expands to the module name.
+comptime DUMP_ASSEMBLY_INTO = get_defined_string["DUMP_ASSEMBLY_INTO", ""]()
 
 
 def causal_conv1d_update_acquire_ctx(
@@ -75,6 +84,7 @@ def causal_conv1d_update_variant(
         HAS_STATE_INDICES,
         IS_CIRCULAR,
         USE_EXTERNAL_STREAM,
+        DUMP_ASSEMBLY_INTO,
     ](
         batch_int,
         dim_int,

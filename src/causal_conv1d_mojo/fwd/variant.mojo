@@ -16,7 +16,12 @@ The Python wrapper:
 from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
-from std.sys import get_defined_bool, get_defined_dtype, get_defined_int
+from std.sys import (
+    get_defined_bool,
+    get_defined_dtype,
+    get_defined_int,
+    get_defined_string,
+)
 
 from launch import launch_fwd
 from _ctx import acquire_ctx_handle
@@ -31,6 +36,10 @@ comptime CONTIG_INNER = get_defined_bool["CONTIG_INNER"]()
 comptime ALIGNED_SEQ = get_defined_bool["ALIGNED_SEQ"]()
 comptime VEC_ALIGNED = get_defined_bool["VEC_ALIGNED"]()
 comptime USE_EXTERNAL_STREAM = get_defined_bool["USE_EXTERNAL_STREAM"]()
+# When non-empty, the path `compile_function` dumps this variant's PTX to
+# (set via the `DUMP_ASSEMBLY_INTO` env var, threaded through `_jit_common`
+# as a `-D` define). Empty => no dump. `%` expands to the module name.
+comptime DUMP_ASSEMBLY_INTO = get_defined_string["DUMP_ASSEMBLY_INTO", ""]()
 
 
 def causal_conv1d_fwd_acquire_ctx(
@@ -91,6 +100,7 @@ def causal_conv1d_fwd_variant(
         ALIGNED_SEQ,
         VEC_ALIGNED,
         USE_EXTERNAL_STREAM,
+        DUMP_ASSEMBLY_INTO,
     ](
         batch_int,
         dim_int,
