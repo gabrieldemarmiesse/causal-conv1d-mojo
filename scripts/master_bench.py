@@ -74,6 +74,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -82,7 +83,7 @@ import shutil
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -136,7 +137,6 @@ class Backend:
     pretty: str  # human GPU/CPU name for the banner
     arch: str  # "sm_89" / "gfx942" / "macos15" / "" (nvidia uses it for asm)
     arch_a: str = ""  # ptxas target with the 'a' suffix (nvidia only)
-    uv_extra: list[str] = field(default_factory=list)  # uv `--extra` flags
     device: str = "cuda"  # torch device passed to _bench.py (--device)
     test_device: str = "cuda"  # pytest -k device token
     kernel_impls: tuple[str, ...] = ("mojo",)  # impls for the kernel bench
@@ -145,16 +145,16 @@ class Backend:
     gate_ratio: bool = False  # does a slow ratio FAIL the gate?
     kernel_measure: str = "kernel"  # _bench.py --measure for step (c)
 
-    def uv(self, tool: str = "python") -> list[str]:
-        """``uv run [--extra ...] <tool>`` prefix for this backend's venv."""
-        return ["uv", "run", *self.uv_extra, tool]
-
 
 # --------------------------------------------------------------------------
 # Small process / printing helpers.
 # --------------------------------------------------------------------------
 
 _BOLD, _RST, _YEL, _RED = "\033[1m", "\033[0m", "\033[33m", "\033[31m"
+
+# Echo every spawned subprocess command line (the `$ ...` lines). Off by
+# default to keep the phase output readable; flipped on by `--verbose`.
+VERBOSE = False
 
 
 def section(msg: str) -> None:
@@ -185,8 +185,10 @@ class Gate:
 def run(
     cmd: list[str], *, env=None, capture=False, check=False
 ) -> subprocess.CompletedProcess:
-    """Run a subprocess, echoing the command. Streams output unless captured."""
-    print(f"$ {' '.join(cmd)}", flush=True)
+    """Run a subprocess, echoing the command under --verbose. Streams output
+    unless captured."""
+    if VERBOSE:
+        print(f"$ {' '.join(cmd)}", flush=True)
     return subprocess.run(
         cmd,
         env=env,
@@ -261,7 +263,6 @@ def _make_cuda_backend() -> Backend:
         pretty=nvidia_smi("name") or "NVIDIA GPU",
         arch=f"sm_{cc}",
         arch_a=f"sm_{cc}a",
-        uv_extra=["--extra", "nvidia"],
         device="cuda",
         test_device="cuda",
         kernel_impls=("mojo", "upstream", "pytorch"),
@@ -281,7 +282,6 @@ def _make_rocm_backend() -> Backend:
         name="rocm",
         pretty=_rocm_name(),
         arch=_rocm_arch(),
-        uv_extra=["--extra", "rocm"],
         device="cuda",
         test_device="cuda",
         kernel_impls=("mojo", "pytorch"),
@@ -302,7 +302,6 @@ def _make_metal_backend() -> Backend:
         name="metal",
         pretty=chip,
         arch=f"macos{major}" if major else "macos",
-        uv_extra=[],
         device="mps",
         test_device="mps",
         kernel_impls=("mojo",),
@@ -321,7 +320,6 @@ def _make_cpu_backend() -> Backend:
         name="cpu",
         pretty=platform.processor() or platform.machine() or "CPU",
         arch="",
-        uv_extra=[],
         device="cpu",
         test_device="cpu",
         kernel_impls=("mojo", "pytorch"),
@@ -460,11 +458,14 @@ def correctness(be: Backend, tier: str, clean: bool) -> bool:
     section(f"(b) recompile + correctness ({tier} tier, {be.name})")
     if clean:
         cache = Path("~/.cache/causal_conv1d_mojo").expanduser()
-        print(f"clearing JIT cache {cache} (keeping mojo compiler cache)")
+        if VERBOSE:
+            print(f"clearing JIT cache {cache} (keeping mojo compiler cache)")
         shutil.rmtree(cache, ignore_errors=True)
     if tier == "quick":
         cmd = [
-            *be.uv("pytest"),
+            sys.executable,
+            "-m",
+            "pytest",
             "-q",
             "-x",
             "tests/test_fwd.py",
@@ -475,7 +476,7 @@ def correctness(be: Backend, tier: str, clean: bool) -> bool:
         ]
     else:
         print("full regression suite (every landed feature, all devices/dtypes)")
-        cmd = [*be.uv("pytest"), "-q"]
+        cmd = [sys.executable, "-m", "pytest", "-q"]
     ok = run(cmd).returncode == 0
     if not ok:
         Gate.fail(f"{tier} correctness failed")
@@ -505,7 +506,7 @@ def bench_kernel(be: Backend, fn, dtype, shapes, runs, clock, baseline_flags) ->
     for shape in shapes:
         cmd = [
             *taskset_prefix(),
-            *be.uv(),
+            sys.executable,
             str(REPO / "scripts" / "_bench.py"),
             fn,
             "--shape",
@@ -690,6 +691,69 @@ def _ncu_cmd() -> list[str] | None:
     return None
 
 
+_NCU_LAUNCH_COUNT = 5
+
+
+def _parse_ncu_csv(text: str) -> dict[str, dict] | None:
+    """Group ncu's `--csv` output (one row per launch×metric) by metric name.
+
+    Returns {metric_name: {"unit": str, "vals": [float, ...]}} with one value
+    per profiled launch, or None if no parseable CSV header was found.
+    """
+    lines = text.splitlines()
+    start = next(
+        (
+            i
+            for i, ln in enumerate(lines)
+            if '"Metric Name"' in ln and '"Metric Value"' in ln
+        ),
+        None,
+    )
+    if start is None:
+        return None
+    data: dict[str, dict] = {}
+    for row in csv.DictReader(lines[start:]):
+        name = (row.get("Metric Name") or "").strip()
+        raw = (row.get("Metric Value") or "").strip()
+        if not name or not raw:
+            continue
+        try:
+            num = float(raw.replace(",", ""))  # ncu uses ',' as a thousands sep
+        except ValueError:
+            continue
+        d = data.setdefault(
+            name, {"unit": (row.get("Metric Unit") or "").strip(), "vals": []}
+        )
+        d["vals"].append(num)
+    return data or None
+
+
+def _print_ncu_summary(data: dict[str, dict]) -> None:
+    """One row per metric: mean + spread across the profiled launches."""
+    hdr = (
+        f"    {'metric':<54} | {'unit':>9} | {'mean':>13} | "
+        f"{'min':>13} | {'max':>13} | {'spread':>7}"
+    )
+    print(hdr)
+    print("    " + "-" * (len(hdr) - 4))
+    # Stable order: the order we requested metrics in, then any extras ncu added.
+    ordered = list(dict.fromkeys([*_NCU_METRICS.split(","), *data]))
+    for name in ordered:
+        d = data.get(name)
+        if not d or not d["vals"]:
+            continue
+        vals = d["vals"]
+        mean = sum(vals) / len(vals)
+        lo, hi = min(vals), max(vals)
+        spread = (hi - lo) / mean * 100.0 if mean else 0.0
+        print(
+            f"    {name:<54} | {d['unit']:>9} | {mean:13.3f} | "
+            f"{lo:13.3f} | {hi:13.3f} | {spread:6.1f}%"
+        )
+    n = max((len(d["vals"]) for d in data.values()), default=0)
+    print(f"    (mean + spread over {n} profiled launches)")
+
+
 def _profiler_ncu(be: Backend, fn, dtype, canon) -> None:
     section("(d) ncu deep profiler")
     ncu = _ncu_cmd()
@@ -697,7 +761,8 @@ def _profiler_ncu(be: Backend, fn, dtype, canon) -> None:
         warn("ncu not found and pixi unavailable — skipping deep profiling.")
         warn("(the raw-mode driver '_bench.py ... --measure raw' is ready for it.)")
         return
-    print(f"profiler: {' '.join(ncu)}")
+    if VERBOSE:
+        print(f"profiler: {' '.join(ncu)}")
     cmd = [
         *ncu,
         "--target-processes",
@@ -705,10 +770,11 @@ def _profiler_ncu(be: Backend, fn, dtype, canon) -> None:
         "--launch-skip",
         "10",
         "--launch-count",
-        "5",
+        str(_NCU_LAUNCH_COUNT),
         "--metrics",
         _NCU_METRICS,
-        *be.uv(),
+        "--csv",
+        sys.executable,
         str(REPO / "scripts" / "_bench.py"),
         fn,
         "--shape",
@@ -724,8 +790,22 @@ def _profiler_ncu(be: Backend, fn, dtype, canon) -> None:
         "--warmup",
         "10",
     ]
-    if run(cmd).returncode != 0:
+    # Capture stdout (the CSV) but let stderr stream so the ==PROF== per-launch
+    # progress bars stay visible — ncu's replay passes are slow.
+    if VERBOSE:
+        print(f"$ {' '.join(cmd)}", flush=True)
+    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE)
+    if proc.returncode != 0:
         warn("ncu run failed (perf-counter perms? needs root/CAP_SYS_ADMIN)")
+        if proc.stdout:
+            print(proc.stdout)
+        return
+    data = _parse_ncu_csv(proc.stdout or "")
+    if data is None:
+        warn("could not parse ncu CSV — dumping raw output below.")
+        print(proc.stdout)
+        return
+    _print_ncu_summary(data)
 
 
 def _profiler_metal(reps: list[dict]) -> None:
@@ -775,7 +855,7 @@ def _profiler_perf(be: Backend, fn, dtype, canon) -> None:
         "perf",
         "stat",
         "-d",
-        *be.uv(),
+        sys.executable,
         str(REPO / "scripts" / "_bench.py"),
         fn,
         "--shape",
@@ -833,7 +913,7 @@ def _dump_ptx(be: Backend, fn, dtype, canon, asm_dir: Path) -> Path | None:
     env["CAUSAL_CONV1D_DUMP_ASM"] = str(asm_dir)
     dump = run(
         [
-            *be.uv(),
+            sys.executable,
             str(REPO / "scripts" / "_bench.py"),
             fn,
             "--shape",
@@ -879,7 +959,9 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     ptx = str(ptx_path)
     our_sass = str(asm_dir / f"{fn}.sass")
     if (
-        run([*be.uv(), tools, "sass", ptx, our_sass, "--arch", be.arch_a]).returncode
+        run(
+            [sys.executable, tools, "sass", ptx, our_sass, "--arch", be.arch_a]
+        ).returncode
         != 0
     ):
         Gate.fail("PTX->SASS failed")
@@ -887,7 +969,16 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     section("(g) ptxas -v spill / regalloc canary")
     if (
         run(
-            [*be.uv(), tools, "spill", ptx, "--arch", be.arch_a, "--max-spill", "0"]
+            [
+                sys.executable,
+                tools,
+                "spill",
+                ptx,
+                "--arch",
+                be.arch_a,
+                "--max-spill",
+                "0",
+            ]
         ).returncode
         != 0
     ):
@@ -897,13 +988,26 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     ref_sass = ref_dir / f"{fn}.sass"
     if refresh_reference or not ref_sass.exists():
         print(f"extracting upstream {fn} reference SASS")
-        cmd = [*be.uv(), tools, "upstream-sass", fn, str(ref_sass), "--arch", be.arch]
+        cmd = [
+            sys.executable,
+            tools,
+            "upstream-sass",
+            fn,
+            str(ref_sass),
+            "--arch",
+            be.arch,
+        ]
         for m in REF_MATCH[fn]:
             cmd += ["--match", m]
         if run(cmd).returncode != 0:
             warn(f"could not extract upstream reference ({fn}); skipping histogram")
     if ref_sass.exists():
-        if run([*be.uv(), tools, "histogram", our_sass, str(ref_sass)]).returncode != 0:
+        if (
+            run(
+                [sys.executable, tools, "histogram", our_sass, str(ref_sass)]
+            ).returncode
+            != 0
+        ):
             warn("histogram diff failed")
 
 
@@ -937,7 +1041,7 @@ def walltime(be: Backend, fn, dtype, canon, runs, clock, baseline_flags) -> None
     section("(h) end-to-end wall-clock (torch.utils.benchmark, auto sync)")
     cmd = [
         *taskset_prefix(),
-        *be.uv(),
+        sys.executable,
         str(REPO / "scripts" / "_bench.py"),
         fn,
         "--shape",
@@ -993,7 +1097,16 @@ def main() -> int:
     p.add_argument("--skip-asm", action="store_true")
     p.add_argument("--refresh-baseline", action="store_true")
     p.add_argument("--refresh-reference", action="store_true")
+    p.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="echo every spawned subprocess command line (the `$ ...` lines)",
+    )
     args = p.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose
 
     os.chdir(REPO)
     be = detect_backend(args.backend)

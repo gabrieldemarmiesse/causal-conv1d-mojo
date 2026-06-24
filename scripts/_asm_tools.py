@@ -259,9 +259,15 @@ def cmd_histogram(args) -> int:
     )
     print(f"  {'opcode':>14} | {'ours':>6} | {'theirs':>6} | {'delta':>6}")
     print("  " + "-" * 44)
+    hidden = 0
     for k in rows:
         o, t = ours[k], theirs[k]
+        if o == t:  # identical count -> no signal; drop to keep the diff readable
+            hidden += 1
+            continue
         print(f"  {k:>14} | {o:>6} | {t:>6} | {o - t:>+6}")
+    if hidden:
+        print(f"  ({hidden} opcode(s) with delta 0 hidden)")
     print("  " + "-" * 44)
     print(
         f"  {'TOTAL':>14} | {sum(ours.values()):>6} | "
