@@ -174,7 +174,7 @@ def compile_and_load(
         # return arch strings with suffixes (e.g. "gfx942:sramecc-:xnack-")
         # that Mojo's normalizer doesn't strip, causing a compile-time
         # constraint failure even for supported architectures (e.g. MI300A).
-        if backend in ("cuda", "rocm") and backend_arch:
+        if "mi300a" in backend_arch.lower():
             cmd += ["--target-accelerator", backend_arch]
         cmd += ["--emit", "shared-lib", "-o", str(so_path)]
         try:
