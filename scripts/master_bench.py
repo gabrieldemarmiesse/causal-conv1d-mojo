@@ -1058,7 +1058,6 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
             if run(cmd).returncode != 0:
                 warn(f"could not compile upstream PTX ({fn}); skipping PTX histogram")
     if ref_ptx.exists():
-        print(f"upstream PTX: {ref_ptx}", flush=True)
         print("PTX-level (ours vs upstream source):", flush=True)
         if (
             run(

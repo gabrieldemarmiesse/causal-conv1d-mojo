@@ -380,6 +380,9 @@ def cmd_histogram(args) -> int:
     print(
         f"instruction-mix histogram  (ours={_lbl(args.ours)}  theirs={_lbl(args.theirs)})"
     )
+    # Absolute paths so the reader can open either file straight away.
+    print(f"  ours:   {Path(args.ours).resolve()}")
+    print(f"  theirs: {Path(args.theirs).resolve()}")
     print(f"  {'opcode':>14} | {'ours':>6} | {'theirs':>6} | {'delta':>6}")
     print("  " + "-" * 44)
     hidden = 0
