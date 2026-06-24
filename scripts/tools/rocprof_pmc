@@ -21,18 +21,18 @@
 #    SQ_ACCUM_PREV_HIRES    active cycles for occupancy
 #
 # Usage:
-#   ./tools/rocprof_pmc --kernel causal_conv1d_fwd_kernel \
+#   ./scripts/tools/rocprof_pmc --kernel causal_conv1d_fwd_kernel \
 #         --kind fwd --shape 1,1024,2048,4 --iters 5
 #
 # IMPORTANT: rocprofv3 + Mojo's `DeviceContext` do not play together —
 # this tool defaults to --impl upstream. Use this for *upstream
 # reference numbers* (how many VALU / VMEM / LDS instructions upstream
 # uses per kernel); compare against the Mojo ISA dump from
-# `./tools/dump_isa --sub <sub>` for the Mojo side.
+# `./scripts/tools/dump_isa --sub <sub>` for the Mojo side.
 
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(dirname "$here")"
+repo="$(dirname "$(dirname "$here")")"
 
 KERNEL_RE=""
 have_impl=false
@@ -63,7 +63,7 @@ PMC
 
 exec flock /tmp/.gpu_bench_lock bash -c "
     rocprofv3 -i '$pmc' --kernel-include-regex '$KERNEL_RE' -f csv -d '$outdir' -- \
-        '$repo/.venv/bin/python' '$repo/benchmarks/bench_gpu_kernel_time.py' $(printf ' %q' "${ARGS[@]}") \
+        '$repo/.venv/bin/python' '$repo/scripts/bench.py' $(printf ' %q' "${ARGS[@]}") \
         2> '$outdir/rocprof.log'
     rc=\$?
     if [ \$rc -ne 0 ]; then

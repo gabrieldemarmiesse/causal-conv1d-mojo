@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Single-shape / single-impl kernel-time bench, with the GPU lock applied.
+#
+# Thin wrapper around the unified driver `scripts/bench.py` (all flags
+# are forwarded). The function is a positional arg; `--impl`, `--shape`,
+# `--measure`, `--iters`, `--warmup` are the common knobs.
+#
+# Examples:
+#   # Just the mojo fwd kernel on one shape, 20 iters — fastest feedback loop.
+#   ./scripts/tools/bench fwd --impl mojo --shape 1,1024,2048,4 --iters 20
+#
+#   # Compare mojo vs upstream for the bwd kernel on one shape:
+#   ./scripts/tools/bench bwd --impl mojo,upstream --shape 4,2048,2048,4 --iters 50
+#
+#   # Update kernel, end-to-end wall-clock:
+#   ./scripts/tools/bench update --shape 1,2048 --measure walltime
+#
+# The legacy `--kind <fn>` / `--impl both` / `--no-cache` flags still work.
+
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(dirname "$(dirname "$here")")"
+exec flock /tmp/.gpu_bench_lock \
+    uv run python "$repo/scripts/bench.py" "$@"

@@ -125,6 +125,14 @@ def compile_and_load(
     cache_dir = cache_dir_for(subpkg, backend, backend_arch)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    defines = _maybe_add_asm_dump(dict(defines), subpkg, mod_name)
+    if "DUMP_GPU_ASM" in defines:
+        # The dump build carries an extra define, so it's a distinct cache
+        # entry — give it a distinct `mod_name` too, else the glob-unlink
+        # below would evict the perf variant's `.so` (same `mod_name`,
+        # different hash) and force a recompile on the next normal call.
+        mod_name = f"{mod_name}_dumpasm"
+
     env_sig = _env_signature(backend)
     src_hash = _hash_sources(source_file, include_dirs, defines, env_sig)
     so_path = cache_dir / f"{mod_name}.hash-{src_hash}.so"
@@ -215,6 +223,40 @@ def compile_and_load(
     loader.exec_module(module)
     sys.modules[mod_name] = module
     return module
+
+
+def _maybe_add_asm_dump(
+    defines: dict[str, str], subpkg: str, mod_name: str
+) -> dict[str, str]:
+    """When ``CAUSAL_CONV1D_DUMP_ASM=<dir>`` is set, ask the Mojo compiler
+    to dump this variant's PTX at ``compile_function`` time.
+
+    The Mojo stdlib's ``DeviceContext.compile_function`` consults the
+    ``DUMP_GPU_ASM`` *compile-time define* (read via ``is_defined`` in
+    ``device_context.mojo``) before any source-level ``dump_asm=``
+    argument — so we get a clean, non-invasive PTX dump just by adding a
+    ``-D`` flag here, with zero edits to the kernel launch path. Folding
+    the path into ``defines`` means it's part of the cache hash, so a dump
+    build is its own cache entry and a normal build is byte-for-byte
+    unaffected.
+
+    We deliberately do *not* set ``DUMP_GPU_SASS``: the stdlib's SASS dump
+    shells out to a hard-coded ``/usr/local/cuda/bin/nvdisasm`` and aborts
+    if it's missing. The asm tooling derives SASS (and the ptxas ``-v``
+    spill canary) from this PTX with a portable ``ptxas``/``nvdisasm``
+    instead — see ``scripts/_asm_tools.py``.
+
+    The file lands at ``<dir>/<subpkg>__<mod_name>.ptx`` — one per variant,
+    no ``%`` placeholder collisions. The path must be absolute (the
+    stdlib's ``_is_path_like`` only accepts ``/``, ``~`` or ``./``).
+    """
+    dump_dir = os.environ.get("CAUSAL_CONV1D_DUMP_ASM")
+    if not dump_dir:
+        return defines
+    base = Path(dump_dir).expanduser().resolve() / f"{subpkg}__{mod_name}"
+    base.parent.mkdir(parents=True, exist_ok=True)
+    defines["DUMP_GPU_ASM"] = f"{base}.ptx"
+    return defines
 
 
 @functools.cache

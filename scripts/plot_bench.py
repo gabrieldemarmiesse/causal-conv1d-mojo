@@ -121,7 +121,7 @@ WARMUP_UPDATE = 50
 ITERS_UPDATE = 500
 
 # CPU bench: same shape grid would take minutes per call at the top
-# end, so use a smaller grid (matches benchmarks/bench_cpu.py) and
+# end, so use a smaller grid (matches the old bench_cpu grid) and
 # fewer iters. CPU calls are synchronous, no profiler needed — wall
 # time around the call is the kernel time.
 CPU_SHAPES = [
@@ -301,7 +301,7 @@ def main() -> None:
     gpu_slug = _device_slug(gpu_name)
     labels = [f"({b},{d},{l},{w})" for b, d, l, w in SHAPES]
 
-    cache = BaselineCache(__file__)
+    cache = BaselineCache.for_plot(__file__)
 
     fwd_mojo, fwd_up, fwd_pt, fwd_pt_c = [], [], [], []
     bwd_mojo, bwd_up, bwd_pt, bwd_pt_c = [], [], [], []

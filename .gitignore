@@ -29,7 +29,7 @@ flash-attention/
 # Refreshed on every first-import build; one file per comptime variant.
 /ptx/
 
-benchmarks/baselines/
+scripts/baselines/
 
 # mojo kgen trace dumps
 kgen.trace.json.time*

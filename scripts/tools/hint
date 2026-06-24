@@ -6,7 +6,7 @@
 # before/after numbers, and a one-line note on what changed.
 #
 # Usage:
-#     ./tools/hint <agent-name> <<'EOF'
+#     ./scripts/tools/hint <agent-name> <<'EOF'
 #     ### fwd: vec4 LDG buys 18% on (1,1024,2048,4)
 #
 #     - Before: 7.2 us/call (1.18x upstream)

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Dump one Mojo kernel sub-package's GPU ISA (PTX on NVIDIA, AMDGPU asm
+# on ROCm), with the GPU lock applied.
+#
+# Non-invasive: sets CAUSAL_CONV1D_DUMP_ASM so `_jit_common` adds the
+# `-D DUMP_GPU_ASM=...` define to the `mojo build`, and the stdlib's
+# `compile_function` writes the ISA at runtime. No more patching
+# launch.mojo. (On NVIDIA, turn the PTX into SASS / a spill report with
+# `scripts/_asm_tools.py sass|spill`.)
+#
+# Usage:
+#   ./scripts/tools/dump_isa --sub fwd --shape 1,1024,2048,4
+#   ./scripts/tools/dump_isa --sub bwd_full --shape 1,2048,2048,4
+#   ./scripts/tools/dump_isa --sub update --shape 1,2048
+#
+# Extra args after `--` are forwarded to scripts/bench.py.
+
+set -euo pipefail
+
+SUB=""
+SHAPE=""
+EXTRA=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --sub) SUB="$2"; shift 2 ;;
+        --shape) SHAPE="$2"; shift 2 ;;
+        --) shift; EXTRA=("$@"); break ;;
+        *) echo "unknown arg $1" >&2; exit 2 ;;
+    esac
+done
+
+# Map sub-package -> bench.py function name.
+case "$SUB" in
+    fwd) FN=fwd ;;
+    bwd_full) FN=bwd ;;
+    update) FN=update ;;
+    *) echo "Usage: $0 --sub {fwd|bwd_full|update} --shape <B,D,L,W or B,D> [-- extra]" >&2; exit 2 ;;
+esac
+
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(dirname "$(dirname "$here")")"
+outdir="${DUMP_ISA_DIR:-/tmp/mojo_isa}"
+mkdir -p "$outdir"
+rm -f "$outdir/${SUB}__"*.ptx
+
+SHAPE_ARG=()
+[[ -n "$SHAPE" ]] && SHAPE_ARG=(--shape "$SHAPE")
+
+# One synced call with the dump define active writes the variant's ISA.
+flock /tmp/.gpu_bench_lock \
+    env CAUSAL_CONV1D_DUMP_ASM="$outdir" \
+    uv run python "$repo/scripts/bench.py" "$FN" \
+        --impl mojo --measure raw --iters 1 --warmup 0 --runs 1 \
+        "${SHAPE_ARG[@]}" "${EXTRA[@]}"
+
+echo
+echo "==== ISA dump for $SUB ===="
+ls -la "$outdir/${SUB}__"*.ptx 2>/dev/null || echo "  (none — check the bench output above)"
