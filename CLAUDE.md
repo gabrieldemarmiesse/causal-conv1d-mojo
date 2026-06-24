@@ -73,15 +73,18 @@ upstream Tri Dao CUDA", with upstream as the moving target.
     "Metal System Trace" (see "Apple silicon" below).
   - `plot_bench.py`: wall-clock end-to-end plots into `docs/bench_*.png`
     (uses `_baseline.py`'s JSON cache).
-  - `master_bench_nvidia.py`: **the autonomous NVIDIA perf gate** — a
-    stdlib-only orchestrator (see "The master bench" below).
+  - `master_bench.py`: **the autonomous, backend-agnostic perf gate** —
+    a stdlib-only orchestrator that auto-detects the backend (cuda / rocm /
+    metal / cpu) and runs the same a–h phase skeleton everywhere, skipping
+    phases whose tooling doesn't exist on a backend (see "The master bench"
+    below).
   - `strip_publish_deps.py`: CI helper (run by `.github/workflows/
     publish.yml`) that strips dev-only deps before publishing the wheel.
   - `_baseline.py`: internal JSON baseline cache used by `plot_bench.py`.
   - `_asm_tools.py`: PTX→SASS, ptxas `-v` spill canary, upstream-SASS
     extraction, and side-by-side instruction-mix histograms, using the
     `ptxas`/`nvdisasm`/`cuobjdump` shipped inside the `triton` wheel.
-    Spawned by `master_bench_nvidia.py`; not called directly.
+    Spawned by `master_bench.py`'s NVIDIA asm phase; not called directly.
   - `tools/`: small shell wrappers for ad-hoc dev loops (`bench`,
     `dump_isa`, `quick_test`, `rocprof_*`, the GPU `flock` wrapper, …)
     plus `check_wheel/` (containerised wheel smoke-test). See
@@ -110,24 +113,49 @@ uv run --extra nvidia python scripts/bench.py update --shape 16,2048 --measure w
 uv run --extra nvidia python scripts/plot_bench.py
 ```
 
-### The master bench (NVIDIA perf gate)
+### The master bench (backend-agnostic perf gate)
 
-`scripts/master_bench_nvidia.py` is the one autonomous, non-interactive
-gate to run after a kernel edit (passwordless `sudo -n` only — never
-prompts). It (a) locks GPU clocks, (b) clears *our* JIT cache and runs
-correctness (quick smoke / `--full` regression), (c) benches vs the
-cached/​refreshed baseline with min+spread and a 3% stop-criterion,
-(d) runs `ncu` (ephemerally via `pixi exec`; no-op if unavailable),
-(e) dumps our PTX/SASS to `scripts/assembly/nvidia/`, (f) diffs it against
-`scripts/reference_assembly/nvidia/` as an instruction-mix histogram, (g) runs
-the `ptxas -v` spill canary, and (h) does an independent
-`torch.utils.benchmark` wall-clock run. Steps c/d/h are deliberately
-separate processes.
+`scripts/master_bench.py` is the one autonomous, non-interactive gate to
+run after a kernel edit (passwordless `sudo -n` only — never prompts). It
+auto-detects the backend (NVIDIA via `nvidia-smi`, AMD via
+`rocminfo`/`rocm-smi`, Apple via `sys.platform`, else CPU; override with
+`--backend`) and runs the same phase skeleton on each, dispatching every
+phase to that backend's tooling and **skipping cleanly where it doesn't
+exist**:
+
+- **(a) lock clocks** — cuda: `nvidia-smi`; rocm: `rocm-smi --setperflevel
+  high`; metal/cpu: no headless lock (skipped — on Apple `bench.py` splits
+  GPU time by DVFS clock state instead).
+- **(b) recompile + correctness** — clears *our* JIT cache, runs the quick
+  smoke / `--full` regression suite under the backend's `uv` extra and
+  device (`-k mps/cuda/cpu`). `--skip-correctness` runs the perf phases
+  only (e.g. to profile a WIP kernel).
+- **(c) kernel-time bench** — cuda: vs Tri Dao upstream with min+spread and
+  a 3% stop-criterion (a true perf *gate*); rocm/cpu: vs the pure-PyTorch
+  fallback (reported, not gated — no hand-tuned baseline exists); metal:
+  *absolute* per-kernel GPU time read back from a `xctrace` Metal System
+  Trace (mojo-only — upstream is CUDA-only).
+- **(d) deep profiler** — cuda: `ncu` (ephemeral via `pixi exec`); metal:
+  the per-encoder GPU time + clock split + duty cycle already parsed from
+  the step-(c) trace; cpu: `perf stat`; rocm: skipped (`rocprofv3` can't
+  instrument Mojo's `DeviceContext`).
+- **(e) dump GPU asm** — cuda: PTX/SASS to `scripts/assembly/nvidia/`;
+  rocm: the AMDGPU ISA to `scripts/assembly/rocm/`; metal: skipped (Mojo
+  emits no textual Metal ISA — it lowers straight to a `metallib`); cpu:
+  skipped.
+- **(f) instruction-mix histogram** vs `scripts/reference_assembly/nvidia/`
+  and **(g) `ptxas -v` spill canary** — NVIDIA only (no counterpart
+  elsewhere; skipped).
+- **(h)** independent `torch.utils.benchmark` wall-clock run.
+
+Steps c/d/h are deliberately separate processes.
 
 ```bash
-python scripts/master_bench_nvidia.py                 # QUICK tier (every edit)
-python scripts/master_bench_nvidia.py --full --fn all # FULL gate, all functions
-python scripts/master_bench_nvidia.py --refresh-reference   # re-extract upstream asm
+python scripts/master_bench.py                 # QUICK tier, auto-detect (every edit)
+python scripts/master_bench.py --full --fn all # FULL gate, all functions
+python scripts/master_bench.py --backend cpu   # force a backend
+python scripts/master_bench.py --skip-correctness   # perf phases only
+python scripts/master_bench.py --refresh-reference  # re-extract upstream asm (nvidia)
 ```
 
 **Dumping our kernel's PTX** is non-invasive: set
@@ -457,7 +485,7 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
 
 ## Where to look first when perf regresses
 
-1. Run `python scripts/master_bench_nvidia.py` (or `bench.py --measure
+1. Run `python scripts/master_bench.py` (or `bench.py --measure
    kernel` for one shape) and compare ratios per shape. Wall-clock
    benches are noisy until shapes are large.
 2. If the small-shape ratio gets worse but large-shape ratio is fine →

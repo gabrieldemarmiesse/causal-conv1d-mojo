@@ -33,7 +33,7 @@ This file replaces the old pile of ``bench_*.py`` scripts (including the
 Apple-only ``bench_metal_gpu.py`` + ``scripts/xctrace_bench.sh`` +
 ``scripts/xctrace_gpu_intervals.py``, now folded in here): every shape
 is one invocation, every comparison is a flag. The
-``scripts/master_bench_nvidia.py`` orchestrator drives it across
+``scripts/master_bench.py`` orchestrator drives it across
 shapes/tiers and adds clock-locking, correctness gating, ncu, and
 assembly diffing.
 
