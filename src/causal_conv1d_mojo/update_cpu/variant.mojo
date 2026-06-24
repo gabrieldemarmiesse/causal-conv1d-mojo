@@ -13,40 +13,40 @@ from layout.tile_layout import Layout
 
 from kernel import update_kernel_cpu
 
-comptime DTYPE: DType = get_defined_dtype["DTYPE", DType.float32]()
-comptime WIDTH: Int = get_defined_int["WIDTH"]()
-comptime HAS_BIAS: Bool = get_defined_bool["HAS_BIAS"]()
-comptime APPLY_SILU: Bool = get_defined_bool["APPLY_SILU"]()
-comptime HAS_STATE_INDICES: Bool = get_defined_bool["HAS_STATE_INDICES"]()
-comptime IS_CIRCULAR: Bool = get_defined_bool["IS_CIRCULAR"]()
+comptime DTYPE = get_defined_dtype["DTYPE", DType.float32]()
+comptime WIDTH = get_defined_int["WIDTH"]()
+comptime HAS_BIAS = get_defined_bool["HAS_BIAS"]()
+comptime APPLY_SILU = get_defined_bool["APPLY_SILU"]()
+comptime HAS_STATE_INDICES = get_defined_bool["HAS_STATE_INDICES"]()
+comptime IS_CIRCULAR = get_defined_bool["IS_CIRCULAR"]()
 
 
 def causal_conv1d_update_cpu_variant(
     mut py_self: PythonObject,
     mut args: PythonObject,
 ) raises -> PythonObject:
-    var x_addr: Int = Int(py=args[0])
-    var w_addr: Int = Int(py=args[1])
-    var b_addr: Int = Int(py=args[2])
-    var state_addr: Int = Int(py=args[3])
-    var o_addr: Int = Int(py=args[4])
-    var batch_int: Int = Int(py=args[5])
-    var dim_int: Int = Int(py=args[6])
-    var seqlen_int: Int = Int(py=args[7])
-    var state_len_int: Int = Int(py=args[8])
-    var x_b_stride: Int = Int(py=args[9])
-    var x_c_stride: Int = Int(py=args[10])
-    var x_l_stride: Int = Int(py=args[11])
-    var w_c_stride: Int = Int(py=args[12])
-    var w_w_stride: Int = Int(py=args[13])
-    var state_b_stride: Int = Int(py=args[14])
-    var state_c_stride: Int = Int(py=args[15])
-    var state_l_stride: Int = Int(py=args[16])
-    var o_b_stride: Int = Int(py=args[17])
-    var o_c_stride: Int = Int(py=args[18])
-    var o_l_stride: Int = Int(py=args[19])
-    var state_indices_addr: Int = Int(py=args[20])
-    var cache_seqlens_addr: Int = Int(py=args[21])
+    var x_addr = Int(py=args[0])
+    var w_addr = Int(py=args[1])
+    var b_addr = Int(py=args[2])
+    var state_addr = Int(py=args[3])
+    var o_addr = Int(py=args[4])
+    var batch_int = Int(py=args[5])
+    var dim_int = Int(py=args[6])
+    var seqlen_int = Int(py=args[7])
+    var state_len_int = Int(py=args[8])
+    var x_b_stride = Int32(py=args[9])
+    var x_c_stride = Int32(py=args[10])
+    var x_l_stride = Int32(py=args[11])
+    var w_c_stride = Int32(py=args[12])
+    var w_w_stride = Int32(py=args[13])
+    var state_b_stride = Int32(py=args[14])
+    var state_c_stride = Int32(py=args[15])
+    var state_l_stride = Int32(py=args[16])
+    var o_b_stride = Int32(py=args[17])
+    var o_c_stride = Int32(py=args[18])
+    var o_l_stride = Int32(py=args[19])
+    var state_indices_addr = Int(py=args[20])
+    var cache_seqlens_addr = Int(py=args[21])
 
     if batch_int == 0 or dim_int == 0:
         return PythonObject(None)
@@ -76,29 +76,29 @@ def causal_conv1d_update_cpu_variant(
     var x_tt = TileTensor(
         x_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(x_b_stride), Idx(x_c_stride), Idx(x_l_stride)),
+            (batch_int, dim_int, seqlen_int),
+            (x_b_stride, x_c_stride, x_l_stride),
         ),
     )
     var w_tt = TileTensor(
         w_ptr,
         Layout(
-            (Idx(dim_int), Idx[WIDTH]()),
-            (Idx(w_c_stride), Idx(w_w_stride)),
+            (dim_int, Idx[WIDTH]),
+            (w_c_stride, w_w_stride),
         ),
     )
     var state_tt = TileTensor(
         state_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(state_len_int)),
-            (Idx(state_b_stride), Idx(state_c_stride), Idx(state_l_stride)),
+            (batch_int, dim_int, state_len_int),
+            (state_b_stride, state_c_stride, state_l_stride),
         ),
     )
     var o_tt = TileTensor(
         o_ptr,
         Layout(
-            (Idx(batch_int), Idx(dim_int), Idx(seqlen_int)),
-            (Idx(o_b_stride), Idx(o_c_stride), Idx(o_l_stride)),
+            (batch_int, dim_int, seqlen_int),
+            (o_b_stride, o_c_stride, o_l_stride),
         ),
     )
     update_kernel_cpu[
@@ -129,7 +129,7 @@ def causal_conv1d_update_cpu_variant(
 
 
 @export
-def PyInit_variant() -> PythonObject:
+def PyInit_variant() abi("C") -> PythonObject:
     try:
         var m = PythonModuleBuilder("variant")
         m.def_py_function[causal_conv1d_update_cpu_variant](

@@ -18,5 +18,5 @@ comptime kNThreads: Int = 128
 # the matching wide global ST. Mirrors upstream's
 #   static constexpr int kNElts = kNBytes == 4 ? 4 : 8;
 @always_inline
-fn kNEltsFwd[dtype: DType]() -> Int:
+def kNEltsFwd[dtype: DType]() -> Int:
     return 16 // size_of[dtype]()

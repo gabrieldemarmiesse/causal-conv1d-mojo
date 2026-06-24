@@ -253,14 +253,6 @@ def bwd_full_kernel[
     dinitial_states: TileTensor[
         mut=True, dtype, DILayoutType, MutAnyOrigin
     ],
-) where (
-    TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
-    and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
-    and TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin].flat_rank == 3
-    and TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin].flat_rank == 3
-    and TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin].flat_rank == 2
-    and TileTensor[dtype, ILayoutType, ImmutAnyOrigin].flat_rank == 3
-    and TileTensor[mut=True, dtype, DILayoutType, MutAnyOrigin].flat_rank == 3
 ):
     """Fused backward: dx + dweight + dbias, one block per (B, D).
 
@@ -293,6 +285,17 @@ def bwd_full_kernel[
 
     After the chunk loop: block-reduce dweight,dbias and atomic_add to global.
     """
+    comptime assert (
+        TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
+        and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
+        and TileTensor[dtype, DoutLayoutType, ImmutAnyOrigin].flat_rank == 3
+        and TileTensor[mut=True, dtype, DxLayoutType, MutAnyOrigin].flat_rank
+        == 3
+        and TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin].flat_rank == 2
+        and TileTensor[dtype, ILayoutType, ImmutAnyOrigin].flat_rank == 3
+        and TileTensor[mut=True, dtype, DILayoutType, MutAnyOrigin].flat_rank
+        == 3
+    ), "bwd_full_kernel: unexpected tensor ranks"
     comptime accum_t = DType.float32
     # Per-thread element count, set by the dispatcher: 8 for fp16/bf16
     # when seqlen is a multiple of 1024, else 4 (to keep all 128 threads
@@ -392,18 +395,18 @@ def bwd_full_kernel[
 
         comptime if contig_inner and aligned_seq:
             x_curr = x.load[width=kNElts, alignment=16](
-                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
+                Coord(batch_id, channel_id, seq_start)
             ).cast[accum_t]()
             dout_curr = dout.load[width=kNElts, alignment=16](
-                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
+                Coord(batch_id, channel_id, seq_start)
             ).cast[accum_t]()
         elif contig_inner:
             if chunk_start + kChunkSize <= seqlen:
                 x_curr = x.load[width=kNElts, alignment=16](
-                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
+                    Coord(batch_id, channel_id, seq_start)
                 ).cast[accum_t]()
                 dout_curr = dout.load[width=kNElts, alignment=16](
-                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
+                    Coord(batch_id, channel_id, seq_start)
                 ).cast[accum_t]()
             else:
 
@@ -440,9 +443,9 @@ def bwd_full_kernel[
             comptime if contig_inner:
                 x_prev = x.load[width=kNElts, alignment=16](
                     Coord(
-                        Idx(batch_id),
-                        Idx(channel_id),
-                        Idx(chunk_start - kNElts),
+                        batch_id,
+                        channel_id,
+                        chunk_start - kNElts,
                     )
                 ).cast[accum_t]()
             else:
@@ -680,13 +683,13 @@ def bwd_full_kernel[
 
         comptime if contig_inner and aligned_seq:
             dx.store[alignment=16](
-                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
+                Coord(batch_id, channel_id, seq_start),
                 dx_vals.cast[dtype](),
             )
         elif contig_inner:
             if chunk_start + kChunkSize <= seqlen:
                 dx.store[alignment=16](
-                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
+                    Coord(batch_id, channel_id, seq_start),
                     dx_vals.cast[dtype](),
                 )
             else:

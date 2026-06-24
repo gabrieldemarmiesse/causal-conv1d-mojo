@@ -108,9 +108,14 @@ def causal_conv1d_update_ref(
         ) + cache_seqlens.unsqueeze(1)
         copy_idx = torch.remainder(copy_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
         conv_state.scatter_(2, copy_idx, x)
-    out = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0, groups=dim)[
-        :, :, -seqlen:
-    ]
+    # F.conv1d(groups=dim, padding=0) crashes on AMD ROCm gfx942 (MI300A) even
+    # with MIOPEN_DISABLE_CACHE=1 — MIOpen's unpadded grouped conv path is broken.
+    # The padded path used in causal_conv1d_ref above is fine; only padding=0 hits
+    # the bad code path. unfold+mul+sum is numerically identical and backend-agnostic.
+    x_unfolded = x_new.unfold(-1, width, 1)  # (batch, dim, L-width+1, width)
+    out = (x_unfolded * weight.unsqueeze(0).unsqueeze(2)).sum(-1)[:, :, -seqlen:]
+    if bias is not None:
+        out = out + bias.view(1, -1, 1)
     if unsqueeze:
         out = out.squeeze(-1)
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
