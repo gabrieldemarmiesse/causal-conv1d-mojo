@@ -33,24 +33,24 @@ This file replaces the old pile of ``bench_*.py`` scripts (including the
 Apple-only ``bench_metal_gpu.py`` + ``scripts/xctrace_bench.sh`` +
 ``scripts/xctrace_gpu_intervals.py``, now folded in here): every shape
 is one invocation, every comparison is a flag. The
-``scripts/master_bench_nvidia.py`` orchestrator drives it across
+``scripts/master_bench.py`` orchestrator drives it across
 shapes/tiers and adds clock-locking, correctness gating, ncu, and
 assembly diffing.
 
 Examples
 --------
     # mojo-only fwd kernel time on one shape (fast inner loop)
-    python scripts/bench.py fwd --shape 1,4096,2048,4 --impl mojo
+    python scripts/_bench.py fwd --shape 1,4096,2048,4 --impl mojo
 
     # mojo vs upstream vs pytorch, kernel time, 5 runs, JSON for tooling
-    python scripts/bench.py fwd --shape 1,1024,2048,4 \
+    python scripts/_bench.py fwd --shape 1,1024,2048,4 \
         --impl all --runs 5 --json
 
     # end-to-end wall-clock (torch.utils.benchmark) for the update kernel
-    python scripts/bench.py update --shape 16,2048 --measure walltime
+    python scripts/_bench.py update --shape 16,2048 --measure walltime
 
     # raw loop for ncu to wrap (no profiler overhead)
-    python scripts/bench.py bwd --shape 4,4096,2048,4 \
+    python scripts/_bench.py bwd --shape 4,4096,2048,4 \
         --impl mojo --measure raw
 """
 

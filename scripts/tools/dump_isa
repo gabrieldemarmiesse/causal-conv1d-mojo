@@ -13,7 +13,7 @@
 #   ./scripts/tools/dump_isa --sub bwd_full --shape 1,2048,2048,4
 #   ./scripts/tools/dump_isa --sub update --shape 1,2048
 #
-# Extra args after `--` are forwarded to scripts/bench.py.
+# Extra args after `--` are forwarded to scripts/_bench.py.
 
 set -euo pipefail
 
@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Map sub-package -> bench.py function name.
+# Map sub-package -> _bench.py function name.
 case "$SUB" in
     fwd) FN=fwd ;;
     bwd_full) FN=bwd ;;
@@ -49,7 +49,7 @@ SHAPE_ARG=()
 # One synced call with the dump define active writes the variant's ISA.
 flock /tmp/.gpu_bench_lock \
     env CAUSAL_CONV1D_DUMP_ASM="$outdir" \
-    uv run python "$repo/scripts/bench.py" "$FN" \
+    uv run python "$repo/scripts/_bench.py" "$FN" \
         --impl mojo --measure raw --iters 1 --warmup 0 --runs 1 \
         "${SHAPE_ARG[@]}" "${EXTRA[@]}"
 
