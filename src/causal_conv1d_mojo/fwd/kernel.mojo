@@ -60,12 +60,6 @@ def fwd_kernel[
     seq_idx: TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin],
     initial_states: TileTensor[dtype, ILayoutType, ImmutAnyOrigin],
     output: TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin],
-) where (
-    TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
-    and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
-    and TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin].flat_rank == 3
-    and TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin].flat_rank == 2
-    and TileTensor[dtype, ILayoutType, ImmutAnyOrigin].flat_rank == 3
 ):
     """Causal conv1d forward, GPU. One block per (B, D); walks seqlen.
 
@@ -83,7 +77,7 @@ def fwd_kernel[
     exclusive with `has_seq_idx`.
 
     `contig_inner`: the innermost stride of x/output is 1. Encoded by
-    the dispatcher in the Layout types (`Idx[1]()` in the inner-stride
+    the dispatcher in the Layout types (`Idx[1]` in the inner-stride
     slot), so the inner-stride multiply folds out at comptime.
 
     `aligned_seq`: seqlen is a multiple of `kNThreads * kNElts`. When
@@ -102,6 +96,14 @@ def fwd_kernel[
     the kernel and adding ~4× branches versus upstream's vec-load path.
     Mirrors upstream's `kIsVecLoad` BOOL_SWITCH.
     """
+    comptime assert (
+        TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
+        and TileTensor[dtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
+        and TileTensor[mut=True, dtype, OLayoutType, MutAnyOrigin].flat_rank
+        == 3
+        and TileTensor[DType.int32, SLayoutType, ImmutAnyOrigin].flat_rank == 2
+        and TileTensor[dtype, ILayoutType, ImmutAnyOrigin].flat_rank == 3
+    ), "fwd_kernel: unexpected tensor ranks (expected x/o/init=3, w/seq_idx=2)"
     comptime accum_t = DType.float32
     comptime kNElts: Int = kNEltsFwd[dtype]()
     comptime kChunkSize: Int = kNThreads * kNElts
@@ -158,7 +160,7 @@ def fwd_kernel[
 
         comptime if contig_inner and aligned_seq:
             x_curr = x.load[width=kNElts, alignment=16](
-                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
+                Coord(batch_id, channel_id, seq_start)
             )
         elif contig_inner and vec_aligned:
             # vec_aligned ⇒ each thread's kNElts slice is either fully
@@ -168,7 +170,7 @@ def fwd_kernel[
             # scalar fallback, but vec_aligned makes it statically dead.
             if seq_start + kNElts <= seqlen:
                 x_curr = x.load[width=kNElts, alignment=16](
-                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
+                    Coord(batch_id, channel_id, seq_start)
                 )
         elif contig_inner:
             # Per-thread vec load when the thread's kNElts slice is fully
@@ -177,7 +179,7 @@ def fwd_kernel[
             # the load entirely (their `x_curr` stays at 0).
             if seq_start + kNElts <= seqlen:
                 x_curr = x.load[width=kNElts, alignment=16](
-                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start))
+                    Coord(batch_id, channel_id, seq_start)
                 )
             elif seq_start < seqlen:
 
@@ -305,7 +307,7 @@ def fwd_kernel[
         # ---- [P6] Store out_vals to global ----
         comptime if contig_inner and aligned_seq:
             output.store[alignment=16](
-                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
+                Coord(batch_id, channel_id, seq_start),
                 out_vals.cast[dtype](),
             )
         elif contig_inner and vec_aligned:
@@ -313,7 +315,7 @@ def fwd_kernel[
             # by `seq_start < seqlen` (or equivalently +kNElts ≤ seqlen);
             # OOB threads were already gated off by the `continue` above.
             output.store[alignment=16](
-                Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
+                Coord(batch_id, channel_id, seq_start),
                 out_vals.cast[dtype](),
             )
         elif contig_inner:
@@ -322,7 +324,7 @@ def fwd_kernel[
             # else fall through to scalar predicated stores.
             if seq_start + kNElts <= seqlen:
                 output.store[alignment=16](
-                    Coord(Idx(batch_id), Idx(channel_id), Idx(seq_start)),
+                    Coord(batch_id, channel_id, seq_start),
                     out_vals.cast[dtype](),
                 )
             else:

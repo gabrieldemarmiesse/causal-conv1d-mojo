@@ -177,6 +177,13 @@ def compile_and_load(
             cmd += ["-I", str(d)]
         for k, v in defines.items():
             cmd += ["-D", f"{k}={v}"]
+        # Pass the accelerator target explicitly so the compiler doesn't
+        # auto-detect the GPU via the HIP/CUDA runtime.  Auto-detection can
+        # return arch strings with suffixes (e.g. "gfx942:sramecc-:xnack-")
+        # that Mojo's normalizer doesn't strip, causing a compile-time
+        # constraint failure even for supported architectures (e.g. MI300A).
+        if "mi300a" in backend_arch.lower():
+            cmd += ["--target-accelerator", backend_arch]
         cmd += ["--emit", "shared-lib", "-o", str(so_path)]
         try:
             t1 = time.perf_counter()
@@ -287,6 +294,15 @@ def detect_gpu_backend() -> tuple[str, str]:
                     f"unknown AMD GPU targets. Open an issue with the "
                     f"output of `rocminfo | head -50`."
                 )
+            # MI300A and MI300X both report gfx942 from gcnArchName, but the
+            # Mojo stdlib exposes them as distinct targets ("gfx942" → MI300X,
+            # "mi300a" → MI300A).  Distinguish via the device name so the
+            # cache doesn't conflate the two and the compiler gets the right
+            # target.
+            if arch == "gfx942":
+                name = torch.cuda.get_device_name(0)
+                if "MI300A" in name:
+                    arch = "mi300a"
             return ("rocm", arch)
         major, minor = torch.cuda.get_device_capability(0)
         return ("cuda", f"sm{major}{minor}")

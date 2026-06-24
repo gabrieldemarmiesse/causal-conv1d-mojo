@@ -8,8 +8,8 @@ readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "torch>=2,<3",
-    "mojo-compiler==1.0.0b1",
-    "mojo-compiler-mojo-libs==1.0.0b1",
+    "mojo-compiler==1.0.0b3.dev2026062306",
+    "mojo-compiler-mojo-libs==1.0.0b3.dev2026062306",
 ]
 
 [project.scripts]
@@ -24,7 +24,6 @@ nvidia = [
 rocm = [
     "torch==2.8.0 ; sys_platform == 'linux'",
     "pytorch-triton-rocm ; sys_platform == 'linux'",
-    "causal-conv1d ; sys_platform == 'linux'",
 ]
 
 [build-system]
@@ -63,6 +62,12 @@ conflicts = [
 no-build-isolation-package = ["causal-conv1d"]
 
 [tool.uv.sources]
+mojo-compiler = [
+    { index = "modular-nightly" },
+]
+mojo-compiler-mojo-libs = [
+    { index = "modular-nightly" },
+]
 torch = [
     { index = "pytorch-cu128", extra = "nvidia" },
     { index = "pytorch-rocm", extra = "rocm" },
@@ -71,6 +76,11 @@ torch = [
 pytorch-triton-rocm = [
     { index = "pytorch-rocm", extra = "rocm" },
 ]
+
+[[tool.uv.index]]
+name = "modular-nightly"
+url = "https://whl.modular.com/nightly/simple/"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

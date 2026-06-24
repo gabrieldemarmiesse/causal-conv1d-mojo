@@ -22,5 +22,5 @@ comptime kNElts: Int = 4
 # uses 8 for 16-bit dtypes and 4 for fp32; matching that here gives
 # 16 bytes/thread = a single LDG.E.128 either way, doubling the per-
 # chunk element count for fp16/bf16 vs the old uniform-4 setting.
-fn kNEltsBwd_for[dtype: DType]() -> Int:
+def kNEltsBwd_for[dtype: DType]() -> Int:
     return 16 // size_of[dtype]()
