@@ -118,6 +118,12 @@ SUBPKG = {"fwd": "fwd", "bwd": "bwd_full", "update": "update"}
 # NVIDIA-only (there is no upstream kernel to match on other backends).
 REF_MATCH = {"fwd": ["Li4ELb1EN3c104HalfES2_E"], "bwd": ["Li4E"], "update": ["Li4E"]}
 
+# Upstream git tag to compile for the *PTX*-level histogram. The shipped wheel
+# is cubin-only (no embedded PTX), so we clone + compile the .cu with nvcc to
+# get comparable PTX. Keep in sync with the `causal-conv1d` wheel pinned in the
+# nvidia extra of pyproject.toml.
+UPSTREAM_REF = "v1.6.2.post1"
+
 
 # --------------------------------------------------------------------------
 # Backend description: every per-backend knob the phases below branch on.
@@ -945,6 +951,29 @@ def _dump_ptx(be: Backend, fn, dtype, canon, asm_dir: Path) -> Path | None:
     return ptxs[-1]
 
 
+def _ensure_upstream_csrc() -> Path | None:
+    """Shallow-clone Tri Dao's causal-conv1d at UPSTREAM_REF (cached) and return
+    its csrc/ dir — the source we compile to PTX. None if git/clone fails."""
+    dst = Path("~/.cache/causal_conv1d_mojo/upstream_src").expanduser() / UPSTREAM_REF
+    csrc = dst / "csrc"
+    if csrc.is_dir():
+        return csrc
+    if not shutil.which("git"):
+        warn("git not found — cannot fetch upstream source for the PTX histogram")
+        return None
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    r = run(
+        [
+            "git", "clone", "--depth", "1", "--branch", UPSTREAM_REF,
+            "https://github.com/Dao-AILab/causal-conv1d.git", str(dst),
+        ]
+    )  # fmt: skip
+    if r.returncode != 0 or not csrc.is_dir():
+        warn(f"failed to clone upstream {UPSTREAM_REF}; skipping PTX histogram")
+        return None
+    return csrc
+
+
 def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     asm_dir = REPO / "scripts" / "assembly" / "nvidia"
     ref_dir = REPO / "scripts" / "reference_assembly" / "nvidia"
@@ -958,6 +987,7 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
         Gate.fail(f"PTX dump failed for {fn}")
         return
     ptx = str(ptx_path)
+    print(f"our PTX: {ptx}", flush=True)
     our_sass = str(asm_dir / f"{fn}.sass")
     if (
         run(
@@ -988,7 +1018,7 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     section("(f) instruction-mix histogram vs upstream reference")
     ref_sass = ref_dir / f"{fn}.sass"
     if refresh_reference or not ref_sass.exists():
-        print(f"extracting upstream {fn} reference SASS")
+        print(f"extracting upstream {fn} reference SASS", flush=True)
         cmd = [
             sys.executable,
             tools,
@@ -1003,13 +1033,48 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
         if run(cmd).returncode != 0:
             warn(f"could not extract upstream reference ({fn}); skipping histogram")
     if ref_sass.exists():
+        print("SASS-level (ours vs upstream cubin):", flush=True)
         if (
             run(
                 [sys.executable, tools, "histogram", our_sass, str(ref_sass)]
             ).returncode
             != 0
         ):
-            warn("histogram diff failed")
+            warn("SASS histogram diff failed")
+
+    # PTX-level histogram. The shipped upstream .so is cubin-only, so we
+    # compile the .cu to PTX ourselves (nvcc via pixi) for a higher-level diff.
+    ref_ptx = ref_dir / f"{fn}.ptx"
+    if refresh_reference or not ref_ptx.exists():
+        csrc = _ensure_upstream_csrc()
+        if csrc is not None:
+            print(f"compiling upstream {fn} reference PTX (nvcc via pixi)", flush=True)
+            cmd = [
+                sys.executable, tools, "upstream-ptx", fn, str(ref_ptx),
+                "--src-dir", str(csrc), "--arch", be.arch_a,
+            ]  # fmt: skip
+            for m in REF_MATCH[fn]:
+                cmd += ["--match", m]
+            if run(cmd).returncode != 0:
+                warn(f"could not compile upstream PTX ({fn}); skipping PTX histogram")
+    if ref_ptx.exists():
+        print(f"upstream PTX: {ref_ptx}", flush=True)
+        print("PTX-level (ours vs upstream source):", flush=True)
+        if (
+            run(
+                [
+                    sys.executable,
+                    tools,
+                    "histogram",
+                    ptx,
+                    str(ref_ptx),
+                    "--format",
+                    "ptx",
+                ]
+            ).returncode
+            != 0
+        ):
+            warn("PTX histogram diff failed")
 
 
 def _assembly_dump_only(be: Backend, fn, dtype, canon) -> None:

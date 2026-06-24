@@ -20,6 +20,12 @@ Subcommands
         Extract upstream Tri Dao's <fn> kernel SASS from its compiled
         .so via cuobjdump. fn in {fwd,bwd,update}.
 
+    upstream-ptx <fn> <out.ptx> --src-dir <csrc> [--arch sm_90a]
+        Compile upstream Tri Dao's <fn>.cu to PTX (nvcc, supplied via
+        `pixi exec --spec cuda-nvcc=12.8` — the shipped .so is cubin-only,
+        so there's no PTX to extract from it), then pull out the kernel
+        matching --match. Lets the histogram diff PTX, not just SASS.
+
     histogram <ours> <theirs> [--top N] [--format auto|sass|ptx]
         Side-by-side instruction-mix histogram (base-opcode counts) of
         two PTX or SASS files. The trailing column is ours-minus-theirs.
@@ -30,8 +36,10 @@ from __future__ import annotations
 import argparse
 import glob
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -202,6 +210,121 @@ def cmd_upstream_sass(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# Upstream PTX (compile the .cu — the shipped .so has no embedded PTX).
+# --------------------------------------------------------------------------
+
+_FN_CU = {
+    "fwd": "causal_conv1d_fwd.cu",
+    "bwd": "causal_conv1d_bwd.cu",
+    "update": "causal_conv1d_update.cu",
+}
+
+
+def _torch_include_dirs() -> list[str]:
+    """torch's C++ headers — upstream's kernels include c10/util/{Half,BFloat16}.h
+    and c10/cuda/CUDAException.h. Imported lazily (torch import is ~seconds)."""
+    import torch  # noqa: PLC0415
+
+    inc = str(Path(torch.__file__).parent / "include")
+    return [inc, str(Path(inc) / "torch" / "csrc" / "api" / "include")]
+
+
+def _pixi_nvcc() -> list[str] | None:
+    """nvcc prefix via pixi — no PyPI wheel ships the nvcc driver (only ptxas),
+    so we source the real one ephemerally, mirroring the master bench's ncu.
+    Pinned to 12.8 to match the upstream `cu12torch2.8` wheel; cccl brings cub,
+    cudart-dev the CUDA headers."""
+    if not shutil.which("pixi"):
+        return None
+    return [
+        "pixi", "exec",
+        "--spec", "cuda-nvcc=12.8",
+        "--spec", "cuda-cccl=12.8",
+        "--spec", "cuda-cudart-dev=12.8",
+        "--", "nvcc",
+    ]  # fmt: skip
+
+
+def _ptx_kernel_blocks(ptx: str) -> list[tuple[str, str]]:
+    """Split a PTX module into (entry_name, body) blocks — one per `.entry`,
+    from its declaration through the matching close brace of its `{...}` body."""
+    lines = ptx.splitlines()
+    entry_re = re.compile(r"^\s*(?:\.visible\s+)?\.entry\s+([A-Za-z0-9_$]+)")
+    blocks: list[tuple[str, str]] = []
+    i, n = 0, len(lines)
+    while i < n:
+        m = entry_re.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        depth, seen_brace, j = 0, False, i
+        while j < n:
+            depth += lines[j].count("{") - lines[j].count("}")
+            if "{" in lines[j]:
+                seen_brace = True
+            if seen_brace and depth == 0:
+                break
+            j += 1
+        blocks.append((m.group(1), "\n".join(lines[i : j + 1])))
+        i = j + 1
+    return blocks
+
+
+def cmd_upstream_ptx(args) -> int:
+    src = Path(args.src_dir)
+    cu = src / _FN_CU[args.fn]
+    if not cu.is_file():
+        raise SystemExit(f"upstream source not found: {cu} (bad --src-dir?)")
+    nvcc = _pixi_nvcc()
+    if nvcc is None:
+        raise SystemExit("pixi not found — cannot supply nvcc to compile upstream PTX.")
+    incs: list[str] = []
+    for d in [str(src), *_torch_include_dirs()]:
+        incs += ["-I", d]
+    with tempfile.TemporaryDirectory() as td:
+        full = Path(td) / "full.ptx"
+        # --expt-relaxed-constexpr: upstream calls a constexpr __host__ helper
+        # (constexpr_min) from a __global__; the CXX11 ABI flag matches the
+        # `cxx11abiTRUE` upstream wheel so the c10 headers parse consistently.
+        r = _run([
+            *nvcc, "-ptx", f"-arch={args.arch}", "-std=c++17",
+            "-D_GLIBCXX_USE_CXX11_ABI=1", "--expt-relaxed-constexpr",
+            *incs, str(cu), "-o", str(full),
+        ])  # fmt: skip
+        if r.returncode != 0 or not full.is_file():
+            sys.stderr.write(r.stderr[-3000:])
+            raise SystemExit(f"nvcc -ptx failed on {cu.name}")
+        ptx_text = full.read_text()
+    # The .cu instantiates every (dtype × width × …) kernel; isolate the one
+    # comparable to our variant with the same needle the SASS path uses.
+    needles = [f"causal_conv1d_{args.fn}_kernel", *args.match]
+    matches = [
+        (n, b) for n, b in _ptx_kernel_blocks(ptx_text) if all(s in n for s in needles)
+    ]
+    if not matches:
+        raise SystemExit(f"no kernel matched {needles} in compiled PTX; try --list")
+    if args.list:
+        for i, (n, _) in enumerate(matches):
+            print(f"[{i}] {n}")
+        return 0
+    if len(matches) > 1 and args.index is None:
+        sys.stderr.write(
+            f"{len(matches)} kernels matched {needles}; pass --index or tighten "
+            f"--match (use --list). Defaulting to [0].\n"
+        )
+    idx = args.index or 0
+    if not (0 <= idx < len(matches)):
+        raise SystemExit(f"--index {idx} out of range; {len(matches)} matched")
+    name, body = matches[idx]
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(
+        f"// selected: {name}\n// from: {cu.name} (nvcc -arch={args.arch})\n{body}\n"
+    )
+    print(f"wrote {args.out} ({len(body.splitlines())} PTX lines)\n  kernel: {name}")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Instruction-mix histogram.
 # --------------------------------------------------------------------------
 
@@ -312,6 +435,21 @@ def main(argv=None) -> int:
     s.add_argument("--index", type=int, default=None, help="pick the Nth match")
     s.add_argument("--list", action="store_true", help="list matching kernels and exit")
     s.set_defaults(func=cmd_upstream_sass)
+
+    s = sub.add_parser("upstream-ptx", help="compile upstream .cu -> PTX via pixi nvcc")
+    s.add_argument("fn", choices=("fwd", "bwd", "update"))
+    s.add_argument("out")
+    s.add_argument("--src-dir", required=True, help="upstream csrc/ directory")
+    s.add_argument("--arch", default="sm_90a")
+    s.add_argument(
+        "--match",
+        action="append",
+        default=[],
+        help="extra mangled-name substring (repeatable)",
+    )
+    s.add_argument("--index", type=int, default=None, help="pick the Nth match")
+    s.add_argument("--list", action="store_true", help="list matching kernels and exit")
+    s.set_defaults(func=cmd_upstream_ptx)
 
     s = sub.add_parser("histogram", help="side-by-side instruction-mix histogram")
     s.add_argument("ours")
