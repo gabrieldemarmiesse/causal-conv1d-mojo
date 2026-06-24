@@ -83,7 +83,7 @@ import shutil
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -721,7 +721,9 @@ def _parse_ncu_csv(text: str) -> dict[str, dict] | None:
             num = float(raw.replace(",", ""))  # ncu uses ',' as a thousands sep
         except ValueError:
             continue
-        d = data.setdefault(name, {"unit": (row.get("Metric Unit") or "").strip(), "vals": []})
+        d = data.setdefault(
+            name, {"unit": (row.get("Metric Unit") or "").strip(), "vals": []}
+        )
         d["vals"].append(num)
     return data or None
 
@@ -957,7 +959,9 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     ptx = str(ptx_path)
     our_sass = str(asm_dir / f"{fn}.sass")
     if (
-        run([sys.executable, tools, "sass", ptx, our_sass, "--arch", be.arch_a]).returncode
+        run(
+            [sys.executable, tools, "sass", ptx, our_sass, "--arch", be.arch_a]
+        ).returncode
         != 0
     ):
         Gate.fail("PTX->SASS failed")
@@ -965,7 +969,16 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     section("(g) ptxas -v spill / regalloc canary")
     if (
         run(
-            [sys.executable, tools, "spill", ptx, "--arch", be.arch_a, "--max-spill", "0"]
+            [
+                sys.executable,
+                tools,
+                "spill",
+                ptx,
+                "--arch",
+                be.arch_a,
+                "--max-spill",
+                "0",
+            ]
         ).returncode
         != 0
     ):
@@ -975,13 +988,26 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     ref_sass = ref_dir / f"{fn}.sass"
     if refresh_reference or not ref_sass.exists():
         print(f"extracting upstream {fn} reference SASS")
-        cmd = [sys.executable, tools, "upstream-sass", fn, str(ref_sass), "--arch", be.arch]
+        cmd = [
+            sys.executable,
+            tools,
+            "upstream-sass",
+            fn,
+            str(ref_sass),
+            "--arch",
+            be.arch,
+        ]
         for m in REF_MATCH[fn]:
             cmd += ["--match", m]
         if run(cmd).returncode != 0:
             warn(f"could not extract upstream reference ({fn}); skipping histogram")
     if ref_sass.exists():
-        if run([sys.executable, tools, "histogram", our_sass, str(ref_sass)]).returncode != 0:
+        if (
+            run(
+                [sys.executable, tools, "histogram", our_sass, str(ref_sass)]
+            ).returncode
+            != 0
+        ):
             warn("histogram diff failed")
 
 
