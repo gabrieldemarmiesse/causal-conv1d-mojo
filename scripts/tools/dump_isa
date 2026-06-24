@@ -3,10 +3,11 @@
 # on ROCm), with the GPU lock applied.
 #
 # Non-invasive: sets CAUSAL_CONV1D_DUMP_ASM so `_jit_common` adds the
-# `-D DUMP_GPU_ASM=...` define to the `mojo build`, and the stdlib's
-# `compile_function` writes the ISA at runtime. No more patching
-# launch.mojo. (On NVIDIA, turn the PTX into SASS / a spill report with
-# `scripts/_asm_tools.py sass|spill`.)
+# `-D DUMP_ASSEMBLY_INTO=<dir>/<sub>__<mod>.ptx` define to the `mojo build`;
+# `variant.mojo` reads it and passes it to `compile_function`'s `dump_asm=`,
+# which writes the ISA at runtime. No patching of launch.mojo. (On NVIDIA,
+# turn the PTX into SASS / a spill report with `scripts/_asm_tools.py
+# sass|spill`.)
 #
 # Usage:
 #   ./scripts/tools/dump_isa --sub fwd --shape 1,1024,2048,4

@@ -126,7 +126,7 @@ def compile_and_load(
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     defines = _maybe_add_asm_dump(dict(defines), subpkg, mod_name)
-    if "DUMP_GPU_ASM" in defines:
+    if "DUMP_ASSEMBLY_INTO" in defines:
         # The dump build carries an extra define, so it's a distinct cache
         # entry — give it a distinct `mod_name` too, else the glob-unlink
         # below would evict the perf variant's `.so` (same `mod_name`,
@@ -228,34 +228,51 @@ def compile_and_load(
 def _maybe_add_asm_dump(
     defines: dict[str, str], subpkg: str, mod_name: str
 ) -> dict[str, str]:
-    """When ``CAUSAL_CONV1D_DUMP_ASM=<dir>`` is set, ask the Mojo compiler
-    to dump this variant's PTX at ``compile_function`` time.
+    """Inject the ``DUMP_ASSEMBLY_INTO`` define that makes ``compile_function``
+    write this variant's PTX at compile time.
 
-    The Mojo stdlib's ``DeviceContext.compile_function`` consults the
-    ``DUMP_GPU_ASM`` *compile-time define* (read via ``is_defined`` in
-    ``device_context.mojo``) before any source-level ``dump_asm=``
-    argument — so we get a clean, non-invasive PTX dump just by adding a
-    ``-D`` flag here, with zero edits to the kernel launch path. Folding
-    the path into ``defines`` means it's part of the cache hash, so a dump
-    build is its own cache entry and a normal build is byte-for-byte
-    unaffected.
+    Our ``variant.mojo`` reads ``DUMP_ASSEMBLY_INTO`` via
+    ``get_defined_string`` and passes it straight to ``compile_function``'s
+    ``dump_asm=`` argument (empty string => no dump). We drive that define
+    explicitly rather than relying on the Mojo stdlib's implicit
+    ``DUMP_GPU_ASM`` env-define hook, which is consulted *inside*
+    ``device_context.mojo`` and is invisible at our call site.
 
-    We deliberately do *not* set ``DUMP_GPU_SASS``: the stdlib's SASS dump
-    shells out to a hard-coded ``/usr/local/cuda/bin/nvdisasm`` and aborts
-    if it's missing. The asm tooling derives SASS (and the ptxas ``-v``
-    spill canary) from this PTX with a portable ``ptxas``/``nvdisasm``
-    instead — see ``scripts/_asm_tools.py``.
+    Two ways to ask for a dump:
 
-    The file lands at ``<dir>/<subpkg>__<mod_name>.ptx`` — one per variant,
-    no ``%`` placeholder collisions. The path must be absolute (the
-    stdlib's ``_is_path_like`` only accepts ``/``, ``~`` or ``./``).
+    - ``CAUSAL_CONV1D_DUMP_ASM=<dir>`` — the per-variant scheme the bench
+      tooling uses. Each variant's PTX lands at
+      ``<dir>/<subpkg>__<mod_name>.ptx`` (one file per variant, no ``%``
+      placeholder collisions), so ``scripts/_asm_tools.py`` can glob them.
+    - ``DUMP_ASSEMBLY_INTO=<file>`` — a literal path used verbatim (a ``%``
+      in it expands to the kernel module name, per the stdlib). Handy for a
+      one-off manual dump. Takes precedence when both are set.
+
+    We dump only PTX, not SASS: the stdlib's ``_dump_sass`` shells out to a
+    hard-coded ``/usr/local/cuda/bin/{ptxas,nvdisasm}`` and raises if either
+    is missing (``MODULAR_NVPTX_COMPILER_PATH`` redirects only the compiler's
+    ptxas, not these). ``scripts/_asm_tools.py`` derives SASS (and the ptxas
+    ``-v`` spill canary) from this PTX with the portable ``ptxas``/``nvdisasm``
+    shipped in the triton wheel instead.
+
+    Folding the path into ``defines`` means it's part of the cache hash, so a
+    dump build is its own cache entry and a normal build is byte-for-byte
+    unaffected. The path must be absolute (the stdlib's ``_is_path_like``
+    only accepts ``/``, ``~`` or ``./``).
     """
+    explicit = os.environ.get("DUMP_ASSEMBLY_INTO")
+    if explicit:
+        path = Path(explicit).expanduser()
+        # `%` is expanded by the stdlib, not us — only mkdir the static part.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        defines["DUMP_ASSEMBLY_INTO"] = str(path)
+        return defines
     dump_dir = os.environ.get("CAUSAL_CONV1D_DUMP_ASM")
     if not dump_dir:
         return defines
     base = Path(dump_dir).expanduser().resolve() / f"{subpkg}__{mod_name}"
     base.parent.mkdir(parents=True, exist_ok=True)
-    defines["DUMP_GPU_ASM"] = f"{base}.ptx"
+    defines["DUMP_ASSEMBLY_INTO"] = f"{base}.ptx"
     return defines
 
 

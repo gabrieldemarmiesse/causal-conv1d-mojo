@@ -7,7 +7,12 @@ set by `_jit.py`. See that file for the full set of dimensions.
 from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
-from std.sys import get_defined_bool, get_defined_dtype, get_defined_int
+from std.sys import (
+    get_defined_bool,
+    get_defined_dtype,
+    get_defined_int,
+    get_defined_string,
+)
 
 from launch import launch_bwd_full
 from _ctx import acquire_ctx_handle
@@ -22,6 +27,10 @@ comptime APPLY_SILU = get_defined_bool["APPLY_SILU"]()
 comptime CONTIG_INNER = get_defined_bool["CONTIG_INNER"]()
 comptime ALIGNED_SEQ = get_defined_bool["ALIGNED_SEQ"]()
 comptime USE_EXTERNAL_STREAM = get_defined_bool["USE_EXTERNAL_STREAM"]()
+# When non-empty, the path `compile_function` dumps this variant's PTX to
+# (set via the `DUMP_ASSEMBLY_INTO` env var, threaded through `_jit_common`
+# as a `-D` define). Empty => no dump. `%` expands to the module name.
+comptime DUMP_ASSEMBLY_INTO = get_defined_string["DUMP_ASSEMBLY_INTO", ""]()
 
 
 def causal_conv1d_bwd_full_acquire_ctx(
@@ -93,6 +102,7 @@ def causal_conv1d_bwd_full_variant(
         CONTIG_INNER,
         ALIGNED_SEQ,
         USE_EXTERNAL_STREAM,
+        DUMP_ASSEMBLY_INTO,
     ](
         batch_int,
         dim_int,

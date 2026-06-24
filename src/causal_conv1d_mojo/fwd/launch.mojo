@@ -43,6 +43,7 @@ def launch_fwd[
     aligned_seq: Bool,
     vec_aligned: Bool,
     use_external_stream: Bool,
+    dump_assembly_into: StaticString = "",
 ](
     batch_int: Int,
     dim_int: Int,
@@ -175,7 +176,8 @@ def launch_fwd[
                 OLT,
                 SLT,
                 ILT,
-            ]
+            ],
+            dump_asm=dump_assembly_into,
         ]()
         comptime if use_external_stream:
             var stream = ctx.create_external_stream(stream_opaque)

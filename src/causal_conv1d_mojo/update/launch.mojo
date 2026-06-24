@@ -41,6 +41,7 @@ def launch_update[
     has_state_indices: Bool,
     is_circular: Bool,
     use_external_stream: Bool,
+    dump_assembly_into: StaticString = "",
 ](
     batch_int: Int,
     dim_int: Int,
@@ -112,7 +113,8 @@ def launch_update[
             apply_silu,
             has_state_indices,
             is_circular,
-        ]
+        ],
+        dump_asm=dump_assembly_into,
     ]()
     comptime if use_external_stream:
         var stream = ctx.create_external_stream(stream_opaque)
