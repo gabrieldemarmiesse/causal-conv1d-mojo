@@ -4,7 +4,7 @@
 Fully non-interactive (passwordless ``sudo -n`` only — never prompts), so it
 runs unattended in CI or under an agent. It is a stdlib-only *coordinator*:
 the actual work happens in subprocesses run under the project venv
-(``uv run [--extra <backend>] python scripts/bench.py ...`` and, on NVIDIA,
+(``uv run [--extra <backend>] python scripts/_bench.py ...`` and, on NVIDIA,
 ``scripts/_asm_tools.py``). This script just detects the GPU backend, locks
 the environment, sequences the phases, parses their JSON, and gates on the
 results.
@@ -137,13 +137,13 @@ class Backend:
     arch: str  # "sm_89" / "gfx942" / "macos15" / "" (nvidia uses it for asm)
     arch_a: str = ""  # ptxas target with the 'a' suffix (nvidia only)
     uv_extra: list[str] = field(default_factory=list)  # uv `--extra` flags
-    device: str = "cuda"  # torch device passed to bench.py (--device)
+    device: str = "cuda"  # torch device passed to _bench.py (--device)
     test_device: str = "cuda"  # pytest -k device token
     kernel_impls: tuple[str, ...] = ("mojo",)  # impls for the kernel bench
     walltime_impls: tuple[str, ...] = ("mojo",)  # impls for the walltime run
     baseline: str | None = None  # ratio baseline impl, or None for absolute
     gate_ratio: bool = False  # does a slow ratio FAIL the gate?
-    kernel_measure: str = "kernel"  # bench.py --measure for step (c)
+    kernel_measure: str = "kernel"  # _bench.py --measure for step (c)
 
     def uv(self, tool: str = "python") -> list[str]:
         """``uv run [--extra ...] <tool>`` prefix for this backend's venv."""
@@ -296,7 +296,7 @@ def _make_metal_backend() -> Backend:
     major = (platform.mac_ver()[0] or "").split(".")[0]
     chip = _sysctl("machdep.cpu.brand_string") or "Apple GPU"
     # Kernel time on Apple is an out-of-process xctrace orchestration that
-    # bench.py owns; it is mojo-only (upstream is CUDA-only) and yields an
+    # _bench.py owns; it is mojo-only (upstream is CUDA-only) and yields an
     # *absolute* per-kernel GPU time, so there is no ratio to gate.
     return Backend(
         name="metal",
@@ -343,7 +343,7 @@ _BACKEND_FACTORIES = {
 def detect_backend(forced: str | None) -> Backend:
     """Pick the backend: explicit ``--backend`` wins, else auto-probe.
 
-    Probe order mirrors bench.py's device resolution: a real NVIDIA GPU
+    Probe order mirrors _bench.py's device resolution: a real NVIDIA GPU
     (nvidia-smi reports a name), else an AMD GPU (rocminfo/rocm-smi), else
     Apple (darwin), else CPU.
     """
@@ -366,7 +366,7 @@ def detect_backend(forced: str | None) -> Backend:
 def lock_clocks(be: Backend, enabled: bool) -> tuple[str, bool]:
     """Lock accelerator clocks. Returns (clock_tag, locked).
 
-    The ``clock_tag`` is folded into bench.py's baseline-cache key so cached
+    The ``clock_tag`` is folded into _bench.py's baseline-cache key so cached
     numbers never mix locked and unlocked measurements.
     """
     section("(a) lock clocks")
@@ -378,11 +378,11 @@ def lock_clocks(be: Backend, enabled: bool) -> tuple[str, bool]:
     if be.name == "rocm":
         return _lock_rocm()
     # Apple drops the GPU clock between the per-call syncs (DVFS) and exposes
-    # no headless lock; bench.py instead splits per-encoder time by clock
+    # no headless lock; _bench.py instead splits per-encoder time by clock
     # state and trusts the 'Maximum'-clock rows. CPU has no GPU clock.
     warn(f"no headless clock lock on {be.name}; running UNLOCKED.")
     if be.name == "metal":
-        warn("(bench.py splits Apple GPU time by DVFS clock state — trust Maximum.)")
+        warn("(_bench.py splits Apple GPU time by DVFS clock state — trust Maximum.)")
     return "unlocked", False
 
 
@@ -506,7 +506,7 @@ def bench_kernel(be: Backend, fn, dtype, shapes, runs, clock, baseline_flags) ->
         cmd = [
             *taskset_prefix(),
             *be.uv(),
-            str(REPO / "scripts" / "bench.py"),
+            str(REPO / "scripts" / "_bench.py"),
             fn,
             "--shape",
             shape,
@@ -695,7 +695,7 @@ def _profiler_ncu(be: Backend, fn, dtype, canon) -> None:
     ncu = _ncu_cmd()
     if ncu is None:
         warn("ncu not found and pixi unavailable — skipping deep profiling.")
-        warn("(the raw-mode driver 'bench.py ... --measure raw' is ready for it.)")
+        warn("(the raw-mode driver '_bench.py ... --measure raw' is ready for it.)")
         return
     print(f"profiler: {' '.join(ncu)}")
     cmd = [
@@ -709,7 +709,7 @@ def _profiler_ncu(be: Backend, fn, dtype, canon) -> None:
         "--metrics",
         _NCU_METRICS,
         *be.uv(),
-        str(REPO / "scripts" / "bench.py"),
+        str(REPO / "scripts" / "_bench.py"),
         fn,
         "--shape",
         canon,
@@ -776,7 +776,7 @@ def _profiler_perf(be: Backend, fn, dtype, canon) -> None:
         "stat",
         "-d",
         *be.uv(),
-        str(REPO / "scripts" / "bench.py"),
+        str(REPO / "scripts" / "_bench.py"),
         fn,
         "--shape",
         canon,
@@ -834,7 +834,7 @@ def _dump_ptx(be: Backend, fn, dtype, canon, asm_dir: Path) -> Path | None:
     dump = run(
         [
             *be.uv(),
-            str(REPO / "scripts" / "bench.py"),
+            str(REPO / "scripts" / "_bench.py"),
             fn,
             "--shape",
             canon,
@@ -938,7 +938,7 @@ def walltime(be: Backend, fn, dtype, canon, runs, clock, baseline_flags) -> None
     cmd = [
         *taskset_prefix(),
         *be.uv(),
-        str(REPO / "scripts" / "bench.py"),
+        str(REPO / "scripts" / "_bench.py"),
         fn,
         "--shape",
         canon,

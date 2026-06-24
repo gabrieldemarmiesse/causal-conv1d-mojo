@@ -57,7 +57,10 @@ upstream Tri Dao CUDA", with upstream as the moving target.
   here. Scripts meant to be invoked directly have plain names; internal
   helpers (only imported or spawned by another script) are prefixed with
   `_`.
-  - `bench.py`: **the unified driver**. One CLI for every function
+  - `_bench.py`: **the unified driver** (internal — `master_bench.py` is
+    the entrypoint everyone should use; this is spawned by it, and is the
+    `_`-prefixed single-shape measurement primitive you can still invoke
+    directly for ad-hoc debugging). One CLI for every function
     (`fwd`/`bwd`/`update`), every input shape, every function-argument
     flag (`--bias`/`--seq-idx`/`--initial-states`/`--cache-seqlens`/…),
     against every impl (`--impl mojo,upstream,pytorch`), measured three
@@ -99,15 +102,20 @@ upstream Tri Dao CUDA", with upstream as the moving target.
 
 ## Running the benches
 
+The primary entrypoint is `scripts/master_bench.py` (see "The master bench"
+below) — it auto-detects the backend and orchestrates the full a–h gate.
+The examples below drive the internal `_bench.py` primitive directly, which
+is handy for a single shape during a tight dev loop.
+
 Always use `uv run --extra nvidia …` — the `nvidia` extra pulls in the
 upstream Tri Dao causal-conv1d wheel that the benches diff against.
 
 ```bash
 # Per-kernel GPU time, mojo vs upstream, one shape (fast inner loop)
-uv run --extra nvidia python scripts/bench.py fwd --shape 1,4096,2048,4 --impl all
+uv run --extra nvidia python scripts/_bench.py fwd --shape 1,4096,2048,4 --impl all
 
 # End-to-end wall-clock (torch.utils.benchmark, auto sync)
-uv run --extra nvidia python scripts/bench.py update --shape 16,2048 --measure walltime
+uv run --extra nvidia python scripts/_bench.py update --shape 16,2048 --measure walltime
 
 # Wall-clock + plots into docs/
 uv run --extra nvidia python scripts/plot_bench.py
@@ -124,7 +132,7 @@ phase to that backend's tooling and **skipping cleanly where it doesn't
 exist**:
 
 - **(a) lock clocks** — cuda: `nvidia-smi`; rocm: `rocm-smi --setperflevel
-  high`; metal/cpu: no headless lock (skipped — on Apple `bench.py` splits
+  high`; metal/cpu: no headless lock (skipped — on Apple `_bench.py` splits
   GPU time by DVFS clock state instead).
 - **(b) recompile + correctness** — clears *our* JIT cache, runs the quick
   smoke / `--full` regression suite under the backend's `uv` extra and
@@ -240,7 +248,7 @@ optimising the kernel itself. Use one of the following.
 
 ### 1. torch.profiler (CUPTI traces)
 
-Cheapest, no extra perms needed. `bench.py --measure kernel` does this:
+Cheapest, no extra perms needed. `_bench.py --measure kernel` does this:
 runs N iters under `torch.profiler`, walks `prof.events()` and sums
 `evt.self_device_time_total` for the kernels attributed to each impl.
 This gives **per-kernel GPU time** including only the kernel's actual
@@ -248,7 +256,7 @@ execution. Use this as the primary perf signal.
 
 Quirk: the kernel name on the GPU side is whatever the Mojo build
 emits (e.g. `kernel_fwd_kernel_DType_Int6A6AcB6A6AsA6A6A_<hash>`). The
-classifiers in `bench.py` (`_mojo_classifier`/`_upstream_classifier`)
+classifiers in `_bench.py` (`_mojo_classifier`/`_upstream_classifier`)
 match on substring `fwd_kernel` and the upstream `void
 causal_conv1d_fwd_kernel` prefix — update them if the Mojo build naming
 changes. The pure-pytorch impl has no single named kernel, so it sums
@@ -261,7 +269,7 @@ reasons, bank conflicts, etc). Needs the kernel to actually run, and
 on shared hosts often needs the `--target-processes all` flag plus the
 right perf-counter permission. The master bench runs this automatically
 (step d, ephemerally via `pixi exec --spec nsight-compute -- ncu`);
-to drive it by hand, wrap `bench.py --measure raw` (no profiler in-proc):
+to drive it by hand, wrap `_bench.py --measure raw` (no profiler in-proc):
 
 ```bash
 # Single-shape, single-kernel runs — keep ITERS small (ncu serializes).
@@ -276,7 +284,7 @@ dram__bytes.sum.per_second,\
 l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum.per_second,\
 smsp__inst_executed_op_shared_st.sum,\
 smsp__inst_executed_op_shared_ld.sum" \
-    python scripts/bench.py fwd --shape 1,4096,2048,4 \
+    python scripts/_bench.py fwd --shape 1,4096,2048,4 \
       --impl mojo --measure raw --iters 30 --warmup 10
 ```
 
@@ -301,17 +309,17 @@ intra-kernel problem.
 ```bash
 uv run --extra nvidia nsys profile --stats=true \
     -o /tmp/causal_conv1d \
-    python scripts/bench.py fwd --shape 1,4096,2048,4 --impl mojo --measure raw
+    python scripts/_bench.py fwd --shape 1,4096,2048,4 --impl mojo --measure raw
 ```
 
 The summary table prints per-kernel total/avg time and call counts —
 sanity-check against torch.profiler.
 
-### 4. Apple silicon: `bench.py --device mps --measure kernel`
+### 4. Apple silicon: `_bench.py --device mps --measure kernel`
 
 There is no torch device-time hook for Metal, so the CUPTI/rocprof path
-in `bench.py --measure kernel` can't read per-kernel time in-process on
-Apple. Instead `bench.py` **orchestrates Instruments itself**: it
+in `_bench.py --measure kernel` can't read per-kernel time in-process on
+Apple. Instead `_bench.py` **orchestrates Instruments itself**: it
 pre-warms the JIT cache, records an "Metal System Trace" with `xctrace`
 around a re-launch of *itself* as the traced `--measure raw` workload,
 then parses the scriptable `metal-gpu-intervals` table back out and
@@ -322,19 +330,19 @@ separate `bench_metal_gpu.py` + `scripts/xctrace_bench.sh` +
 
 ```bash
 # pre-warms, records a trace, prints per-encoder GPU time + clock split
-uv run python scripts/bench.py fwd --device mps --shape 1,1024,2048,4
-uv run python scripts/bench.py update --device mps --dtype bf16
+uv run python scripts/_bench.py fwd --device mps --shape 1,1024,2048,4
+uv run python scripts/_bench.py update --device mps --dtype bf16
 # on a mac with no cuda, --device defaults to auto -> mps, so just:
-uv run python scripts/bench.py fwd --shape 1,1024,2048,4
+uv run python scripts/_bench.py fwd --shape 1,1024,2048,4
 ```
 
 The mojo-only nature is intentional: upstream causal-conv1d is CUDA-only,
 so there's nothing to diff against on Apple — the goal is precise
 *absolute* GPU time. Our forward kernel shows up as
 `Compute / Compute Command`; host<->device copies are `Blit Command`.
-Implementation notes (all in `bench.py`):
+Implementation notes (all in `_bench.py`):
 
-- The traced child is a re-launch of `bench.py` with `--device mps
+- The traced child is a re-launch of `_bench.py` with `--device mps
   --measure raw` and `CAUSAL_CONV1D_BENCH_TRACED=1` set, so it runs the
   bare loop (bracketed by `torch.mps.profiler.profile`) instead of
   recursively orchestrating another trace. `--measure walltime`/`raw`
@@ -359,7 +367,7 @@ Implementation notes (all in `bench.py`):
   dispatches; short kernels are frequently measured at a reduced clock,
   which is the main source of run-to-run variance (a kernel can read
   ~1.1 ms at Maximum clock and ~2.2 ms at Minimum in the same run).
-  `bench.py` reads `gpu-performance-state-intervals` and splits the
+  `_bench.py` reads `gpu-performance-state-intervals` and splits the
   per-encoder summary by GPU clock state — **trust the `Maximum`-clock
   row** as the steady-state time (the reported headline kernel time picks
   it); the rest is throttled noise. Each group's reported number is the
@@ -374,7 +382,7 @@ Performance" / "Metal GPU Counters" templates:
   GPU time (`metal-gpu-intervals`), GPU **clock/performance state** over
   time (`gpu-performance-state-intervals`, used for the clock split), the
   GPU **Active vs Idle duty cycle** (`metal-gpu-state-intervals` — surfaced
-  by `bench.py` as the "GPU duty cycle" line; low active % == the workload
+  by `_bench.py` as the "GPU duty cycle" line; low active % == the workload
   is launch/sync-bound, the single most actionable headless signal),
   command-buffer timings, residency-set events, `device-thermal-state-
   intervals`. `powermetrics --samplers gpu_power` (needs sudo) additionally
@@ -485,7 +493,7 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
 
 ## Where to look first when perf regresses
 
-1. Run `python scripts/master_bench.py` (or `bench.py --measure
+1. Run `python scripts/master_bench.py` (or `_bench.py --measure
    kernel` for one shape) and compare ratios per shape. Wall-clock
    benches are noisy until shapes are large.
 2. If the small-shape ratio gets worse but large-shape ratio is fine →
@@ -495,7 +503,7 @@ on H100 fp16 to ~1.0-1.3× on the same shapes):
    Compare the instruction-mix histogram against the committed upstream
    reference (the master bench prints it, step f). To dump PTX/SASS by
    hand: `CAUSAL_CONV1D_DUMP_ASM=$PWD/scripts/assembly/nvidia uv run --extra
-   nvidia python scripts/bench.py <fn> --shape <S> --impl mojo
+   nvidia python scripts/_bench.py <fn> --shape <S> --impl mojo
    --measure raw --iters 1 --warmup 0 --runs 1`, then
    `scripts/_asm_tools.py sass|spill|histogram …`. No need to edit
    `launch.mojo` — the dump is a comptime define added by `_jit_common`.

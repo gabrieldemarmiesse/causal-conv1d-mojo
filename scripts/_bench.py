@@ -40,17 +40,17 @@ assembly diffing.
 Examples
 --------
     # mojo-only fwd kernel time on one shape (fast inner loop)
-    python scripts/bench.py fwd --shape 1,4096,2048,4 --impl mojo
+    python scripts/_bench.py fwd --shape 1,4096,2048,4 --impl mojo
 
     # mojo vs upstream vs pytorch, kernel time, 5 runs, JSON for tooling
-    python scripts/bench.py fwd --shape 1,1024,2048,4 \
+    python scripts/_bench.py fwd --shape 1,1024,2048,4 \
         --impl all --runs 5 --json
 
     # end-to-end wall-clock (torch.utils.benchmark) for the update kernel
-    python scripts/bench.py update --shape 16,2048 --measure walltime
+    python scripts/_bench.py update --shape 16,2048 --measure walltime
 
     # raw loop for ncu to wrap (no profiler overhead)
-    python scripts/bench.py bwd --shape 4,4096,2048,4 \
+    python scripts/_bench.py bwd --shape 4,4096,2048,4 \
         --impl mojo --measure raw
 """
 

@@ -8,7 +8,7 @@ wastes ~minutes per bench. This module memo-izes those measurements to
 
 Two consumers, one store:
 
-- `bench.py` (the unified driver) caches full *run-distributions* via
+- `_bench.py` (the unified driver) caches full *run-distributions* via
   `get_runs()` / `put_runs()`, keying each record on a per-impl version
   tag (so an upstream wheel bump invalidates only upstream) plus an env
   signature that folds in the GPU name and clock-lock state (so unlocking
