@@ -137,7 +137,6 @@ class Backend:
     pretty: str  # human GPU/CPU name for the banner
     arch: str  # "sm_89" / "gfx942" / "macos15" / "" (nvidia uses it for asm)
     arch_a: str = ""  # ptxas target with the 'a' suffix (nvidia only)
-    uv_extra: list[str] = field(default_factory=list)  # uv `--extra` to launch UNDER
     device: str = "cuda"  # torch device passed to _bench.py (--device)
     test_device: str = "cuda"  # pytest -k device token
     kernel_impls: tuple[str, ...] = ("mojo",)  # impls for the kernel bench
@@ -145,15 +144,6 @@ class Backend:
     baseline: str | None = None  # ratio baseline impl, or None for absolute
     gate_ratio: bool = False  # does a slow ratio FAIL the gate?
     kernel_measure: str = "kernel"  # _bench.py --measure for step (c)
-
-    def py(self) -> list[str]:
-        """Interpreter prefix for spawned children: reuse *this* process's
-        interpreter (``sys.executable``) rather than shelling through
-        ``uv run`` per child — that avoids uv's per-call env-resync line noise
-        (``Uninstalled/Installed N packages``) and re-resolve latency. The
-        ambient env must already carry this backend's deps, i.e. launch the
-        master bench itself with ``uv run [--extra <uv_extra>] python …``."""
-        return [sys.executable]
 
 
 # --------------------------------------------------------------------------
@@ -273,7 +263,6 @@ def _make_cuda_backend() -> Backend:
         pretty=nvidia_smi("name") or "NVIDIA GPU",
         arch=f"sm_{cc}",
         arch_a=f"sm_{cc}a",
-        uv_extra=["--extra", "nvidia"],
         device="cuda",
         test_device="cuda",
         kernel_impls=("mojo", "upstream", "pytorch"),
@@ -293,7 +282,6 @@ def _make_rocm_backend() -> Backend:
         name="rocm",
         pretty=_rocm_name(),
         arch=_rocm_arch(),
-        uv_extra=["--extra", "rocm"],
         device="cuda",
         test_device="cuda",
         kernel_impls=("mojo", "pytorch"),
@@ -314,7 +302,6 @@ def _make_metal_backend() -> Backend:
         name="metal",
         pretty=chip,
         arch=f"macos{major}" if major else "macos",
-        uv_extra=[],
         device="mps",
         test_device="mps",
         kernel_impls=("mojo",),
@@ -333,7 +320,6 @@ def _make_cpu_backend() -> Backend:
         name="cpu",
         pretty=platform.processor() or platform.machine() or "CPU",
         arch="",
-        uv_extra=[],
         device="cpu",
         test_device="cpu",
         kernel_impls=("mojo", "pytorch"),
@@ -477,7 +463,7 @@ def correctness(be: Backend, tier: str, clean: bool) -> bool:
         shutil.rmtree(cache, ignore_errors=True)
     if tier == "quick":
         cmd = [
-            *be.py(),
+            sys.executable,
             "-m",
             "pytest",
             "-q",
@@ -490,7 +476,7 @@ def correctness(be: Backend, tier: str, clean: bool) -> bool:
         ]
     else:
         print("full regression suite (every landed feature, all devices/dtypes)")
-        cmd = [*be.py(), "-m", "pytest", "-q"]
+        cmd = [sys.executable, "-m", "pytest", "-q"]
     ok = run(cmd).returncode == 0
     if not ok:
         Gate.fail(f"{tier} correctness failed")
@@ -520,7 +506,7 @@ def bench_kernel(be: Backend, fn, dtype, shapes, runs, clock, baseline_flags) ->
     for shape in shapes:
         cmd = [
             *taskset_prefix(),
-            *be.py(),
+            sys.executable,
             str(REPO / "scripts" / "_bench.py"),
             fn,
             "--shape",
@@ -786,7 +772,7 @@ def _profiler_ncu(be: Backend, fn, dtype, canon) -> None:
         "--metrics",
         _NCU_METRICS,
         "--csv",
-        *be.py(),
+        sys.executable,
         str(REPO / "scripts" / "_bench.py"),
         fn,
         "--shape",
@@ -867,7 +853,7 @@ def _profiler_perf(be: Backend, fn, dtype, canon) -> None:
         "perf",
         "stat",
         "-d",
-        *be.py(),
+        sys.executable,
         str(REPO / "scripts" / "_bench.py"),
         fn,
         "--shape",
@@ -925,7 +911,7 @@ def _dump_ptx(be: Backend, fn, dtype, canon, asm_dir: Path) -> Path | None:
     env["CAUSAL_CONV1D_DUMP_ASM"] = str(asm_dir)
     dump = run(
         [
-            *be.py(),
+            sys.executable,
             str(REPO / "scripts" / "_bench.py"),
             fn,
             "--shape",
@@ -971,7 +957,7 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     ptx = str(ptx_path)
     our_sass = str(asm_dir / f"{fn}.sass")
     if (
-        run([*be.py(), tools, "sass", ptx, our_sass, "--arch", be.arch_a]).returncode
+        run([sys.executable, tools, "sass", ptx, our_sass, "--arch", be.arch_a]).returncode
         != 0
     ):
         Gate.fail("PTX->SASS failed")
@@ -979,7 +965,7 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     section("(g) ptxas -v spill / regalloc canary")
     if (
         run(
-            [*be.py(), tools, "spill", ptx, "--arch", be.arch_a, "--max-spill", "0"]
+            [sys.executable, tools, "spill", ptx, "--arch", be.arch_a, "--max-spill", "0"]
         ).returncode
         != 0
     ):
@@ -989,13 +975,13 @@ def _assembly_nvidia(be: Backend, fn, dtype, canon, refresh_reference) -> None:
     ref_sass = ref_dir / f"{fn}.sass"
     if refresh_reference or not ref_sass.exists():
         print(f"extracting upstream {fn} reference SASS")
-        cmd = [*be.py(), tools, "upstream-sass", fn, str(ref_sass), "--arch", be.arch]
+        cmd = [sys.executable, tools, "upstream-sass", fn, str(ref_sass), "--arch", be.arch]
         for m in REF_MATCH[fn]:
             cmd += ["--match", m]
         if run(cmd).returncode != 0:
             warn(f"could not extract upstream reference ({fn}); skipping histogram")
     if ref_sass.exists():
-        if run([*be.py(), tools, "histogram", our_sass, str(ref_sass)]).returncode != 0:
+        if run([sys.executable, tools, "histogram", our_sass, str(ref_sass)]).returncode != 0:
             warn("histogram diff failed")
 
 
@@ -1029,7 +1015,7 @@ def walltime(be: Backend, fn, dtype, canon, runs, clock, baseline_flags) -> None
     section("(h) end-to-end wall-clock (torch.utils.benchmark, auto sync)")
     cmd = [
         *taskset_prefix(),
-        *be.py(),
+        sys.executable,
         str(REPO / "scripts" / "_bench.py"),
         fn,
         "--shape",
