@@ -32,7 +32,7 @@ instrument Mojo's ``DeviceContext``, CPU has no GPU asm, …):
 ┌────────────────┬────────────────────┬────────────────────────────┬───────────────────────┬─────────────────────┐
 │     phase      │        cuda        │            rocm            │         metal         │         cpu         │
 ├────────────────┼────────────────────┼────────────────────────────┼───────────────────────┼─────────────────────┤
-│ a lock         │ nvidia-smi         │ rocm-smi perflevel         │ induced perf state    │ skip                │
+│ a lock         │ nvidia-smi (gate)  │ rocm-smi perflevel (gate)  │ induced state (gate)  │ skip                │
 ├────────────────┼────────────────────┼────────────────────────────┼───────────────────────┼─────────────────────┤
 │ b correctness  │ -k cuda +nvidia    │ -k cuda +rocm              │ -k mps                │ -k cpu              │
 ├────────────────┼────────────────────┼────────────────────────────┼───────────────────────┼─────────────────────┤
@@ -63,9 +63,17 @@ but Instruments has an internal "Induced GPU Performance State" knob;
 step (a) reproduces the GUI-only "force Maximum" setting by binary-patching
 a copy of Instruments' own Metal System Trace template (see
 ``scripts/_apple_gpu_clock_lock.py``) so every xctrace recording this run
-makes holds the GPU at Maximum clock instead of riding Apple's DVFS. Falls
-back to unlocked (post-hoc clock-state bucketing in ``_bench.py``, trusting
-the Maximum-clock rows) if the patch can't be built.
+makes holds the GPU at Maximum clock instead of riding Apple's DVFS.
+
+Step (a) is a hard gate on every backend: an unlocked GPU introduces clock
+variance that makes measurements across runs incomparable, which defeats
+the point of an autonomous perf gate (in particular an agentic loop
+iterating on kernel changes needs a trustworthy signal). If clocks can't be
+locked — passwordless sudo isn't configured for nvidia-smi/rocm-smi, or the
+Apple template patch breaks on a future Xcode update — the run stops
+immediately with a non-zero exit rather than silently falling back to
+unlocked. ``--no-lock`` is the explicit, deliberate opt-out for local dev
+loops where noisy numbers are acceptable.
 
 Steps c/d/h are separate processes on purpose — torch.profiler,
 torch.utils.benchmark, and ncu must not share a run.
@@ -95,6 +103,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -398,6 +407,19 @@ def lock_clocks(be: Backend, enabled: bool) -> tuple[str, bool]:
     return "unlocked", False
 
 
+def _fatal_lock_failure(reason: str) -> NoReturn:
+    """A clock lock failed and locking was requested (no --no-lock): stop
+    now rather than let the run continue on an unlocked GPU. Unlocked
+    numbers aren't comparable to locked ones, and silently mixing the two
+    across runs is worse than stopping loudly — this gate exists to feed a
+    precise, repeatable signal to the agentic perf loop.
+    """
+    print(f"{_RED}[FAIL]{_RST} GPU clock lock unavailable — refusing to run unlocked.")
+    print(f"{_RED}[FAIL]{_RST} ({reason})")
+    print(f"{_RED}[FAIL]{_RST} pass --no-lock to run unlocked anyway (dev mode).")
+    raise SystemExit(1)
+
+
 def _lock_nvidia() -> tuple[str, bool]:
     def sudo(args: list[str]) -> bool:
         return (
@@ -414,9 +436,10 @@ def _lock_nvidia() -> tuple[str, bool]:
             sudo([f"--lock-memory-clocks={max_mem}"])  # best-effort
         print(f"locked SM clock to {max_sm} MHz (will reset on exit)")
         return max_sm, True
-    warn("passwordless sudo / clock-lock unavailable — running UNLOCKED.")
-    warn("min/spread will be noisier; treat sub-spread deltas as noise.")
-    return "unlocked", False
+    _fatal_lock_failure(
+        "passwordless sudo / nvidia-smi clock-lock unavailable — configure "
+        "`sudo -n nvidia-smi -pm 1 --lock-gpu-clocks=...` without a password prompt"
+    )
 
 
 def _lock_rocm() -> tuple[str, bool]:
@@ -433,8 +456,10 @@ def _lock_rocm() -> tuple[str, bool]:
     if ok:
         print("set ROCm perf level to 'high' (will reset to auto on exit)")
         return "high", True
-    warn("passwordless sudo / rocm-smi perf-level unavailable — running UNLOCKED.")
-    return "unlocked", False
+    _fatal_lock_failure(
+        "passwordless sudo / rocm-smi perf-level unavailable — configure "
+        "`sudo -n rocm-smi --setperflevel high` without a password prompt"
+    )
 
 
 # Read by _bench.py's _record_trace to pick the xctrace template; must match
@@ -467,13 +492,10 @@ def _lock_metal() -> tuple[str, bool]:
         os.environ[_XCTRACE_TEMPLATE_ENV] = path
         print(f"induced GPU performance state -> Maximum ({path})")
         return "induced-maximum", True
-    print(f"{_RED}[FAIL]{_RST} GPU clock lock unavailable — refusing to run unlocked.")
-    print(
-        f"{_RED}[FAIL]{_RST} (Xcode/Instruments internals may have changed; "
-        f"see scripts/_apple_gpu_clock_lock.py. stderr: {r.stderr.strip()[-500:]})"
+    _fatal_lock_failure(
+        "Xcode/Instruments internals may have changed; see "
+        f"scripts/_apple_gpu_clock_lock.py. stderr: {r.stderr.strip()[-500:]}"
     )
-    print(f"{_RED}[FAIL]{_RST} pass --no-lock to run unlocked anyway (dev mode).")
-    raise SystemExit(1)
 
 
 def unlock_clocks(be: Backend) -> None:

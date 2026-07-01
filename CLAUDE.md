@@ -144,7 +144,14 @@ exist**:
 - **(a) lock clocks** — cuda: `nvidia-smi`; rocm: `rocm-smi --setperflevel
   high`; metal: forces the GPU's Induced Performance State to Maximum via
   `scripts/_apple_gpu_clock_lock.py` (see "Apple silicon: forcing the GPU
-  clock" below); cpu: no GPU clock, skipped.
+  clock" below); cpu: no GPU clock, skipped. On cuda/rocm/metal this is a
+  **hard gate**: if the lock can't be established (no passwordless sudo,
+  or — Apple only — the template patch breaks on a future Xcode update)
+  the run stops immediately with a non-zero exit instead of continuing
+  unlocked, since an unlocked GPU makes numbers across runs incomparable
+  and that defeats the point of an autonomous perf gate feeding an
+  agentic loop. `--no-lock` is the explicit opt-out for local dev loops
+  where noisy numbers are acceptable.
 - **(b) recompile + correctness** — clears *our* JIT cache, runs the quick
   smoke / `--full` regression suite under the backend's `uv` extra and
   device (`-k mps/cuda/cpu`). `--skip-correctness` runs the perf phases
@@ -447,13 +454,19 @@ content-addressed on the source template + patcher script + target state.
 for every xctrace recording that run makes — eliminating the DVFS confound
 at the source rather than filtering it out after the fact. This pokes at
 an undocumented private format with no cross-version stability guarantee;
-`_apple_gpu_clock_lock.py` wraps every step so a structural mismatch (e.g.
-a future Xcode update) degrades to returning `None`, and `master_bench.py`
-falls back to the pre-existing unlocked + post-hoc-clock-bucketing
-behavior rather than failing the run. `_bench.py` run standalone (not via
-`master_bench.py`) stays unlocked by default, matching how the nvidia/rocm
-locks are also `master_bench.py`-exclusive; set
-`CAUSAL_CONV1D_XCTRACE_TEMPLATE` yourself (e.g. to the output of
+`locked_template_path()` in `_apple_gpu_clock_lock.py` wraps every step so
+a structural mismatch (e.g. a future Xcode update) degrades to returning
+`None` for callers that want a graceful fallback, but `master_bench.py`
+does **not** use that fallback — like the nvidia/rocm locks, a failed
+Apple clock lock is a hard gate failure (non-zero exit), since unlocked
+numbers aren't comparable to locked ones and the whole point of this path
+is a trustworthy signal for the agentic perf loop. The old post-hoc
+clock-state bucketing in `_bench.py` still runs and is still trustworthy
+if you invoke `_bench.py` directly without going through
+`master_bench.py`. `_bench.py` run standalone (not via `master_bench.py`)
+stays unlocked by default, matching how the nvidia/rocm locks are also
+`master_bench.py`-exclusive; set `CAUSAL_CONV1D_XCTRACE_TEMPLATE` yourself
+(e.g. to the output of
 `python scripts/_apple_gpu_clock_lock.py Maximum`) to opt in manually.
 
 ### What you can and can't get headlessly
