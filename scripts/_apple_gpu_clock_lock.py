@@ -1,53 +1,29 @@
 """Apple GPU clock lock for the metal master bench (step a).
 
-macOS exposes no public API or CLI to pin the GPU's DVFS clock the way
-``nvidia-smi --lock-gpu-clocks``/``rocm-smi --setperflevel`` do — confirmed by
-checking ``xcrun devicectl`` (no ``condition`` subcommand; only sees attached
-iOS/iPadOS devices, never the local Mac), Xcode's Devices & Simulators
-"Device Conditions -> GPU Performance State" (real, but iOS-device-only and
-GUI-only), and ``powermetrics`` (read-only).
+macOS has no public API/CLI to pin the GPU's DVFS clock (unlike
+``nvidia-smi --lock-gpu-clocks``/``rocm-smi --setperflevel``). Instruments
+does have an internal "Induced GPU Performance State" knob, normally only
+settable by hand in its GUI. This module reproduces that by binary-patching
+a copy of Instruments' ``Metal System Trace.tracetemplate`` (an
+NSKeyedArchiver binary plist) and handing the copy to
+``xctrace record --template <path>``.
 
-Instruments *does* have an internal "Induced GPU Performance State" knob
-used by its own Metal System Trace / GPU Counters instrument, normally only
-reachable by hand in the Instruments GUI (configure a recording, force the
-state, File > Save as Template). This module reproduces that GUI step
-programmatically by binary-patching a copy of Instruments'
-``Metal System Trace.tracetemplate`` — an NSKeyedArchiver binary plist — and
-handing the patched copy to ``xctrace record --template <path>``.
+Must patch the raw binary plist directly: ``plutil -convert xml1`` first
+loses the info we need (XML has no native UID type, so cross-references
+turn into plain dicts), and even loading the binary plist with
+``plistlib`` then re-serializing via ``dump(fmt=FMT_BINARY)`` produces a
+file ``xctrace export`` rejects with "Document Missing Template Error" —
+so ``_RawBPlist`` below patches the target reference in place instead,
+leaving the rest of the ~600 KB file byte-identical to Apple's original.
 
-This pokes at an undocumented, private Apple format with no stability
-guarantee across Xcode versions. ``locked_template_path`` wraps every step
-so a structural mismatch (Xcode update, different internal layout) degrades
-to returning ``None`` rather than raising, for callers that want to fall
-back gracefully. ``master_bench.py`` deliberately does *not* fall back,
-though: a stale/unlocked GPU clock produces numbers that silently aren't
-comparable to locked ones, which is worse than stopping loudly, so it
-treats a lock failure as fatal (see ``_lock_metal`` there) unless the user
-explicitly passes ``--no-lock``.
+The ``gpuperformancestate`` enum is undocumented; empirically:
+0=Automatic, 1=Minimum, 2=Medium, 3=Maximum (verified via
+``gpu-performance-state-intervals`` in a recorded trace).
 
-How the patch works
---------------------
-Load the *binary* plist directly with ``plistlib.load()`` (not
-``plutil -convert xml1`` first: XML plists have no native UID type, so
-``plutil``'s XML output turns every ``CF$UID`` cross-reference into an inert
-``{"CF$UID": N}`` dict indistinguishable from ordinary data — only the raw
-binary reader exposes real ``plistlib.UID`` objects). Even so, the fastest
-tool for a byte-exact patch is a small hand-rolled binary-plist reader (see
-``_RawBPlist`` below): re-serializing the whole ~1200-object archive via
-``plistlib.dump(fmt=FMT_BINARY)`` produces a *plutil*-valid file that
-``xctrace export`` nonetheless rejects with "Document Missing Template
-Error" — something about xctrace's own validation is stricter than
-plutil's. The fix is a true surgical patch: locate the exact
-``objectRefSize``-byte array-slot reference for the ``gpuperformancestate``
-property and repoint it at an already-existing sibling object that holds
-the desired int, changing a handful of bytes and leaving the rest of the
-~600 KB file byte-identical to Apple's original.
-
-The property's value is an (undocumented, empirically determined) enum:
-0=Automatic (default DVFS), 1=Minimum, 2=Medium, 3=Maximum — verified by
-recording a real GPU workload with each value and reading back
-``gpu-performance-state-intervals`` via ``xctrace export``: value 3 held
-the GPU at 100% Maximum clock across multiple independent recordings.
+This is a private, undocumented format with no cross-version guarantee.
+``locked_template_path`` returns ``None`` on any failure so callers can
+fall back; ``master_bench.py`` instead treats failure as fatal (see
+``_lock_metal`` there).
 """
 
 from __future__ import annotations

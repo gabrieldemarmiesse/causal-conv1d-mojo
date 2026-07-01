@@ -151,12 +151,8 @@ def _is_traced_workload() -> bool:
     return os.environ.get(_TRACED_ENV) == "1"
 
 
-# Set by master_bench.py's (a) lock-clocks phase to the path of a Metal
-# System Trace template patched to force the GPU's Induced Performance
-# State to Maximum (see _apple_gpu_clock_lock.py). Unset when run standalone
-# or when the patch isn't available on this machine, in which case we record
-# with the plain, unlocked template and fall back to picking the
-# Maximum-clock bucket out of gpu-performance-state-intervals after the fact.
+# Set by master_bench.py's lock-clocks phase to a patched, clock-locked
+# template (see _apple_gpu_clock_lock.py); unset when run standalone.
 _XCTRACE_TEMPLATE_ENV = "CAUSAL_CONV1D_XCTRACE_TEMPLATE"
 
 

@@ -58,22 +58,17 @@ over the pure-PyTorch fallback (informational); Apple reports absolute
 per-kernel GPU time read back from a Metal System Trace (there is no
 upstream to diff against — upstream is CUDA-only).
 
-Apple's GPU has no public clock-lock API/CLI (unlike nvidia-smi/rocm-smi),
-but Instruments has an internal "Induced GPU Performance State" knob;
-step (a) reproduces the GUI-only "force Maximum" setting by binary-patching
-a copy of Instruments' own Metal System Trace template (see
-``scripts/_apple_gpu_clock_lock.py``) so every xctrace recording this run
-makes holds the GPU at Maximum clock instead of riding Apple's DVFS.
+Apple has no public clock-lock API/CLI; step (a) instead reproduces
+Instruments' GUI-only "Induced GPU Performance State = Maximum" setting by
+binary-patching a copy of its Metal System Trace template (see
+``scripts/_apple_gpu_clock_lock.py``).
 
-Step (a) is a hard gate on every backend: an unlocked GPU introduces clock
-variance that makes measurements across runs incomparable, which defeats
-the point of an autonomous perf gate (in particular an agentic loop
-iterating on kernel changes needs a trustworthy signal). If clocks can't be
-locked — passwordless sudo isn't configured for nvidia-smi/rocm-smi, or the
-Apple template patch breaks on a future Xcode update — the run stops
-immediately with a non-zero exit rather than silently falling back to
-unlocked. ``--no-lock`` is the explicit, deliberate opt-out for local dev
-loops where noisy numbers are acceptable.
+Step (a) is a hard gate everywhere: an unlocked GPU makes measurements
+across runs incomparable, which defeats the point of a perf gate feeding
+an agentic loop. A failed lock (no passwordless sudo, or — Apple only — a
+future Xcode update breaking the patch) exits non-zero rather than
+silently continuing unlocked; ``--no-lock`` is the explicit opt-out for
+local dev loops.
 
 Steps c/d/h are separate processes on purpose — torch.profiler,
 torch.utils.benchmark, and ncu must not share a run.
@@ -408,12 +403,7 @@ def lock_clocks(be: Backend, enabled: bool) -> tuple[str, bool]:
 
 
 def _fatal_lock_failure(reason: str) -> NoReturn:
-    """A clock lock failed and locking was requested (no --no-lock): stop
-    now rather than let the run continue on an unlocked GPU. Unlocked
-    numbers aren't comparable to locked ones, and silently mixing the two
-    across runs is worse than stopping loudly — this gate exists to feed a
-    precise, repeatable signal to the agentic perf loop.
-    """
+    """Stop the run: a clock lock failed and --no-lock wasn't passed."""
     print(f"{_RED}[FAIL]{_RST} GPU clock lock unavailable — refusing to run unlocked.")
     print(f"{_RED}[FAIL]{_RST} ({reason})")
     print(f"{_RED}[FAIL]{_RST} pass --no-lock to run unlocked anyway (dev mode).")
@@ -468,20 +458,8 @@ _XCTRACE_TEMPLATE_ENV = "CAUSAL_CONV1D_XCTRACE_TEMPLATE"
 
 
 def _lock_metal() -> tuple[str, bool]:
-    """Force the GPU's Induced Performance State to Maximum for every
-    xctrace recording this run makes, via a binary-patched Instruments
-    template (see _apple_gpu_clock_lock.py — there is no public API or CLI
-    for this; it edits 2 bytes of Instruments' own Metal System Trace
-    template). Sets an env var _bench.py's xctrace invocations pick up.
-
-    Unlike the nvidia/rocm locks, a failure here is fatal (not a soft
-    fallback to unlocked): this patches an undocumented private Apple
-    format with no cross-version guarantee, so a future Xcode update could
-    silently break it. Numbers measured with the GPU riding Apple's DVFS
-    are not comparable to numbers measured locked at Maximum, and mixing
-    the two silently is worse than stopping loudly. Pass --no-lock to
-    explicitly opt into an unlocked run (dev mode).
-    """
+    """Force Induced GPU Performance State to Maximum (_apple_gpu_clock_lock.py)
+    and point _bench.py's xctrace calls at the patched template via env var."""
     r = subprocess.run(
         [sys.executable, str(REPO / "scripts" / "_apple_gpu_clock_lock.py"), "Maximum"],
         capture_output=True,
