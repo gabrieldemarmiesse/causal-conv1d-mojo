@@ -513,7 +513,16 @@ def correctness(be: Backend, tier: str, clean: bool) -> bool:
         cache = Path("~/.cache/causal_conv1d_mojo").expanduser()
         if VERBOSE:
             print(f"clearing JIT cache {cache} (keeping mojo compiler cache)")
-        shutil.rmtree(cache, ignore_errors=True)
+        # Keep xctrace_templates/: step (a) just wrote the clock-locked
+        # template there (see _apple_gpu_clock_lock.py) and step (c) needs
+        # it; wiping the whole cache root out from under it breaks the bench.
+        for child in cache.glob("*"):
+            if child.name == "xctrace_templates":
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
     if tier == "quick":
         cmd = [
             sys.executable,
