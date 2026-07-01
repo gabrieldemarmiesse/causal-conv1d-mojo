@@ -92,6 +92,11 @@ upstream Tri Dao CUDA", with upstream as the moving target.
     (SASS *and* PTX level), using the `ptxas`/`nvdisasm`/`cuobjdump`
     shipped inside the `triton` wheel. Spawned by `master_bench.py`'s
     NVIDIA asm phase; not called directly.
+  - `_apple_gpu_clock_lock.py`: forces the Apple GPU's DVFS clock to
+    Maximum for xctrace recordings by binary-patching a copy of
+    Instruments' `Metal System Trace.tracetemplate` (see "Apple silicon:
+    forcing the GPU clock" below). Spawned by `master_bench.py`'s metal
+    lock-clocks phase; not called directly.
   - `tools/`: small shell wrappers for ad-hoc dev loops (`bench`,
     `dump_isa`, `quick_test`, `rocprof_*`, the GPU `flock` wrapper, …)
     plus `check_wheel/` (containerised wheel smoke-test). See
@@ -137,8 +142,12 @@ phase to that backend's tooling and **skipping cleanly where it doesn't
 exist**:
 
 - **(a) lock clocks** — cuda: `nvidia-smi`; rocm: `rocm-smi --setperflevel
-  high`; metal/cpu: no headless lock (skipped — on Apple `_bench.py` splits
-  GPU time by DVFS clock state instead).
+  high`; metal: forces Induced GPU Performance State to Maximum via
+  `scripts/_apple_gpu_clock_lock.py` (see "Apple silicon: forcing the GPU
+  clock" below); cpu: no GPU clock, skipped. A **hard gate** on
+  cuda/rocm/metal: a failed lock exits non-zero instead of continuing
+  unlocked (unlocked numbers aren't comparable across runs, which defeats
+  an agentic perf loop). `--no-lock` opts out for local dev.
 - **(b) recompile + correctness** — clears *our* JIT cache, runs the quick
   smoke / `--full` regression suite under the backend's `uv` extra and
   device (`-k mps/cuda/cpu`). `--skip-correctness` runs the perf phases
@@ -389,16 +398,40 @@ Implementation notes (all in `_bench.py`):
   while finalizing the bundle, leaving an unexportable `.trace`.
   `_record_trace` retries until `xctrace export` succeeds — expect a few
   retries per run; it's an Instruments bug, not ours.
-- **Watch out for DVFS.** The Mojo Metal launch syncs after *every* call,
-  so Apple's GPU governor drops the clock to its minimum between
-  dispatches; short kernels are frequently measured at a reduced clock,
-  which is the main source of run-to-run variance (a kernel can read
-  ~1.1 ms at Maximum clock and ~2.2 ms at Minimum in the same run).
-  `_bench.py` reads `gpu-performance-state-intervals` and splits the
-  per-encoder summary by GPU clock state — **trust the `Maximum`-clock
-  row** as the steady-state time (the reported headline kernel time picks
-  it); the rest is throttled noise. Each group's reported number is the
-  *median* (robust to the bimodal DVFS distribution).
+- **Watch out for DVFS** when running `_bench.py` standalone (outside
+  `master_bench.py`, which locks the clock — see below). The Mojo Metal
+  launch syncs after *every* call, so Apple's GPU governor drops the clock
+  to its minimum between dispatches; short kernels are frequently measured
+  at a reduced clock, which is the main source of run-to-run variance (a
+  kernel can read ~1.1 ms at Maximum clock and ~2.2 ms at Minimum in the
+  same run). Unlocked, `_bench.py` reads `gpu-performance-state-intervals`
+  and splits the per-encoder summary by GPU clock state — **trust the
+  `Maximum`-clock row** as the steady-state time (the reported headline
+  kernel time picks it); the rest is throttled noise. Each group's reported
+  number is the *median* (robust to the bimodal DVFS distribution).
+
+### Apple silicon: forcing the GPU clock
+
+macOS has no public API/CLI to pin the GPU's DVFS clock. Instruments does
+have a GUI-only "Induced GPU Performance State" knob on its Metal System
+Trace instrument; `scripts/_apple_gpu_clock_lock.py` reproduces it by
+binary-patching a copy of `Metal System Trace.tracetemplate` (an
+NSKeyedArchiver binary plist) to force `gpuperformancestate` — an
+undocumented, empirically determined enum (0=Automatic, 1=Minimum,
+2=Medium, 3=Maximum; verified via `gpu-performance-state-intervals`: value
+3 held 100% Maximum clock across multiple recordings). Must patch the raw
+binary plist directly and in place — re-serializing via
+`plistlib.dump(fmt=FMT_BINARY)` produces a file `xctrace export` rejects
+with "Document Missing Template Error". Patched templates are cached under
+`$XDG_CACHE_HOME/causal_conv1d_mojo/xctrace_templates/`.
+
+`master_bench.py`'s step (a) calls this on the metal backend and points
+`_bench.py`'s xctrace calls (`CAUSAL_CONV1D_XCTRACE_TEMPLATE` env var) at
+the patched template — same hard-gate policy as nvidia/rocm (see above).
+`_bench.py` run standalone stays unlocked by default and falls back to the
+post-hoc clock-state bucketing described above; set
+`CAUSAL_CONV1D_XCTRACE_TEMPLATE` yourself (e.g. to the output of
+`python scripts/_apple_gpu_clock_lock.py Maximum`) to opt in manually.
 
 ### What you can and can't get headlessly
 

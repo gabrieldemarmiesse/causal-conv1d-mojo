@@ -151,6 +151,15 @@ def _is_traced_workload() -> bool:
     return os.environ.get(_TRACED_ENV) == "1"
 
 
+# Set by master_bench.py's lock-clocks phase to a patched, clock-locked
+# template (see _apple_gpu_clock_lock.py); unset when run standalone.
+_XCTRACE_TEMPLATE_ENV = "CAUSAL_CONV1D_XCTRACE_TEMPLATE"
+
+
+def _xctrace_template() -> str:
+    return os.environ.get(_XCTRACE_TEMPLATE_ENV) or "Metal System Trace"
+
+
 def _upstream_module():
     try:
         import causal_conv1d  # noqa: PLC0415
@@ -835,7 +844,7 @@ def _record_trace(child_argv: list[str], trace: str, *, attempts: int = 6) -> No
                 "xctrace",
                 "record",
                 "--template",
-                "Metal System Trace",
+                _xctrace_template(),
                 "--output",
                 trace,
                 "--launch",

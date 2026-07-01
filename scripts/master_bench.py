@@ -15,7 +15,8 @@ exist** (Apple has no ``ptxas -v`` spill canary, ROCm's ``rocprofv3`` can't
 instrument Mojo's ``DeviceContext``, CPU has no GPU asm, …):
 
     a. lock clocks                          cuda: nvidia-smi · rocm: rocm-smi
-                                            metal/cpu: n/a (skip)
+                                            metal: induced GPU perf state (xctrace) ·
+                                            cpu: n/a (skip)
     b. clear our JIT cache, recompile, correctness suite (quick/full tiers)
     c. kernel-time bench vs baseline        cuda: vs upstream (gate) ·
                                             rocm/cpu: vs pytorch-ref (report) ·
@@ -31,7 +32,7 @@ instrument Mojo's ``DeviceContext``, CPU has no GPU asm, …):
 ┌────────────────┬────────────────────┬────────────────────────────┬───────────────────────┬─────────────────────┐
 │     phase      │        cuda        │            rocm            │         metal         │         cpu         │
 ├────────────────┼────────────────────┼────────────────────────────┼───────────────────────┼─────────────────────┤
-│ a lock         │ nvidia-smi         │ rocm-smi perflevel         │ skip (DVFS)           │ skip                │
+│ a lock         │ nvidia-smi (gate)  │ rocm-smi perflevel (gate)  │ induced state (gate)  │ skip                │
 ├────────────────┼────────────────────┼────────────────────────────┼───────────────────────┼─────────────────────┤
 │ b correctness  │ -k cuda +nvidia    │ -k cuda +rocm              │ -k mps                │ -k cpu              │
 ├────────────────┼────────────────────┼────────────────────────────┼───────────────────────┼─────────────────────┤
@@ -56,6 +57,18 @@ perf *gate* (regression => non-zero exit). ROCm/CPU report mojo's speedup
 over the pure-PyTorch fallback (informational); Apple reports absolute
 per-kernel GPU time read back from a Metal System Trace (there is no
 upstream to diff against — upstream is CUDA-only).
+
+Apple has no public clock-lock API/CLI; step (a) instead reproduces
+Instruments' GUI-only "Induced GPU Performance State = Maximum" setting by
+binary-patching a copy of its Metal System Trace template (see
+``scripts/_apple_gpu_clock_lock.py``).
+
+Step (a) is a hard gate everywhere: an unlocked GPU makes measurements
+across runs incomparable, which defeats the point of a perf gate feeding
+an agentic loop. A failed lock (no passwordless sudo, or — Apple only — a
+future Xcode update breaking the patch) exits non-zero rather than
+silently continuing unlocked; ``--no-lock`` is the explicit opt-out for
+local dev loops.
 
 Steps c/d/h are separate processes on purpose — torch.profiler,
 torch.utils.benchmark, and ncu must not share a run.
@@ -85,6 +98,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -381,13 +395,19 @@ def lock_clocks(be: Backend, enabled: bool) -> tuple[str, bool]:
         return _lock_nvidia()
     if be.name == "rocm":
         return _lock_rocm()
-    # Apple drops the GPU clock between the per-call syncs (DVFS) and exposes
-    # no headless lock; _bench.py instead splits per-encoder time by clock
-    # state and trusts the 'Maximum'-clock rows. CPU has no GPU clock.
-    warn(f"no headless clock lock on {be.name}; running UNLOCKED.")
     if be.name == "metal":
-        warn("(_bench.py splits Apple GPU time by DVFS clock state — trust Maximum.)")
+        return _lock_metal()
+    # CPU has no GPU clock to lock.
+    warn(f"no headless clock lock on {be.name}; running UNLOCKED.")
     return "unlocked", False
+
+
+def _fatal_lock_failure(reason: str) -> NoReturn:
+    """Stop the run: a clock lock failed and --no-lock wasn't passed."""
+    print(f"{_RED}[FAIL]{_RST} GPU clock lock unavailable — refusing to run unlocked.")
+    print(f"{_RED}[FAIL]{_RST} ({reason})")
+    print(f"{_RED}[FAIL]{_RST} pass --no-lock to run unlocked anyway (dev mode).")
+    raise SystemExit(1)
 
 
 def _lock_nvidia() -> tuple[str, bool]:
@@ -406,9 +426,10 @@ def _lock_nvidia() -> tuple[str, bool]:
             sudo([f"--lock-memory-clocks={max_mem}"])  # best-effort
         print(f"locked SM clock to {max_sm} MHz (will reset on exit)")
         return max_sm, True
-    warn("passwordless sudo / clock-lock unavailable — running UNLOCKED.")
-    warn("min/spread will be noisier; treat sub-spread deltas as noise.")
-    return "unlocked", False
+    _fatal_lock_failure(
+        "passwordless sudo / nvidia-smi clock-lock unavailable — configure "
+        "`sudo -n nvidia-smi -pm 1 --lock-gpu-clocks=...` without a password prompt"
+    )
 
 
 def _lock_rocm() -> tuple[str, bool]:
@@ -425,8 +446,34 @@ def _lock_rocm() -> tuple[str, bool]:
     if ok:
         print("set ROCm perf level to 'high' (will reset to auto on exit)")
         return "high", True
-    warn("passwordless sudo / rocm-smi perf-level unavailable — running UNLOCKED.")
-    return "unlocked", False
+    _fatal_lock_failure(
+        "passwordless sudo / rocm-smi perf-level unavailable — configure "
+        "`sudo -n rocm-smi --setperflevel high` without a password prompt"
+    )
+
+
+# Read by _bench.py's _record_trace to pick the xctrace template; must match
+# _XCTRACE_TEMPLATE_ENV in _bench.py.
+_XCTRACE_TEMPLATE_ENV = "CAUSAL_CONV1D_XCTRACE_TEMPLATE"
+
+
+def _lock_metal() -> tuple[str, bool]:
+    """Force Induced GPU Performance State to Maximum (_apple_gpu_clock_lock.py)
+    and point _bench.py's xctrace calls at the patched template via env var."""
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "_apple_gpu_clock_lock.py"), "Maximum"],
+        capture_output=True,
+        text=True,
+    )
+    path = r.stdout.strip()
+    if r.returncode == 0 and path:
+        os.environ[_XCTRACE_TEMPLATE_ENV] = path
+        print(f"induced GPU performance state -> Maximum ({path})")
+        return "induced-maximum", True
+    _fatal_lock_failure(
+        "Xcode/Instruments internals may have changed; see "
+        f"scripts/_apple_gpu_clock_lock.py. stderr: {r.stderr.strip()[-500:]}"
+    )
 
 
 def unlock_clocks(be: Backend) -> None:
@@ -466,7 +513,16 @@ def correctness(be: Backend, tier: str, clean: bool) -> bool:
         cache = Path("~/.cache/causal_conv1d_mojo").expanduser()
         if VERBOSE:
             print(f"clearing JIT cache {cache} (keeping mojo compiler cache)")
-        shutil.rmtree(cache, ignore_errors=True)
+        # Keep xctrace_templates/: step (a) just wrote the clock-locked
+        # template there (see _apple_gpu_clock_lock.py) and step (c) needs
+        # it; wiping the whole cache root out from under it breaks the bench.
+        for child in cache.glob("*"):
+            if child.name == "xctrace_templates":
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
     if tier == "quick":
         cmd = [
             sys.executable,
