@@ -25,8 +25,8 @@ first time a variant is loaded and passes it in as
 constructor so no fresh hipStream is created per call.
 """
 
-from std.gpu.host import DeviceContext
-from std.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
+from max.gpu.host import DeviceContext
+from max.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
 from std.math import ceildiv
 from std.memory import OpaquePointer
 

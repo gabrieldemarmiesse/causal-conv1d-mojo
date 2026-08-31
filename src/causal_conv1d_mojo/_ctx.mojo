@@ -16,7 +16,7 @@ the launcher wraps it via the non-owning DeviceContext constructor so
 no fresh hipStream is created per call.
 """
 
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 
 
 def acquire_ctx_handle() raises -> Int:

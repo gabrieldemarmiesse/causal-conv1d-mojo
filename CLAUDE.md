@@ -922,6 +922,28 @@ this machinery first.
 
 ## Mojo gotchas hit while porting
 
+- **Mojo 1.0 split the GPU stack out of the compiler's stdlib.**
+  `layout`, `DeviceContext` (`max.gpu.host`), `barrier` (`max.gpu`) and
+  `sync_parallelize` (`max.algorithm`) now ship in `max-mojo-libs`, and
+  accelerator codegen needs `libmax.so` from `max-core` — without it
+  `mojo build` fails with "please install MAX for accelerator support".
+  `block_idx`/`thread_idx`/`grid_dim`, `std.gpu.globals` and
+  `std.gpu.primitives.warp` stayed in `std`; `AddressSpace` moved from
+  `std.gpu.memory` to `std.memory`.
+- **`Int`/`UInt` are not `DevicePassable`.** A device kernel argument
+  must be fixed-width, so the kernels take `Int32` and widen to `Int`
+  in the first line of the body (the launcher casts at the
+  `enqueue_function` call). `update/` already used `Int32` throughout
+  for the PTX reasons below.
+- **SIMD lengths must be powers of two.** Several register arrays are
+  sized by the filter `width` (2..9) or `width + 1`, so they are
+  declared `SIMD[..., next_power_of_two(width)]`. The padding lanes stay
+  zero and are never indexed, so per-lane reads and the sum reductions
+  are unaffected — but a *function signature* taking one of these
+  (`_reduce_channellast_grads`, `_block_sum_f32_vec`) has to be padded
+  the same way or the call won't type-check. Vector *loads* can't be
+  padded (they'd read out of bounds); `update/`'s trailing-history load
+  reads two lanes and picks up the odd element scalar.
 - `DType` has no `.size_of()` method; use the free function
   `from std.sys import size_of` and call `size_of[dtype]()`.
 - `stack_allocation[count, dtype, address_space=AddressSpace.SHARED]()`

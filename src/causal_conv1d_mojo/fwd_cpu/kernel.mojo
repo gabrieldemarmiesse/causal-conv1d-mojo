@@ -27,7 +27,8 @@ Parallelism: `batch*dim` rows are dealt to at most
 overhead; 8x gives the scheduler slack to balance uneven chunks).
 """
 
-from std.algorithm import sync_parallelize
+from max.algorithm import sync_parallelize
+from std.bit import next_power_of_two
 from std.sys import size_of
 from std.sys.info import num_logical_cores
 
@@ -51,7 +52,7 @@ def _fwd_scalar_at[
 ](
     t: Int,
     bias_v: Float32,
-    weights: SIMD[DType.float32, width],
+    weights: SIMD[DType.float32, next_power_of_two(width)],
     x_row: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     x_ls: Int,
     si_row: UnsafePointer[Int32, MutAnyOrigin],
@@ -208,7 +209,7 @@ def fwd_kernel_cpu[
             comptime if has_bias:
                 bias_v = bias_ptr[d].cast[accum_t]()
 
-            var weights = SIMD[accum_t, width](0)
+            var weights = SIMD[accum_t, next_power_of_two(width)](0)
 
             comptime for k in range(width):
                 weights[k] = w_ptr[d * w_cs + k * w_ws].cast[accum_t]()

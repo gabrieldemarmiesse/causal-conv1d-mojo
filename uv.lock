@@ -45,6 +45,8 @@ name = "causal-conv1d-mojo"
 version = "0.0.4"
 source = { editable = "." }
 dependencies = [
+    { name = "max-core" },
+    { name = "max-mojo-libs" },
     { name = "mojo-compiler" },
     { name = "mojo-compiler-mojo-libs" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-18-causal-conv1d-mojo-nvidia' and extra == 'extra-18-causal-conv1d-mojo-rocm') or (extra != 'extra-18-causal-conv1d-mojo-nvidia' and extra != 'extra-18-causal-conv1d-mojo-rocm')" },
@@ -82,8 +84,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "causal-conv1d", marker = "sys_platform == 'linux' and extra == 'nvidia'", url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" },
-    { name = "mojo-compiler", specifier = "==1.0.0b3.dev2026062306", index = "https://whl.modular.com/nightly/simple/" },
-    { name = "mojo-compiler-mojo-libs", specifier = "==1.0.0b3.dev2026062306", index = "https://whl.modular.com/nightly/simple/" },
+    { name = "max-core", specifier = "==26.5.0" },
+    { name = "max-mojo-libs", specifier = "==26.5.0" },
+    { name = "mojo-compiler", specifier = "==1.0.0" },
+    { name = "mojo-compiler-mojo-libs", specifier = "==1.0.0" },
     { name = "nvidia-cuda-nvcc-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'nvidia'", specifier = "==12.8.*" },
     { name = "pytorch-triton-rocm", marker = "sys_platform == 'linux' and extra == 'rocm'", index = "https://download.pytorch.org/whl/rocm6.4", conflict = { package = "causal-conv1d-mojo", extra = "rocm" } },
     { name = "torch", specifier = ">=2,<3" },
@@ -606,24 +610,46 @@ wheels = [
 ]
 
 [[package]]
+name = "max-core"
+version = "26.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "max-mojo-libs" },
+    { name = "mojo-compiler" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/dd/cc7598a6fe1c8ac924f65c4346619a06fe883a7052df69b752b414208ce2/max_core-26.5.0-py3-none-macosx_13_0_arm64.whl", hash = "sha256:bf5b9c57ac01bb8adb46b8b63b98c7577ca1a3a870b267686a1aa214230496c9", size = 55746854, upload-time = "2026-08-11T14:34:40.201Z" },
+    { url = "https://files.pythonhosted.org/packages/5a/53/51e6ff16f19c9d7181e5ef338ed3ae76f13ae102c62fbe573d6866c7227f/max_core-26.5.0-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:2438a6342d0ea70406e24834eed9335eae3c0154d40fdb7e14aae6f190915e16", size = 72832972, upload-time = "2026-08-11T14:33:35.695Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/10/c6d6e504cf5a89861691f0efd4e7f281291d90fd16ac767cd4a0ae1148bf/max_core-26.5.0-py3-none-manylinux_2_34_x86_64.whl", hash = "sha256:cfaaff7f5dd958fac2de81bb4c44bfb0168428bdd4b40f89e40acf6a5474b448", size = 80589951, upload-time = "2026-08-11T14:34:55.032Z" },
+]
+
+[[package]]
+name = "max-mojo-libs"
+version = "26.5.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/ea/e942472029ecd8058a790663ddaaab3ec4f06c4438da52031dd59fdd18d4/max_mojo_libs-26.5.0-py3-none-any.whl", hash = "sha256:568f5c16c42876ae7dfe19120795300e9d4d561801b88d4039bd0d09a4066e74", size = 21429852, upload-time = "2026-08-11T14:34:45.343Z" },
+]
+
+[[package]]
 name = "mojo-compiler"
-version = "1.0.0b3.dev2026062306"
-source = { registry = "https://whl.modular.com/nightly/simple/" }
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mojo-compiler-mojo-libs" },
 ]
 wheels = [
-    { url = "https://us-central1-python.pkg.dev/distribution-prod-0a7c7b3/nightly/mojo-compiler/mojo_compiler-1.0.0b3.dev2026062306-py3-none-macosx_13_0_arm64.whl", hash = "sha256:97c663da6db35b1eb2d9c79d323a871e1f3e0141905804c5dc2af823676b3212" },
-    { url = "https://us-central1-python.pkg.dev/distribution-prod-0a7c7b3/nightly/mojo-compiler/mojo_compiler-1.0.0b3.dev2026062306-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:6791f589f2f84768278afb88c40f22c003de482bdc222226b243df6023638a03" },
-    { url = "https://us-central1-python.pkg.dev/distribution-prod-0a7c7b3/nightly/mojo-compiler/mojo_compiler-1.0.0b3.dev2026062306-py3-none-manylinux_2_34_x86_64.whl", hash = "sha256:77a4b8a36d0c33089f2b0b2e9e696d06a743caa54b9614319b653a047b4dfa63" },
+    { url = "https://files.pythonhosted.org/packages/60/59/c11cf3129d4bc77b1604ac3a84bee51ee1a7cd8a3a8fa25c14528f4bd51e/mojo_compiler-1.0.0-py3-none-macosx_13_0_arm64.whl", hash = "sha256:5077ee27c0dfbbdf138a11ec12838b0d3f10148a874cf95040c9ca2332ae2622", size = 70979164, upload-time = "2026-08-11T14:34:51.281Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/f9/cbfe2bf947d0926ad57599513d898f1e02ee0c60af1253b779ecaa810235/mojo_compiler-1.0.0-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:3ae3eb0c58a8956f542e324f736866df0ae2f9f875e8a279cbeea961ec4e9ee8", size = 76295262, upload-time = "2026-08-11T14:34:22.131Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/5f/f38fefe327d1c81e28def69c4a52ae4f75e389cb6e613a2c04ca8d68d582/mojo_compiler-1.0.0-py3-none-manylinux_2_34_x86_64.whl", hash = "sha256:e9e60f9638e69ca0f4be7292468523fc98a143f58dbf9024f60ed68b874a867e", size = 79142588, upload-time = "2026-08-11T14:34:05.301Z" },
 ]
 
 [[package]]
 name = "mojo-compiler-mojo-libs"
-version = "1.0.0b3.dev2026062306"
-source = { registry = "https://whl.modular.com/nightly/simple/" }
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://us-central1-python.pkg.dev/distribution-prod-0a7c7b3/nightly/mojo-compiler-mojo-libs/mojo_compiler_mojo_libs-1.0.0b3.dev2026062306-py3-none-any.whl", hash = "sha256:a8e5dd43cf363d3b3b5085fbe22b04ad874c0497c18e7c0c4e4ebd1e54213c6e" },
+    { url = "https://files.pythonhosted.org/packages/54/99/ea401ff1db56a4af8607283b95627e01b986fc67f510715b07f100118105/mojo_compiler_mojo_libs-1.0.0-py3-none-any.whl", hash = "sha256:20a92e37ecbd19e2dbb1a525612a8de4c9f266f5536def55c5e2b0786320e8b3", size = 3187048, upload-time = "2026-08-11T14:33:53.171Z" },
 ]
 
 [[package]]

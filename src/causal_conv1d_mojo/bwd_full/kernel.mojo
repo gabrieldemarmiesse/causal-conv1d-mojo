@@ -16,13 +16,13 @@ and producing dinitial_states, so the state belongs only to the first
 packed sequence in each row.
 """
 
-from std.gpu import block_idx, thread_idx, barrier, grid_dim
+from std.gpu import block_idx, thread_idx, grid_dim
+from max.gpu import barrier
 from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA, WARP_SIZE
-from std.gpu.memory import AddressSpace
 from std.gpu.primitives.warp import shuffle_xor
-from std.bit import log2_floor
+from std.bit import log2_floor, next_power_of_two
 from std.math import ceildiv, exp, recip
-from std.memory import stack_allocation
+from std.memory import AddressSpace, stack_allocation
 from std.atomic import Atomic, Ordering
 from std.sys import llvm_intrinsic, size_of
 from std.sys.info import is_nvidia_gpu
@@ -253,7 +253,7 @@ def bwd_full_kernel[
     ILayoutType: TensorLayout,
     DILayoutType: TensorLayout,
 ](
-    seqlen: Int,
+    seqlen_arg: Int32,
     x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
     weight: TileTensor[wdtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[wdtype], MutAnyOrigin],
@@ -305,6 +305,11 @@ def bwd_full_kernel[
     issue 16-byte global accesses; the generic contiguous specialization
     uses dtype alignment for all global sequence loads/stores.
     """
+
+    # Mojo 1.0 rejects `Int`/`UInt` as device kernel arguments (not
+    # `DevicePassable`); take them as Int32 and widen here so the body
+    # keeps its `Int` arithmetic.
+    var seqlen = Int(seqlen_arg)
     comptime assert (
         TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
         and TileTensor[wdtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
@@ -335,7 +340,7 @@ def bwd_full_kernel[
     var channel_id: Int = block_idx.y
 
     # Load weights into per-block fp32 registers.
-    var weights = SIMD[accum_t, width](0)
+    var weights = SIMD[accum_t, next_power_of_two(width)](0)
 
     comptime for k in range(width):
         weights[k] = weight[channel_id, k].cast[accum_t]()
@@ -356,7 +361,7 @@ def bwd_full_kernel[
     ]()
 
     # Per-thread accumulators (persist across chunks).
-    var local_dweight = SIMD[accum_t, width](0)
+    var local_dweight = SIMD[accum_t, next_power_of_two(width)](0)
     var local_dbias: Scalar[accum_t] = 0
 
     var n_chunks: Int = ceildiv(seqlen, kChunkSize)
@@ -839,7 +844,7 @@ def bwd_full_kernel[
     # Packing them lets the smem write/read pair amortise one sync across
     # all reductions.
     comptime if has_bias:
-        comptime nred: Int = width + 1
+        comptime nred: Int = next_power_of_two(width + 1)
         var packed = SIMD[accum_t, nred](0)
 
         comptime for k in range(width):
@@ -869,7 +874,7 @@ def bwd_full_kernel[
                 ](dbias_acc_ptr + channel_id, block_red[width])
     else:
         var block_red = _block_sum_f32_vec[
-            block_size=kNThreads, n=width
+            block_size=kNThreads, n = next_power_of_two(width)
         ](local_dweight)
         if tidx == 0:
             comptime if deterministic:

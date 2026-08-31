@@ -8,8 +8,15 @@ readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "torch>=2,<3",
-    "mojo-compiler==1.0.0b3.dev2026062306",
-    "mojo-compiler-mojo-libs==1.0.0b3.dev2026062306",
+    "mojo-compiler==1.0.0",
+    "mojo-compiler-mojo-libs==1.0.0",
+    # Mojo 1.0 moved `layout`, `DeviceContext`, `barrier` and
+    # `sync_parallelize` out of the compiler's own stdlib into the MAX Mojo
+    # libraries, and accelerator codegen now needs MAX's `libmax.so`. 26.5.0
+    # is the MAX release that pairs with mojo 1.0.0 (`modular==26.5.0`
+    # requires `mojo==1.0.0`).
+    "max-mojo-libs==26.5.0",
+    "max-core==26.5.0",
 ]
 
 [project.scripts]
@@ -62,12 +69,6 @@ conflicts = [
 no-build-isolation-package = ["causal-conv1d"]
 
 [tool.uv.sources]
-mojo-compiler = [
-    { index = "modular-nightly" },
-]
-mojo-compiler-mojo-libs = [
-    { index = "modular-nightly" },
-]
 torch = [
     { index = "pytorch-cu128", extra = "nvidia" },
     { index = "pytorch-rocm", extra = "rocm" },
@@ -76,11 +77,6 @@ torch = [
 pytorch-triton-rocm = [
     { index = "pytorch-rocm", extra = "rocm" },
 ]
-
-[[tool.uv.index]]
-name = "modular-nightly"
-url = "https://whl.modular.com/nightly/simple/"
-explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

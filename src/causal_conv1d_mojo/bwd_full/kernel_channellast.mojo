@@ -12,12 +12,12 @@ that one atomic-add site with per-(batch, L-chunk) workspace stores.
 """
 
 from std.atomic import Atomic, Ordering
-from std.bit import log2_floor
-from std.gpu import barrier, block_idx, thread_idx
+from std.bit import log2_floor, next_power_of_two
+from std.gpu import block_idx, thread_idx
+from max.gpu import barrier
 from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA
-from std.gpu.memory import AddressSpace
 from std.math import exp
-from std.memory import stack_allocation
+from std.memory import AddressSpace, stack_allocation
 from std.sys import inlined_assembly, size_of
 from std.sys.info import is_nvidia_gpu
 from std.utils.index import StaticTuple
@@ -68,7 +68,7 @@ def _reduce_channellast_grads[
     channel: Int,
     dim: Int,
     channel_lane: Int,
-    local_dweight: SIMD[DType.float32, width],
+    local_dweight: SIMD[DType.float32, next_power_of_two(width)],
     local_dbias: Float32,
     dweight_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
     dbias_acc_ptr: UnsafePointer[Float32, MutAnyOrigin],
@@ -79,7 +79,7 @@ def _reduce_channellast_grads[
     Non-deterministic variants use the same relaxed device-scope atomics as
     upstream CUDA `atomicAdd` and the existing generic Mojo kernel.
     """
-    var dweight = SIMD[DType.float32, width](0)
+    var dweight = SIMD[DType.float32, next_power_of_two(width)](0)
 
     comptime for w in range(width):
         dweight[w] = _subgroup_sum_f32[threads_per_channel](
@@ -112,8 +112,8 @@ def bwd_channellast_kernel[
     has_initial_states: Bool,
     apply_silu: Bool,
 ](
-    seqlen: Int,
-    dim: Int,
+    seqlen_arg: Int32,
+    dim_arg: Int32,
     x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     weight_ptr: UnsafePointer[Scalar[wdtype], MutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[wdtype], MutAnyOrigin],
@@ -162,6 +162,12 @@ def bwd_channellast_kernel[
     one, dim/outer strides compatible with 16-byte vectors, and aligned
     x/dout/dx/bias base pointers. Unsupported layouts use bwd_full_kernel.
     """
+
+    # Mojo 1.0 rejects `Int`/`UInt` as device kernel arguments (not
+    # `DevicePassable`); take them as Int32 and widen here so the body
+    # keeps its `Int` arithmetic.
+    var seqlen = Int(seqlen_arg)
+    var dim = Int(dim_arg)
     comptime kNElts: Int = 16 // size_of[dtype]()
     comptime kChunkC: Int = kChunkCBwdCL_for[dtype]()
     comptime kLoadThreadsPerRow: Int = kChunkC // kNElts
@@ -292,7 +298,7 @@ def bwd_channellast_kernel[
     var channel_lane: Int = tid % kThreadsPerChannel
     var row_start: Int = channel_lane * kLPerThread
     var bias: Float32 = 0
-    var weights = SIMD[DType.float32, width](0)
+    var weights = SIMD[DType.float32, next_power_of_two(width)](0)
     if channel < dim:
 
         comptime if has_bias:
@@ -372,7 +378,7 @@ def bwd_channellast_kernel[
             if cur_id < 0:
                 dpre[i] = 0
 
-    var local_dweight = SIMD[DType.float32, width](0)
+    var local_dweight = SIMD[DType.float32, next_power_of_two(width)](0)
     var local_dbias: Float32 = 0
 
     comptime for i in range(kLPerThread):

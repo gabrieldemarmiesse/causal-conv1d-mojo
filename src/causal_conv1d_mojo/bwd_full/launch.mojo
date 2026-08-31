@@ -15,8 +15,8 @@ Caller responsibilities:
 - Pass the comptime params that select the right kernel specialisation.
 """
 
-from std.gpu.host import DeviceContext
-from std.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
+from max.gpu.host import DeviceContext
+from max.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
 from std.math import ceildiv
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx, TensorLayout
@@ -174,8 +174,8 @@ def launch_bwd_full[
                 var stream_cl = ctx.create_external_stream(stream_opaque)
                 stream_cl.enqueue_function(
                     compiled_cl,
-                    seqlen_int,
-                    dim_int,
+                    Int32(seqlen_int),
+                    Int32(dim_int),
                     x_ptr,
                     w_ptr,
                     b_ptr,
@@ -208,8 +208,8 @@ def launch_bwd_full[
             else:
                 ctx.enqueue_function(
                     compiled_cl,
-                    seqlen_int,
-                    dim_int,
+                    Int32(seqlen_int),
+                    Int32(dim_int),
                     x_ptr,
                     w_ptr,
                     b_ptr,
@@ -341,7 +341,7 @@ def launch_bwd_full[
             var stream = ctx.create_external_stream(stream_opaque)
             stream.enqueue_function(
                 compiled,
-                seqlen_int,
+                Int32(seqlen_int),
                 x_tt,
                 w_tt,
                 b_ptr,
@@ -358,7 +358,7 @@ def launch_bwd_full[
         else:
             ctx.enqueue_function(
                 compiled,
-                seqlen_int,
+                Int32(seqlen_int),
                 x_tt,
                 w_tt,
                 b_ptr,

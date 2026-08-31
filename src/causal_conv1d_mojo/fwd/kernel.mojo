@@ -33,11 +33,12 @@ global. The new design loads weights/bias once and shares boundary
 x values via smem.
 """
 
-from std.gpu import block_idx, thread_idx, barrier
+from std.bit import next_power_of_two
+from std.gpu import block_idx, thread_idx
+from max.gpu import barrier
 from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA
-from std.gpu.memory import AddressSpace
 from std.math import ceildiv
-from std.memory import stack_allocation
+from std.memory import AddressSpace, stack_allocation
 from std.sys import size_of
 from std.utils.index import StaticTuple
 from layout import TileTensor, TensorLayout, Idx, Coord
@@ -66,7 +67,7 @@ def fwd_kernel[
     SLayoutType: TensorLayout,
     ILayoutType: TensorLayout,
 ](
-    seqlen: Int,
+    seqlen_arg: Int32,
     x: TileTensor[dtype, XLayoutType, ImmutAnyOrigin],
     weight: TileTensor[wdtype, WLayoutType, ImmutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[wdtype], MutAnyOrigin],
@@ -109,6 +110,11 @@ def fwd_kernel[
     switch; the row-alignment checks additionally make sliced and odd-row-
     stride tensors safe.
     """
+
+    # Mojo 1.0 rejects `Int`/`UInt` as device kernel arguments (not
+    # `DevicePassable`); take them as Int32 and widen here so the body
+    # keeps its `Int` arithmetic.
+    var seqlen = Int(seqlen_arg)
     comptime assert (
         TileTensor[dtype, XLayoutType, ImmutAnyOrigin].flat_rank == 3
         and TileTensor[wdtype, WLayoutType, ImmutAnyOrigin].flat_rank == 2
@@ -126,7 +132,7 @@ def fwd_kernel[
     var batch_id: Int = block_idx.y
 
     # ---- Load weight_vals once per block (fp32 registers) ----
-    var weight_vals = SIMD[accum_t, kWidth](0)
+    var weight_vals = SIMD[accum_t, next_power_of_two(kWidth)](0)
 
     comptime for k in range(kWidth):
         weight_vals[k] = weight[channel_id, k].cast[accum_t]()
@@ -376,9 +382,9 @@ def fwd_channellast_kernel[
     has_initial_states: Bool,
     apply_silu: Bool,
 ](
-    seqlen: Int,
-    dim: Int,
-    rows_per_block: Int,
+    seqlen_arg: Int32,
+    dim_arg: Int32,
+    rows_per_block_arg: Int32,
     x_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     w_ptr: UnsafePointer[Scalar[wdtype], MutAnyOrigin],
     bias_ptr: UnsafePointer[Scalar[wdtype], MutAnyOrigin],
@@ -434,6 +440,13 @@ def fwd_channellast_kernel[
     for TileTensor's comptime layout machinery to fold away, and the
     explicit address math keeps the prologue flat.
     """
+
+    # Mojo 1.0 rejects `Int`/`UInt` as device kernel arguments (not
+    # `DevicePassable`); take them as Int32 and widen here so the body
+    # keeps its `Int` arithmetic.
+    var seqlen = Int(seqlen_arg)
+    var dim = Int(dim_arg)
+    var rows_per_block = Int(rows_per_block_arg)
     comptime accum_t = DType.float32
     comptime kNElts: Int = kNEltsFwd[dtype]()
     # This thread still owns kNElts(dtype) channels, but the staged

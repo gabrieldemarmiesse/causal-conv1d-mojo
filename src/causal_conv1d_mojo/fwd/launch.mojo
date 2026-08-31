@@ -22,8 +22,8 @@ constructor so no fresh hipStream is created per call. Matches the
 pattern from `update/` and `bwd_full/`.
 """
 
-from std.gpu.host import DeviceContext
-from std.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
+from max.gpu.host import DeviceContext
+from max.gpu.host.device_context import _DeviceContextPtr, _DeviceContextCpp
 from std.math import ceildiv
 from std.memory import OpaquePointer
 from layout import TileTensor, Idx, TensorLayout
@@ -168,9 +168,9 @@ def launch_fwd[
             var stream_cl = ctx.create_external_stream(stream_opaque)
             stream_cl.enqueue_function(
                 compiled_cl,
-                seqlen_int,
-                dim_int,
-                rows_per_block,
+                Int32(seqlen_int),
+                Int32(dim_int),
+                Int32(rows_per_block),
                 x_ptr,
                 w_ptr,
                 b_ptr,
@@ -193,9 +193,9 @@ def launch_fwd[
         else:
             ctx.enqueue_function(
                 compiled_cl,
-                seqlen_int,
-                dim_int,
-                rows_per_block,
+                Int32(seqlen_int),
+                Int32(dim_int),
+                Int32(rows_per_block),
                 x_ptr,
                 w_ptr,
                 b_ptr,
@@ -290,7 +290,7 @@ def launch_fwd[
             var stream = ctx.create_external_stream(stream_opaque)
             stream.enqueue_function(
                 compiled,
-                seqlen_int,
+                Int32(seqlen_int),
                 x_tt,
                 w_tt,
                 b_ptr,
@@ -303,7 +303,7 @@ def launch_fwd[
         else:
             ctx.enqueue_function(
                 compiled,
-                seqlen_int,
+                Int32(seqlen_int),
                 x_tt,
                 w_tt,
                 b_ptr,

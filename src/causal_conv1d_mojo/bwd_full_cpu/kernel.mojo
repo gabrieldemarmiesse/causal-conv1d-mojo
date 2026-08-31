@@ -43,7 +43,8 @@ plain-store each row's partial into a private batch-major fp32 workspace;
 Python reduces it over batch in a fixed order.
 """
 
-from std.algorithm import sync_parallelize
+from max.algorithm import sync_parallelize
+from std.bit import next_power_of_two
 from std.atomic import Atomic, Ordering
 from std.math import exp, recip
 from std.sys import size_of
@@ -77,7 +78,7 @@ def _dpre_scalar[
     t: Int,
     seqlen: Int,
     bias_v: Float32,
-    weights: SIMD[DType.float32, width],
+    weights: SIMD[DType.float32, next_power_of_two(width)],
     x_row: UnsafePointer[Scalar[dtype], MutAnyOrigin],
     x_ls: Int,
     dout_row: UnsafePointer[Scalar[dtype], MutAnyOrigin],
@@ -225,12 +226,12 @@ def bwd_kernel_cpu[
             comptime if has_bias:
                 bias_v = bias_ptr[d].cast[accum_t]()
 
-            var weights = SIMD[accum_t, width](0)
+            var weights = SIMD[accum_t, next_power_of_two(width)](0)
 
             comptime for k in range(width):
                 weights[k] = w_ptr[d * w_cs + k * w_ws].cast[accum_t]()
 
-            var local_dweight = SIMD[accum_t, width](0)
+            var local_dweight = SIMD[accum_t, next_power_of_two(width)](0)
             var local_dbias: Scalar[accum_t] = 0
 
             # ---- initial_states contributions ----
@@ -240,7 +241,7 @@ def bwd_kernel_cpu[
             # gated against seq_idx[b, 0], matching the virtual ids used
             # by forward even when the first fragment is shorter than W-1.
             comptime if has_initial_states:
-                var dpre_head = SIMD[accum_t, width](0)
+                var dpre_head = SIMD[accum_t, next_power_of_two(width)](0)
 
                 comptime for i in range(width - 1):
                     dpre_head[i] = _dpre_scalar[
@@ -447,7 +448,7 @@ def bwd_kernel_cpu[
             else:
                 # ---- scalar sliding-window fallback (seq_idx and/or
                 # non-unit strides). dpre_win[k] = dpre[t + k]. ----
-                var dpre_win = SIMD[accum_t, width](0)
+                var dpre_win = SIMD[accum_t, next_power_of_two(width)](0)
 
                 comptime for k in range(width):
                     dpre_win[k] = _dpre_scalar[

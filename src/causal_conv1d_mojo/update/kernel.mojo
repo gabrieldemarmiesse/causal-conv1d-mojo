@@ -89,6 +89,7 @@ scalar indexing. x/state/out accesses in the token loop are scalar and
 therefore safe for offset views such as `big[:, :, 5]`.
 """
 
+from std.bit import next_power_of_two
 from std.gpu import block_idx, thread_idx
 from std.gpu.globals import MAX_THREADS_PER_BLOCK_METADATA
 from std.sys import size_of
@@ -191,7 +192,7 @@ def update_kernel[
     # Force a single wide load for all `width` weight values of this
     # channel. amdgcn won't fold (width=4) `global_load_ushort`s into a
     # single `global_load_dwordx2` without a hand-typed vec load.
-    var weights = SIMD[accum_t, width](0)
+    var weights = SIMD[accum_t, next_power_of_two(width)](0)
     comptime if weight_vec_aligned:
         var w_vec = w_lane.load[
             width=width, alignment = size_of[wdtype]() * width
@@ -208,7 +209,7 @@ def update_kernel[
 
     var sl: Int32 = state_len
     var advance_len: Int32 = seqlen
-    var x_vals = SIMD[accum_t, width](0)
+    var x_vals = SIMD[accum_t, next_power_of_two(width)](0)
     var update_idx: Int32 = 0
 
     comptime if is_circular:
@@ -240,13 +241,21 @@ def update_kernel[
 
         # Phase 2 (linear): read trailing W-1 history into x_vals (with
         # writeback for the small-state_len edge case).
-        var state_vals = SIMD[dtype, width - 1](0)
+        var state_vals = SIMD[dtype, next_power_of_two(width - 1)](0)
+        # `width - 1` is 2 or 3 here, and Mojo 1.0 only vector-loads a
+        # power-of-two lane count, so width == 4 takes its first two
+        # history elements as a vector and the last one scalar.
+        comptime kStateVecW: Int = 2
         comptime if state_contig and (width == 3 or width == 4):
-            var s_vec = state_lane.load[width = width - 1, alignment=2](
+            var s_vec = state_lane.load[width=kStateVecW, alignment=2](
                 Int((sl - Int32(width - 1)) * state_l_stride)
             )
-            comptime for i in range(width - 1):
+            comptime for i in range(kStateVecW):
                 state_vals[i] = s_vec[i]
+
+            comptime for i in range(kStateVecW, width - 1):
+                var read_idx: Int32 = sl - Int32(width - 1) + Int32(i)
+                state_vals[i] = state_lane[Int(read_idx * state_l_stride)]
         else:
             comptime for i in range(width - 1):
                 var read_idx: Int32 = sl - Int32(width - 1) + Int32(i)

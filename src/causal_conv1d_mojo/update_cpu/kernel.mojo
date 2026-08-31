@@ -23,7 +23,8 @@ to the one-shot forward — tests pin that at zero tolerance for
 fp16/bf16.
 """
 
-from std.algorithm import sync_parallelize
+from max.algorithm import sync_parallelize
+from std.bit import next_power_of_two
 from std.sys.info import num_logical_cores
 
 from _silu import _silu_f32
@@ -94,7 +95,7 @@ def update_kernel_cpu[
                 state_batch_coord * state_bs + d * state_cs
             )
 
-            var weights = SIMD[accum_t, width](0)
+            var weights = SIMD[accum_t, next_power_of_two(width)](0)
 
             comptime for k in range(width):
                 weights[k] = w_ptr[d * w_cs + k * w_ws].cast[accum_t]()
@@ -113,7 +114,7 @@ def update_kernel_cpu[
                     update_idx += state_len
 
             var advance_len = seqlen
-            var x_vals = SIMD[accum_t, width](0)
+            var x_vals = SIMD[accum_t, next_power_of_two(width)](0)
 
             comptime if not is_circular:
                 # Phase 1 (linear): shift state left by `seqlen`.
